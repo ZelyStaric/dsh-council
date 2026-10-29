@@ -1070,6 +1070,7 @@ export function createHandler(ctx, config = {}) {
             if (route === '/members') {
               if (body.id) {
                 const member = state.members.find((m) => m.id === body.id)
+                if (!member) return send(res, 404, { error: 'member not found: ' + body.id })
                 if (member) {
                   const kindChanged = body.kind !== undefined && body.kind !== member.kind
                   Object.assign(member, pick(body, ['name', 'kind', 'model', 'provider', 'providerId', 'roleId', 'cwd']))
