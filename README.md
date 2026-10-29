@@ -7,10 +7,15 @@
 ## 安装
 
 ```bash
-# DSH 里
-plugin_manager install_bundle --target dsh-council
-# 或本地目录
+# 从 GitHub 克隆后安装（推荐）
+git clone https://github.com/ZelyStaric/dsh-council
+plugin_manager install_bundle --target ./dsh-council
+
+# 或直接用目录路径
 plugin_manager install_bundle --target /path/to/dsh-council
+
+# 或 npm 安装（如已发布）
+plugin_manager install_bundle --target @zelystaric/dsh-council
 ```
 
 安装后在任意会话顶部点 `小组模式`，进「小组」页配置成员。
