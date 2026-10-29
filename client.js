@@ -363,6 +363,7 @@ window.__ModuleLoader__.load({
             ['council-image-key', 'imageKey'],
             ['council-codex-base', 'codexBase'],
             ['council-claude-base', 'claudeBase'],
+            ['council-proxy-url', 'proxyUrl'],
           ]
           for (const [id, key] of pairs) {
             const value = read(id)
@@ -387,10 +388,12 @@ window.__ModuleLoader__.load({
             h('input', { id: 'council-claude-key', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'claude key' + (info.hasClaudeKey ? ' · 已配置' : '') }),
             h(Button, { onClick: () => clearKey('claudeKey') }, '清空'),
             h('input', { id: 'council-image-key', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt-image key' + (info.hasImageKey ? ' · 已配置' : '') }),
-            h(Button, { onClick: () => clearKey('imageKey') }, '清空')),
+            h(Button, { onClick: () => clearKey('imageKey') }, '清空'),
+            h(Button, { onClick: () => clearKey('proxyUrl') }, '清空代理')),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 } },
             h('input', { id: 'council-codex-base', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.codexBase || '', placeholder: 'codex base URL' }),
-            h('input', { id: 'council-claude-base', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.claudeBase || '', placeholder: 'claude base URL' }),
+            h('input', { id: 'council-claude-base', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.claudeBase || '', placeholder: 'claude base URL（留空=用 profile）' }),
+            h('input', { id: 'council-proxy-url', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.proxyUrl || '', placeholder: '代理 http://127.0.0.1:7897（可选，官方 key 才需要）' }),
             h(Button, { onClick: save }, '保存 API 配置')),
           h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) }, '只提交填了值的项：留空 = 保持原样，要删除请点对应的「清空」。保存后立即生效。'))
       }
