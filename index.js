@@ -1534,7 +1534,15 @@ function bindAgent(ctx, config, group, agent) {
         state.delegations = state.delegations || {}
         const history = state.delegations[sid || 'local'] || { entries: [] }
         const firstTask = String((assignments[0] && assignments[0].task) || '').split('\n').find((line) => line.trim()) || ''
-        const entry = { at: Date.now(), request: userText || '', brief: firstTask.trim().slice(0, 80), text: '', running: true }
+        const currentSeq = () => {
+          try {
+            const evs = sessionEvents(exec.agent.session)
+            const last = evs[evs.length - 1]
+            return last && typeof last.seq === 'number' ? last.seq : undefined
+          } catch { return undefined }
+        }
+        const startSeq = currentSeq()
+        const entry = { at: Date.now(), request: userText || '', brief: firstTask.trim().slice(0, 80), text: '', running: true, startSeq }
         history.entries = (history.entries || []).concat([entry])
         if (history.entries.length > 50) history.entries = history.entries.slice(-50)
         history.at = Date.now()
@@ -1612,6 +1620,7 @@ function bindAgent(ctx, config, group, agent) {
           const progressEntry = progressMap.get(callId)
           if (progressEntry) progressEntry.finishedAt = Date.now()
         }
+        entry.endSeq = currentSeq()
         entry.running = false
         history.at = Date.now()
         history.text = entry.text
