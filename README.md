@@ -62,6 +62,18 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
 - `claude` 通过 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 传给 CLI，所以官方与中转走的是同一条路；
 - `codex` 会用它自己生成的 `~/.dsh/storages/council-codex/config.toml`（内含 `model_providers.council` 与 bearer token），**不改你 `~/.codex` 里的配置**；没配 base/key 时才回退到你自己的 `~/.codex`。
 
+### 用官方 key 需要代理时
+
+只填官方 key、base 留空会自动走官方端点（`api.openai.com` / `api.anthropic.com`）。如果本机直连官方不通，在 ① 卡片最右的输入框填本机代理地址（Clash 混合端口）：
+
+```
+http://127.0.0.1:7897
+```
+
+- 只影响**插件自己发起的请求**（模型列表、出图、用量）以及 claude / codex CLI 子进程的环境变量；
+- **代理没起来时会自动回退直连**并打日志，不会把整个插件拖死；
+- 用中转站时不需要填（填了会多一跳）。
+
 ## 成员框架
 
 | kind | 跑什么 | 说明 |

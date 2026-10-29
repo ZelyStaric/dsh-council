@@ -9,8 +9,10 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
+import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const STATE_FILE = path.join(DSH_HOME, 'storages', 'council.json')
@@ -184,7 +186,7 @@ async function runImage(member, prompt, config) {
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.5-flare'
   try {
-    const response = await fetch(rootUrl(apiSettings(config).codexBase) + '/v1/images/generations', {
+    const response = await fetch(rootUrl(apiSettings(config).codexBase || defaultBase('openai', apiSettings(config).imageKey)) + '/v1/images/generations', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' }),
@@ -452,15 +454,79 @@ function apiSettings(config) {
   const own = (state && state.config) || {}
   return {
     claudeKey: own.claudeKey || config.claudeApiKey || '',
-    claudeBase: rootUrl(own.claudeBase || config.claudeBaseUrl || ''),
+    claudeBase: rootUrl(own.claudeBase || config.claudeBaseUrl || '') || defaultBase('claude', own.claudeKey || config.claudeApiKey),
     imageKey: own.imageKey || config.imageApiKey || '',
     codexToken: own.codexToken || '',
-    codexBase: rootUrl(own.codexBase || config.codexBaseUrl || ''),
+    codexBase: rootUrl(own.codexBase || config.codexBaseUrl || '') || defaultBase('openai', own.codexToken),
   }
 }
 
 
+
+
+/* ── 代理支持：只影响插件自己发出的 HTTP 请求（官方端点在国内需要它） ── */
+let proxyApplied = null
+
+async function loadUndici() {
+  const argv1 = process.argv[1] ? path.dirname(process.argv[1]) : ''
+  const candidates = []
+  if (argv1) candidates.push(path.join(argv1, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', 'undici', 'index.js'))
+  for (const file of candidates) {
+    if (existsSync(file)) {
+      try { return await import(pathToFileURL(file).href) } catch { /* 试下一个 */ }
+    }
+  }
+  try { return await import('undici') } catch { return null }
+}
+
+/** 配置了 proxyUrl 就把它设成全局 dispatcher；返回实际生效的代理地址。 */
+async function applyProxy(config) {
+  const url = String((state.config && state.config.proxyUrl) || config.proxyUrl || '').trim()
+  if (!url) { proxyApplied = null; return '' }
+  if (proxyApplied === url) return url
+  // 代理没起来时不要让所有请求一起死：先探一下端口，连不上就直连
+  const reachable = await new Promise((resolve) => {
+    try {
+      const u = new URL(url)
+      const socket = net.connect({ host: u.hostname, port: Number(u.port) || 80, timeout: 800 }, () => { socket.destroy(); resolve(true) })
+      socket.on('error', () => resolve(false))
+      socket.on('timeout', () => { socket.destroy(); resolve(false) })
+    } catch { resolve(false) }
+  })
+  if (!reachable) {
+    console.error('[council] 代理不可达，本次直连：' + url)
+    proxyApplied = null
+    return ''
+  }
+  const undici = await loadUndici()
+  if (!undici || !undici.ProxyAgent) {
+    console.error('[council] proxyUrl 已配置但 undici 不可用，请求将继续直连')
+    return ''
+  }
+  try {
+    undici.setGlobalDispatcher(new undici.ProxyAgent(url))
+    proxyApplied = url
+    return url
+  } catch (error) {
+    console.error('[council] 代理设置失败:', String(error?.message ?? error))
+    return ''
+  }
+}
+
+/** 只填了 key 时的官方默认地址推断（填了 URL 的一律用填的） */
+function defaultBase(kind, key) {
+  const k = String(key || '')
+  if (kind === 'claude') return k.startsWith('sk-ant-') ? 'https://api.anthropic.com' : ''
+  if (kind === 'openai') return k ? 'https://api.openai.com' : ''
+  return ''
+}
+
 /** 把用户填的 base 归一成根地址（去掉尾部 / 与 /v1），各处调用时再拼自己的路径 */
+function proxyEnv(config) {
+  const url = String((state.config && state.config.proxyUrl) || config.proxyUrl || '').trim()
+  return url ? { HTTP_PROXY: url, HTTPS_PROXY: url, http_proxy: url, https_proxy: url } : {}
+}
+
 function rootUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '').replace(/\/v1$/, '').replace(/\/+$/, '')
 }
@@ -502,13 +568,13 @@ async function ensureCodexHome(config) {
 async function envFor(kind, config) {
   if (kind === 'claude') {
     const settings = apiSettings(config)
-    return {
+    return Object.assign({
       ANTHROPIC_BASE_URL: rootUrl(settings.claudeBase) || undefined,
       ANTHROPIC_API_KEY: settings.claudeKey || undefined,
-    }
+    }, proxyEnv(config))
   }
   const home = await ensureCodexHome(config)
-  return home ? { CODEX_HOME: home } : {}
+  return Object.assign({}, home ? { CODEX_HOME: home } : {}, proxyEnv(config))
 }
 
 /** The member playing a named role inside one group (指挥 / 审校). */
@@ -557,6 +623,7 @@ function verdictOf(text) {
 
 
 async function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs) {
+  await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
   let result
   if (member.kind === 'image') {
@@ -932,6 +999,7 @@ export function createHandler(ctx, config = {}) {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const route = url.pathname.replace(/^\/council\/api/, '') || '/'
         try {
+          await applyProxy(config)
           if (req.method === 'GET' && route === '/state') {
             return send(res, 200, { state, config: publicConfig(config) })
           }
@@ -1163,8 +1231,12 @@ export function createHandler(ctx, config = {}) {
                   reuseChildren: Boolean((state.config || {}).reuseChildren),
                   claudeBase: own.claudeBase || '',
                   codexBase: own.codexBase || '',
+                  proxyUrl: own.proxyUrl || '',
+                  hasProxy: Boolean(own.proxyUrl),
                   claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
                   codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
+                  proxyUrl: own.proxyUrl || '',
+                  hasProxy: Boolean(own.proxyUrl),
                   source: own.claudeKey || own.imageKey || own.codexToken ? 'page' : 'profile',
                 },
               })
@@ -1172,7 +1244,7 @@ export function createHandler(ctx, config = {}) {
             if (req.method === 'POST') {
               const body = await readBody(req)
               const next = Object.assign({}, state.config || {})
-              for (const key of ['codexToken', 'claudeKey', 'imageKey', 'claudeBase', 'codexBase']) {
+              for (const key of ['codexToken', 'claudeKey', 'imageKey', 'claudeBase', 'codexBase', 'proxyUrl']) {
                 if (typeof body[key] === 'string') {
                   if (body[key] === '') delete next[key]
                   else next[key] = body[key]
@@ -1184,6 +1256,7 @@ export function createHandler(ctx, config = {}) {
               catalog = null
               await save()
               const settings = apiSettings(config)
+              const own = state.config || {}
               return send(res, 200, {
                 config: {
                   hasCodexToken: Boolean(settings.codexToken),
@@ -1192,8 +1265,12 @@ export function createHandler(ctx, config = {}) {
                   reuseChildren: Boolean((state.config || {}).reuseChildren),
                   claudeBase: own.claudeBase || '',
                   codexBase: own.codexBase || '',
+                  proxyUrl: own.proxyUrl || '',
+                  hasProxy: Boolean(own.proxyUrl),
                   claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
                   codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
+                  proxyUrl: own.proxyUrl || '',
+                  hasProxy: Boolean(own.proxyUrl),
                   source: 'page',
                 },
               })
@@ -1546,6 +1623,7 @@ async function modelCatalog(ctx, config) {
     const response = await fetch(claudeModelsBase + '/v1/models', {
       headers: { 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01' },
     })
+    if (!response.ok) throw new Error('HTTP ' + response.status + '（claude 模型列表）')
     if (response.ok) {
       const data = await response.json()
       value.claude = (data.data ?? []).map((m) => m.id).filter((id) => String(id).startsWith('claude'))
