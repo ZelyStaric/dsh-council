@@ -1,5 +1,5 @@
 - insert:
     - id: council
-      name: '@local/dsh-council'
+      name: '@zelystaric/dsh-council'
       config:
         claudeBaseUrl: https://apiclaude.cc
