@@ -1,5 +1,5 @@
 - insert:
+    # 不内置任何厂商地址与密钥：全部在「小组」页 ① 里填（或用 profile 的 config 覆盖）。
+    # 可覆盖的配置项见 README「首次配置」。
     - id: council
       name: '@zelystaric/dsh-council'
-      config:
-        claudeBaseUrl: https://apiclaude.cc

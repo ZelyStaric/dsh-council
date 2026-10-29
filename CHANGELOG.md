@@ -2,6 +2,19 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.4] — 2026-10-29
+
+在**另一台全新 Ubuntu 24.04**（Node 22 + 全新 profile + 从 tarball 安装）上实测部署后发现并修复。
+
+### 修复
+- **分发包里残留厂商默认地址**：`cordis.patch.yml` 原来内置 `claudeBaseUrl: https://apiclaude.cc`，在别人机器上会指向错误中转；现已移除，配置全部由页面或 profile 提供。
+- **缺少 CLI 时报错不明确**：`codex` / `claude` 不存在时，原先只会得到 `spawn ... ENOENT`；现在先探测可执行文件，直接返回「未找到 codex CLI（…）。安装 Codex，或用环境变量 COUNCIL_CODEX_BIN 指定绝对路径」。
+
+### 验证
+- 全新机器上 `plugin_manager/pnpm` 安装 → `dsh web --port 3099` 启动 → `/council/api/state` 200；
+- `roles / members / groups` 增删查、`/models`、`/usage`、`/progress` 全部正常返回；
+- 重启后状态持久化（`~/.dsh/storages/council.json`）。
+
 ## [0.2.3] — 2026-10-29
 
 修复验收与执行混淆的问题（来自第三方代码审查，四个发现全部确认并修复）。
