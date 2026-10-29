@@ -2,6 +2,20 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.3] — 2026-10-29
+
+修复验收与执行混淆的问题（来自第三方代码审查，四个发现全部确认并修复）。
+
+### 修复
+- **审核 `null`（未判定）不再当作通过**：`unverified` 与 `rejected` 一样触发一次返工；
+- **返工失败不再静默丢弃**：记录 `reworkError`，`attempts` 按实际尝试次数计（返工失败也计 2），首次产出仍保留；
+- **执行成功 ≠ 验收通过**：`callMember` 新增 `accepted`（布尔）与 `acceptance`（`passed` / `rejected` / `unverified` / `rework-failed` / `none` / `skipped`），`ok` 语义保持不变（仍表示「成员是否产出了东西」）；
+- `executeRun` 的状态映射改为：被否 → `rejected`，返工失败 → `failed`，通过/无审校 → `done`，并把 `acceptance` 写入 run 记录；
+- 工具回执与气泡新增「验收（小组）」一行，明确写出未通过原因。
+
+### 已知
+- `ok` 目前仍表示执行状态而非验收状态；如需 `ok` 直接反映验收，属于破坏性变更，留待后续版本。
+
 ## [0.2.2] — 2026-10-29
 
 ### 新增
