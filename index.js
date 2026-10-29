@@ -22,6 +22,18 @@ const PROFILE_CANDIDATES = [
   path.join(os.homedir(), '.dsh', 'profiles', 'web'),
 ].filter(Boolean)
 const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
+
+/** 命令是否存在：避免 spawn 失败时只抛 ENOENT。 */
+async function commandExists(bin) {
+  if (!bin) return false
+  if (bin.includes('/')) return existsSync(bin)
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  for (const dir of dirs) {
+    if (existsSync(path.join(dir, bin))) return true
+  }
+  return false
+}
+
 function claudeBinary() {
   if (process.env.COUNCIL_CLAUDE_BIN) return process.env.COUNCIL_CLAUDE_BIN
   for (const dir of PROFILE_CANDIDATES) {
@@ -149,12 +161,16 @@ async function runCodex({ cwd, model, resume, prompt, env }) {
 
 /** One Claude Code turn. Resumes the stored session when present. */
 async function runClaude({ cwd, model, resume, prompt, env, noTools }) {
+  const claudeBin = claudeBinary()
+  if (!(await commandExists(claudeBin))) {
+    return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
+  }
   const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose',
     '--permission-mode', 'bypassPermissions']
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   if (resume) args.push('--resume', resume)
-  const { code, out, err } = await run(claudeBinary(), args, { cwd, env })
+  const { code, out, err } = await run(claudeBin, args, { cwd, env })
   const events = jsonLines(out)
   const texts = []
   for (const event of events) {

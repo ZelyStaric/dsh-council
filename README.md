@@ -129,6 +129,23 @@ const AVATAR_FILE = {
 
 **按钮文案 / 页面标题**：`locale/{zh,en}.json` 的 `meta.title`、`meta.description` 改了就生效（刷新页面）。
 
+### 外部 CLI 的路径
+
+`codex` 与 `claude` 默认从 `PATH` 找；找不到时会直接报
+
+```
+未找到 codex CLI（codex）。安装 Codex，或用环境变量 COUNCIL_CODEX_BIN 指定绝对路径。
+```
+
+也可以显式指定：
+
+```bash
+export COUNCIL_CODEX_BIN=/usr/local/bin/codex
+export COUNCIL_CLAUDE_BIN=/path/to/claude
+```
+
+`claude` 若装了 `dsh-subagent-claude-code` bundle，会自动用 bundle 自带的二进制。
+
 ## 兼容性
 
 - 仅测试于 `dsh` **0.2.1-rc.2**（用到 subagent seam、`uiConversation` 等内部 API）；
