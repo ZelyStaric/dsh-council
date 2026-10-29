@@ -46,6 +46,22 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
 
 > 页面里的 base 留空 = 用 profile 里的；页面填了会覆盖它。
 
+### 官方 key 与中转站都能直接用
+
+三个框架的凭据都从插件配置里取（页面 ① 或 profile 的 `cordis.patch.yml`），**填官方 key 就是官方通道，填中转 key 就是中转通道**：
+
+| 成员 | 填什么 | 官方 | 中转站 |
+|---|---|---|---|
+| `claude` | `claudeBase` + `claudeKey` | 地址 `https://api.anthropic.com`，模型如 `claude-sonnet-4-5` | 地址如 `https://your-relay` |
+| `image` | `codexBase` + `imageKey` | 地址 `https://api.openai.com`，模型 `gpt-image-1` | 地址如 `https://your-relay`，模型按中转提供的写 |
+| `codex` | `codexBase` + `codexToken`（或 codex 成员的 `~/.codex` 配置） | 地址 `https://api.openai.com`，`codexWireApi` 默认 `responses` | 地址如 `https://your-relay` |
+
+实现细节（排障时有用）：
+
+- base 会被**归一成根地址**（自动去掉尾部 `/` 与 `/v1`），各调用点再拼 `/v1/models`、`/v1/images/generations`、`/v1/usage`；
+- `claude` 通过 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 传给 CLI，所以官方与中转走的是同一条路；
+- `codex` 会用它自己生成的 `~/.dsh/storages/council-codex/config.toml`（内含 `model_providers.council` 与 bearer token），**不改你 `~/.codex` 里的配置**；没配 base/key 时才回退到你自己的 `~/.codex`。
+
 ## 成员框架
 
 | kind | 跑什么 | 说明 |
