@@ -627,12 +627,37 @@ const WORK_STYLE = '\n\n【工作方式】你可以使用你所在框架的全�
 
 /** Parse one {"ok":boolean,"reason":string} verdict from free text. */
 function verdictOf(text) {
-  const match = String(text || '').match(/\{[\s\S]*\}/)
-  if (!match) return null
-  try {
-    const value = JSON.parse(match[0])
-    return { ok: value.ok === true, reason: String(value.reason ?? '') }
-  } catch { return null }
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  const stripped = raw.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim()
+  const pick = (obj) => (obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, 'ok')
+    ? { ok: obj.ok === true, reason: String(obj.reason ?? '') }
+    : null)
+  // 1) 整段就是 JSON
+  try { const whole = pick(JSON.parse(stripped)); if (whole) return whole } catch { /* 继续 */ }
+  // 2) 扫描所有「大括号配平」片段，从后往前取第一个带 ok 字段的
+  const candidates = []
+  for (let i = 0; i < stripped.length; i += 1) {
+    if (stripped[i] !== '{') continue
+    let depth = 0
+    for (let j = i; j < stripped.length; j += 1) {
+      if (stripped[j] === '{') depth += 1
+      else if (stripped[j] === '}') {
+        depth -= 1
+        if (depth === 0) { candidates.push(stripped.slice(i, j + 1)); i = j; break }
+      }
+    }
+  }
+  for (const candidate of candidates.reverse()) {
+    try { const parsed = pick(JSON.parse(candidate)); if (parsed) return parsed } catch { /* 继续 */ }
+  }
+  // 3) 兜底：reason 里带裸双引号会让 JSON 非法，用正则把结论捞出来
+  const okMatch = stripped.match(/"ok"\s*:\s*(true|false)/i)
+  if (okMatch) {
+    const reasonMatch = stripped.match(/"reason"\s*:\s*"([\s\S]*?)"\s*[,}]/)
+    return { ok: okMatch[1].toLowerCase() === 'true', reason: reasonMatch ? reasonMatch[1].replace(/\\"/g, '"') : '' }
+  }
+  return null
 }
 
 /** One turn on the member's own framework, preserving its session and tools. */
@@ -687,9 +712,10 @@ async function selfReview(ctx, member, task, output, config, group, styleOverrid
   const result = await runKind(ctx, member, prompt, config, group, undefined, parent)
   let parsed = verdictOf(result.text)
   if (parsed === null && result.ok) {
-    const retry = await runKind(ctx, member, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group)
+    const retry = await runKind(ctx, member, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent)
     parsed = verdictOf(retry.text)
   }
+  if (parsed === null) console.error('[council] selfReview unparsed raw:', JSON.stringify(String(result.text || '').slice(0, 400)))
   const verdict = parsed ?? { ok: null, reason: result.ok ? '自审输出无法解析（已重试一次）' : (result.error || '自审失败') }
   verdict.by = member.name
   return verdict
