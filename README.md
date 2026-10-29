@@ -31,7 +31,7 @@ plugin_manager install_bundle --target /path/to/dsh-council
 ```yaml
 - insert:
     - id: council
-      name: '@local/dsh-council'
+      name: '@zelystaric/dsh-council'
       config:
         claudeBaseUrl: https://your-relay      # claude 成员用
         defaultWorkspace: /your/workspace      # 成员的工作目录

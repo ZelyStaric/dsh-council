@@ -1,6 +1,6 @@
 # AGENTS.md — `~/LLM/dsh-council`
 
-DSH Web 插件「小组」的实现目录（bundle `@local/dsh-council`）。
+DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）。
 **这里只放操作要点与指针**；设计、数据模型、源码结构在专题文档里。
 
 ## 指针（先读这些，别在代码里猜）

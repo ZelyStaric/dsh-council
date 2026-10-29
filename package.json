@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-council",
+  "name": "@zelystaric/dsh-council",
   "version": "0.2.0",
   "type": "module",
   "exports": {
@@ -44,5 +44,9 @@
   "engines": {
     "dsh": ">=0.2.1-rc.2"
   },
-  "author": "nanami"
+  "author": "nanami",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZelyStaric/dsh-council.git"
+  }
 }
