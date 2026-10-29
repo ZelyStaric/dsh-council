@@ -1036,7 +1036,19 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearInterval(timer) }
       }, [])
 
-      const entry = (state && state.delegations && state.delegations[sessionId]) || null
+      const history = (state && state.delegations && state.delegations[sessionId]) || null
+      const turnSeq = props && typeof props.seq === 'number' ? props.seq : null
+      // 一次派活属于某一轮：用「结束 seq ≤ 本轮 seq」里最近的一条，避免每条消息都显示最新内容
+      const pickEntry = () => {
+        const list = (history && history.entries) || []
+        if (!list.length) return null
+        const done = list.filter((e) => typeof e.endSeq === 'number')
+        if (turnSeq === null || !done.length) return list[list.length - 1]
+        const candidates = done.filter((e) => e.endSeq <= turnSeq)
+        if (candidates.length) return candidates[candidates.length - 1]
+        return done[0]
+      }
+      const entry = pickEntry()
       const entryAt = entry && entry.at ? entry.at : 0
 
       useEffect(() => {
