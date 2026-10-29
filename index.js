@@ -184,7 +184,7 @@ async function runImage(member, prompt, config) {
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.5-flare'
   try {
-    const response = await fetch(apiSettings(config).codexBase + '/v1/images/generations', {
+    const response = await fetch(rootUrl(apiSettings(config).codexBase) + '/v1/images/generations', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' }),
@@ -432,7 +432,7 @@ async function reviewImage(ctx, group, result, config, styleOverride) {
     cwd: group.workspacePath || config.defaultWorkspace || process.cwd(),
     model: reviewer.model,
     prompt,
-    env: envFor('claude', config),
+    env: await envFor('claude', config),
   })
   const match = String(review.text || '').match(/\{[\s\S]*\}/)
   let parsed = null
@@ -452,22 +452,63 @@ function apiSettings(config) {
   const own = (state && state.config) || {}
   return {
     claudeKey: own.claudeKey || config.claudeApiKey || '',
-    claudeBase: own.claudeBase || config.claudeBaseUrl || '',
+    claudeBase: rootUrl(own.claudeBase || config.claudeBaseUrl || ''),
     imageKey: own.imageKey || config.imageApiKey || '',
     codexToken: own.codexToken || '',
-    codexBase: own.codexBase || config.codexBaseUrl || '',
+    codexBase: rootUrl(own.codexBase || config.codexBaseUrl || ''),
   }
 }
 
-function envFor(kind, config) {
+
+/** 把用户填的 base 归一成根地址（去掉尾部 / 与 /v1），各处调用时再拼自己的路径 */
+function rootUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '').replace(/\/v1$/, '').replace(/\/+$/, '')
+}
+
+
+/** 用插件配置里的 base/key 生成一个独立 CODEX_HOME，官方 OpenAI 与中转站都能直接登录。 */
+async function ensureCodexHome(config) {
+  const settings = apiSettings(config)
+  const key = settings.codexToken || await codexToken()
+  const base = rootUrl(settings.codexBase)
+  if (!key && !base) return config.codexHome || undefined   // 完全没配 → 用用户自己的 ~/.codex
+  const dir = path.join(os.homedir(), '.dsh', 'storages', 'council-codex')
+  const wire = String(config.codexWireApi || 'responses')
+  const model = String(config.codexDefaultModel || '')
+  const authKey = key || ''
+  const lines = []
+  if (model) lines.push(`model = "${model}"`)
+  lines.push('model_provider = "council"')
+  lines.push('sandbox_mode = "danger-full-access"')
+  lines.push('')
+  lines.push('[model_providers.council]')
+  lines.push('name = "council"')
+  lines.push(`base_url = "${base ? base + '/v1' : 'https://api.openai.com/v1'}"`)
+  lines.push(`wire_api = "${wire}"`)
+  if (authKey) lines.push(`experimental_bearer_token = "${authKey.replace(/"/g, '')}"`)
+  const content = lines.join('\n') + '\n'
+  try {
+    const prev = await readFile(path.join(dir, 'config.toml'), 'utf8').catch(() => null)
+    if (prev !== content) {
+      await mkdir(dir, { recursive: true })
+      await writeFile(path.join(dir, 'config.toml'), content, 'utf8')
+    }
+  } catch (error) {
+    console.error('[council] codex home 生成失败:', String(error?.message ?? error))
+  }
+  return dir
+}
+
+async function envFor(kind, config) {
   if (kind === 'claude') {
     const settings = apiSettings(config)
     return {
-      ANTHROPIC_BASE_URL: settings.claudeBase,
-      ANTHROPIC_API_KEY: settings.claudeKey,
+      ANTHROPIC_BASE_URL: rootUrl(settings.claudeBase) || undefined,
+      ANTHROPIC_API_KEY: settings.claudeKey || undefined,
     }
   }
-  return config.codexHome ? { CODEX_HOME: config.codexHome } : {}
+  const home = await ensureCodexHome(config)
+  return home ? { CODEX_HOME: home } : {}
 }
 
 /** The member playing a named role inside one group (指挥 / 审校). */
@@ -537,7 +578,7 @@ async function runKind(ctx, member, prompt, config, group, styleOverride, parent
       model: member.model || undefined,
       resume: member.convId || undefined,
       prompt,
-      env: envFor(member.kind, config),
+      env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
     })
   }
@@ -801,7 +842,7 @@ async function commanderTurn(group, text, config, sessionKey) {
     model: group.commander?.model || undefined,
     resume: resumeId || undefined,
     prompt,
-    env: envFor(group.commander?.kind === 'claude' ? 'claude' : 'codex', config),
+    env: await envFor(group.commander?.kind === 'claude' ? 'claude' : 'codex', config),
   })
   if (result.convId) {
     if (sessionKey) sessions[sessionKey] = result.convId
@@ -1489,7 +1530,7 @@ async function modelCatalog(ctx, config) {
     const token = settings.codexToken || await codexToken()
     const codexBase = settings.codexBase || await codexCliBase()
     if (!codexBase) throw new Error('未配置 codex/gpt 中转地址（base）')
-    const response = await fetch(codexBase + '/v1/models', {
+    const response = await fetch(rootUrl(codexBase) + '/v1/models', {
       headers: token ? { authorization: 'Bearer ' + token } : {},
     })
     if (response.ok) {
@@ -1560,7 +1601,7 @@ async function keyUsage(config) {
     if (!source.token) { keys.push({ id: source.id, label: source.label, ok: false, error: 'no key' }); continue }
     if (!source.base) { keys.push({ id: source.id, label: source.label, ok: false, error: 'no base URL' }); continue }
     try {
-      const response = await fetch(source.base + '/v1/usage', { headers: { authorization: 'Bearer ' + source.token } })
+      const response = await fetch(rootUrl(source.base) + '/v1/usage', { headers: { authorization: 'Bearer ' + source.token } })
       if (!response.ok) { keys.push({ id: source.id, label: source.label, ok: false, error: 'HTTP ' + response.status }); continue }
       const data = await response.json()
       const days = Array.isArray(data.daily_usage) ? data.daily_usage : []
