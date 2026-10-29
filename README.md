@@ -74,6 +74,18 @@ http://127.0.0.1:7897
 - **代理没起来时会自动回退直连**并打日志，不会把整个插件拖死；
 - 用中转站时不需要填（填了会多一跳）。
 
+### 升级到新版本
+
+`dsh plugin add` **不会覆盖已安装的同名依赖**，换 tarball / 目录升级时要先移除：
+
+```bash
+dsh plugin --profile web remove @zelystaric/dsh-council
+dsh plugin --profile web add -w file:/path/to/zelystaric-dsh-council-0.2.4.tgz
+systemctl --user restart dsh-web        # 或重启你起的 dsh web
+```
+
+从 npm 安装时同理：`remove` 之后 `add @zelystaric/dsh-council@<version>`。
+
 ## 成员框架
 
 | kind | 跑什么 | 说明 |
