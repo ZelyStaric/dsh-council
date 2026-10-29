@@ -957,7 +957,17 @@ window.__ModuleLoader__.load({
         return () => { alive = false; councilListeners.delete(reload); clearInterval(timer) }
       }, [])
 
-      if (!sessionId) return null
+      if (!sessionId) {
+        // 还没建立会话（Hero 草稿态）：保留入口，点一下给出可操作的提示
+        const hint = '先发一条消息建立会话，再点小组模式'
+        return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+          h('span', {
+            style: Object.assign({}, styles.chip, { cursor: 'pointer' }),
+            title: hint,
+            onClick: () => setError(hint),
+          }, '单人模式'),
+          error ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 } ) }, error) : null)
+      }
       if (!state) {
         return h('span', { style: styles.chip }, error ? '小组状态未知' : '模式…')
       }
