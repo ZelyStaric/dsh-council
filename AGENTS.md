@@ -30,6 +30,32 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
    ```
    ⚠️ 曾经因为漏跑冒烟把整个客户端插件搞崩过一次（`ReferenceError` / 括号不匹配），别再犯。
 
+
+## 包名变更 checklist（改一次踩过两次坑，必须四处同步）
+
+包名出现在 **4 个地方**，漏一处就会出现「插件消失 / 按钮不见 / bundle 被跳过」：
+
+| # | 位置 | 症状（漏改时） |
+|---|---|---|
+| 1 | `package.json` 的 `name` | 打包名与运行时不一致 |
+| 2 | `cordis.patch.yml` 的 `name` | `dsh: skipping profile bundle ... cannot resolve` → 宿主半不挂载，`/state` 404 |
+| 3 | profile 的三处：`dependencies`、`dsh.profile.bundles`、`node_modules/<scope>/<name>` 符号链接 | 同上（宿主半 404） |
+| 4 | **`client.js` 首行 `__ModuleLoader__.load({ id })`** | 宿主正常但**客户端不加载**：单人/小组胶囊、群聊/小组 tab、进度条、名册浮层全部消失 |
+
+改完必须：
+
+```bash
+node --check index.js && node --check client.js
+node tests/render-smoke.mjs          # 客户端组件树
+systemctl --user restart dsh-web     # Host 改动
+curl -s $B/state                     # 必须 200
+journalctl --user -u dsh-web --since '-2min' | grep -c "skipping profile bundle"   # 必须 0
+```
+
+再刷新页面确认胶囊与 tab 存在（客户端 id 是否对上，只能靠肉眼）。
+
+改 profile 前先备份：`cp ~/.dsh/profiles/web/package.json ~/.dsh/profiles/web/package.json.bak-$(date +%H%M%S)`。
+
 ## 常用自检
 
 ```bash
