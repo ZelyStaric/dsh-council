@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-council',
+  id: '@zelystaric/dsh-council',
   factory(require) {
     const React = require('react')
     const h = React.createElement
