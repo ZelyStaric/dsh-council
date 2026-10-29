@@ -33,7 +33,16 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
 | `image` 成员（出图） | OpenAI `/v1/images/generations` | ① 卡片的 gpt-image key |
 | `claude` 成员（Anthropic 系） | Anthropic `/v1/messages` | ① 卡片的 claude key + claude base URL |
 
-3. 也可以不填页面，改 profile 的 `cordis.patch.yml`：
+3. **首次使用的顺序**（全新安装时很重要）：
+
+   ```
+   ① 先发一条消息，建立一个会话
+   ② 点顶部「小组模式」（Hero 草稿态点它会提示先建会话）
+   ③ 进「小组」页填密钥、确认名册
+   ④ 再派活
+   ```
+
+4. 也可以不填页面，改 profile 的 `cordis.patch.yml`：
 
 ```yaml
 - insert:

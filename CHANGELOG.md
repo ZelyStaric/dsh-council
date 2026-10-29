@@ -12,6 +12,10 @@
 
 - **更新不存在的成员时静默成功**：`POST /members` 带未知 `id` 现在返回 `404 member not found`，不再假装成功。
 
+### 变更
+- **首次使用提示**：全新安装时 Hero 还没有会话，点「单人模式」胶囊会提示「先发一条消息建立会话，再点小组模式」（此前点击无反应）。
+- README 增加「首次使用的顺序」四步。
+
 ### 验证
 - 全新机器上 `plugin_manager/pnpm` 安装 → `dsh web --port 3099` 启动 → `/council/api/state` 200；
 - `roles / members / groups` 增删查、`/models`、`/usage`、`/progress` 全部正常返回；
