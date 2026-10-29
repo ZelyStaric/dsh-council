@@ -64,6 +64,39 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
 - 3D：`blender`（无头）、`openscad`、`python3 -m pip install trimesh pygltflib`
 - 动画：`ffmpeg`、Pillow
 
+
+## 自定义外观（头像、名字、气泡）
+
+**头像**：默认是内置的三张 SVG 占位图。想换成自己的角色，只要把 **192×192 的 PNG** 放进
+
+```
+~/.dsh/storages/council-images/
+├── avatar-codex-small.png      # codex / GPT 成员
+├── avatar-claude-small.png     # claude 成员
+└── avatar-deepseek-small.png   # deepseek 成员
+```
+
+画师（`image`）默认复用 `avatar-codex-small.png`。文件不存在时**自动回退**到内置 SVG，
+所以想换哪个换哪个、删掉也安全。文件名不对或不想要这套命名，改 `client.js` 里的 `AVATAR_FILE` 映射即可：
+
+```js
+const AVATAR_FILE = {
+  codex: 'avatar-codex-small.png',
+  claude: 'avatar-claude-small.png',
+  deepseek: 'avatar-deepseek-small.png',
+  image: 'avatar-codex-small.png',
+}
+// 也可以指向任意经 /council/api/image/ 提供的文件名
+```
+
+想加新头像（比如给「配乐」「3D建模」各来一张）：往同一目录放图，再在 `AVATAR_FILE` 里加一行
+`openai: 'xxx.png'` 之类——没配的会继续用内置占位。
+
+**名字与气泡**：成员名、岗位名、岗位提示词、组级统一风格都在「小组」页和「名册」浮层里改，
+不涉及代码。气泡里的框架标签（`claude · 模型名`）跟随成员选择的框架与模型自动变化。
+
+**按钮文案 / 页面标题**：`locale/{zh,en}.json` 的 `meta.title`、`meta.description` 改了就生效（刷新页面）。
+
 ## 兼容性
 
 - 仅测试于 `dsh` **0.2.1-rc.2**（用到 subagent seam、`uiConversation` 等内部 API）；
