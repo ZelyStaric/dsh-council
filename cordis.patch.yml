@@ -1,0 +1,5 @@
+- insert:
+    - id: council
+      name: '@local/dsh-council'
+      config:
+        claudeBaseUrl: https://apiclaude.cc

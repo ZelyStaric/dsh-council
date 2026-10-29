@@ -1,0 +1,48 @@
+{
+  "name": "@local/dsh-council",
+  "version": "0.2.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "description": "DSH 小组：会话即群聊，指挥拆解 → 成员在各自 agent 框架里干活 → 审校初审 → 指挥终审",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "multi-agent",
+    "council",
+    "codex",
+    "claude",
+    "deepseek"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "author": "nanami"
+}
