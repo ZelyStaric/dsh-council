@@ -826,27 +826,51 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     save().catch(() => {})
   }
   const review = { self: null, commander: null, attempts: 1 }
+  const verdictOf = (v) => (v ? (v.ok === true ? 'passed' : v.ok === false ? 'rejected' : 'unverified') : null)
+  const acceptanceOf = () => {
+    const list = [review.self, review.commander].map(verdictOf).filter(Boolean)
+    if (!list.length) return 'none'            // 本组没配审校/指挥 → 不做验收
+    if (list.includes('rejected')) return 'rejected'
+    if (list.includes('unverified')) return 'unverified'
+    return 'passed'
+  }
+  let acceptance = result.ok ? 'none' : 'skipped'
+  let reworkError
+  let reworkFailed = false
+
   if (result.ok) {
     if (onStage) onStage('初审（审校）')
     review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief)
     review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent)
     if (onStage) onStage('终审（指挥）')
     review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride)
-    const failed = (review.self && review.self.ok === false) || (review.commander && review.commander.ok === false)
-    if (failed) {
-      const feedback = [review.self && review.self.ok === false ? `[自审未通过] ${review.self.reason}` : '', review.commander && review.commander.ok === false ? `[指挥验收未通过] ${review.commander.reason}` : ''].filter(Boolean).join('\n')
-      const rework = `${memberPrompt(member, task)}${WORK_STYLE}\n\n${feedback}\n请修正后重新提交。`
+    acceptance = acceptanceOf()
+
+    // 被否 / 未判定 都要返工一次（之前 null 被当成通过）
+    if (acceptance === 'rejected' || acceptance === 'unverified') {
+      const blocks = []
+      if (verdictOf(review.self) === 'rejected') blocks.push(`[自审未通过] ${review.self.reason}`)
+      if (verdictOf(review.self) === 'unverified') blocks.push(`[自审未判定] ${review.self.reason}`)
+      if (verdictOf(review.commander) === 'rejected') blocks.push(`[指挥验收未通过] ${review.commander.reason}`)
+      if (verdictOf(review.commander) === 'unverified') blocks.push(`[指挥验收未判定] ${review.commander.reason}`)
+      const rework = `${memberPrompt(member, task)}${WORK_STYLE}\n\n${blocks.join('\n')}\n请修正后重新提交。`
+      review.attempts = 2                      // 先记次数：返工即使失败也算尝试过
       const second = await runKind(ctx, member, rework, config, group, styleOverride, parent)
       if (second.ok) {
         result = second
-        review.attempts = 2
         review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief)
-    review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent)
+        review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent)
         if (onStage) onStage('终审（指挥）')
-    review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride)
+        review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride)
+        acceptance = acceptanceOf()
+      } else {
+        reworkFailed = true
+        reworkError = String(second.error || '返工未返回产出')
+        acceptance = 'rework-failed'           // 保留首次产出，但明确标记返工失败
       }
     }
   }
+
   return {
     memberId: member.id,
     name: member.name,
@@ -854,6 +878,10 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     kind: member.kind,
     model: member.model,
     ok: result.ok,
+    // accepted 只表示「验收是否通过」；ok 仍表示「成员是否产出了东西」
+    accepted: acceptance === 'passed' || acceptance === 'none',
+    acceptance,
+    ...reworkError === undefined ? {} : { reworkError },
     text: result.text,
     error: result.error,
     ...result.image === undefined ? {} : { image: result.image },
@@ -1314,9 +1342,13 @@ async function executeRun(ctx, config, run) {
     } catch (error) {
       result = { ok: false, text: '', error: String(error?.message ?? error) }
     }
-    slot.status = result.ok ? 'done' : 'failed'
+    // 执行成功 ≠ 验收通过：被否 / 未判定 / 返工失败都要在状态里体现
+    slot.status = !result.ok
+      ? 'failed'
+      : (result.accepted === false ? (result.acceptance === 'rework-failed' ? 'failed' : 'rejected') : 'done')
+    slot.acceptance = result.acceptance
     slot.text = result.text ?? ''
-    slot.error = result.error
+    slot.error = result.error ?? result.reworkError
     if (result.image) slot.image = result.image
     if (result.review) slot.review = result.review
     if (result.attempts) slot.attempts = result.attempts
@@ -1440,7 +1472,10 @@ function bindAgent(ctx, config, group, agent) {
             const review = m.review
               ? `\n${m.review.prelim ? '审校：' : '自审：'}${verdict(m.review.self)} · 指挥审核：${verdict(m.review.commander)}`
               : ''
-            return `## ${m.name}（${m.kind}）\n${body}${image}${review}`
+            const accept = m.accepted === false
+              ? `\n验收：未通过（${m.acceptance === 'rework-failed' ? '返工失败：' + (m.reworkError || '未返回产出') : m.acceptance === 'unverified' ? '审核未判定' : '审核拒绝'}）`
+              : ''
+            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           return [{ type: 'text', text: planLine ? planLine + '\n\n' + body : body }]
@@ -1531,6 +1566,14 @@ function bindAgent(ctx, config, group, agent) {
               + (who.model ? '模型 ' + who.model + ' · ' : '') + '指挥审核：' + verdict(result.review.commander))
           }
           if (reviewChunks.length) append(reviewChunks.join('\n\n'))
+          if (result.accepted === false) {
+            const why = result.acceptance === 'rework-failed'
+              ? '返工失败：' + (result.reworkError || '未返回产出')
+              : result.acceptance === 'unverified'
+                ? '审核未判定（按未通过处理）'
+                : '验收未通过'
+            append('## 验收（小组）\n' + why)
+          }
           return {
             name: member.name,
             kind: member.kind,
@@ -1539,6 +1582,9 @@ function bindAgent(ctx, config, group, agent) {
             ...result.image === undefined ? {} : { image: result.image },
             ...result.error === undefined ? {} : { error: String(result.error) },
             ...result.review === undefined ? {} : { review: result.review },
+            ...result.accepted === undefined ? {} : { accepted: result.accepted },
+            ...result.acceptance === undefined ? {} : { acceptance: result.acceptance },
+            ...result.reworkError === undefined ? {} : { reworkError: String(result.reworkError) },
           }
         }))
         for (const item of assignments) {
