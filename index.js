@@ -1162,6 +1162,7 @@ export function createHandler(ctx, config = {}) {
             return send(res, 200, await keyUsage(config))
           }
           if (req.method === 'GET' && route === '/models') {
+            if (url.searchParams.get('refresh')) catalog = null
             return send(res, 200, await modelCatalog(ctx, config))
           }
           if (req.method === 'GET' && route === '/balance') {
@@ -1469,19 +1470,33 @@ async function codexToken() {
 }
 
 /** Live model ids per family, cached; empty arrays when the relay cannot be read. */
+
+/** codex 成员走的是 ~/.codex/config.toml；拉模型列表时沿用它配置的中转地址。 */
+async function codexCliBase() {
+  try {
+    const raw = await readFile(path.join(process.env.HOME || '', '.codex', 'config.toml'), 'utf8')
+    const match = raw.match(/base_url\s*=\s*"([^"]+)"/)
+    return match ? match[1].replace(/\/v1\/?$/, '') : ''
+  } catch { return '' }
+}
+
 async function modelCatalog(ctx, config) {
-  if (catalog && Date.now() - catalog.at < 30 * 60_000) return catalog.value
+  if (catalog && Date.now() - catalog.at < 10 * 60_000) return catalog.value
   const value = { codex: [], claude: [], deepseek: [], image: [], error: null }
   // settings must live in function scope: the later claude/image branches use it too.
   const settings = apiSettings(config)
   try {
     const token = settings.codexToken || await codexToken()
-    const response = await fetch(settings.codexBase + '/v1/models', {
+    const codexBase = settings.codexBase || await codexCliBase()
+    if (!codexBase) throw new Error('未配置 codex/gpt 中转地址（base）')
+    const response = await fetch(codexBase + '/v1/models', {
       headers: token ? { authorization: 'Bearer ' + token } : {},
     })
     if (response.ok) {
       const data = await response.json()
-      value.codex = (data.data ?? []).map((m) => m.id).filter((id) => !String(id).startsWith('claude'))
+      const ids = (data.data ?? []).map((m) => m.id)
+      value.codex = ids.filter((id) => !String(id).startsWith('claude') && !String(id).startsWith('gpt-image'))
+      value.image = ids.filter((id) => String(id).startsWith('gpt-image'))
     }
   } catch (error) { value.error = String(error?.message ?? error) }
   try {
@@ -1534,7 +1549,7 @@ async function keyUsage(config) {
   const settings = apiSettings(config)
   const trimBase = (value) => String(value || '').replace(/\/$/, '')
   // 页面里不再保存 base（由 profile 提供），所以这里必须用「有效 base」：codex 缺失时回落到同一个中转
-  const relayBase = trimBase(settings.codexBase) || trimBase(settings.claudeBase)
+  const relayBase = trimBase(settings.codexBase) || trimBase(await codexCliBase()) || trimBase(settings.claudeBase)
   const sources = [
     { id: 'gpt-llm', label: 'gpt-llm（codex 成员）', token: settings.codexToken || await codexToken(), base: relayBase },
     { id: 'claude-llm', label: 'claude-llm（claude 成员）', token: settings.claudeKey, base: trimBase(settings.claudeBase) },

@@ -65,6 +65,16 @@ window.__ModuleLoader__.load({
     const jumpListeners = new Set()
     /* 对话行里的群聊块默认展开，折叠状态按会话+轮次记住 */
     const tailCollapsedMap = {}
+    /* 从 /models 拿到的实时模型列表（换 key / 换中转后要刷新） */
+    const liveModels = {}
+    async function refreshModels() {
+      try {
+        const data = await call('/models?refresh=1')
+        for (const kind of ['codex', 'claude', 'deepseek', 'image']) {
+          if (Array.isArray(data && data[kind]) && data[kind].length) liveModels[kind] = data[kind]
+        }
+      } catch { /* 保留旧值 */ }
+    }
     const chatActive = { value: false }
     const chatActiveListeners = new Set()
     function setChatActive(next) {
@@ -360,6 +370,7 @@ window.__ModuleLoader__.load({
           }
           if (!Object.keys(body).length) return
           mutate('/config', body)
+            .then(() => refreshModels())
             .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
             .then(() => { for (const [id] of pairs) { const el = document.getElementById(id); if (el) el.value = '' } })
             .catch(() => {})
@@ -368,7 +379,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: { fontWeight: 600, marginBottom: 2 } }, '① CLI 与出图密钥'),
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) },
-            '只有 codex / claude CLI 成员和 image 出图成员需要这里；用第三方接口（②）的成员不需要填。'
+            '只有 codex / claude CLI 成员和 image 出图成员需要这里；其余成员不需要填。'
             + '留空则用 profile 配置（当前来源：' + (info.source === 'page' ? '本页' : 'profile') + '）'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('input', { id: 'council-codex-token', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt key（codex 用）' + (info.hasCodexToken ? ' · 已配置' : '') }),
@@ -554,6 +565,8 @@ window.__ModuleLoader__.load({
         return () => panelListeners.delete(rerender)
       }, [])
 
+      useEffect(() => { refreshModels() }, [])
+
       useEffect(() => {
         if (!panelState.open) return
         call('/state').then((data) => setState(data.state)).catch((e) => setError(String(e.message || e)))
@@ -601,7 +614,7 @@ window.__ModuleLoader__.load({
       }
 
       const memberRows = members.map((member) => {
-        const list = FALLBACK_MODELS[member.kind] || []
+        const list = (liveModels[member.kind] || FALLBACK_MODELS[member.kind] || [])
         const options = member.model && list.indexOf(member.model) < 0 ? [member.model].concat(list) : list
         return h('div', { key: member.id, style: styles.card },
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
@@ -613,7 +626,7 @@ window.__ModuleLoader__.load({
               style: Object.assign({}, styles.input, { width: 100 }), defaultValue: member.kind,
               onChange: (e) => {
                 const kind = e.target.value
-                const kinds = FALLBACK_MODELS[kind] || []
+                const kinds = (liveModels[kind] || FALLBACK_MODELS[kind] || [])
                 const next = member.model && kinds.indexOf(member.model) >= 0 ? member.model : (kinds[0] || '')
                 act('/members', { id: member.id, kind: kind, model: next })
               },
