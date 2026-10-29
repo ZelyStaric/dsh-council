@@ -4,6 +4,8 @@
 
 > 与官方子代理的区别：官方只回最终答案；本插件把每一步（谁、什么阶段、多久）暴露出来，并且**每个成员可以挂不同框架/模型**，各跑各的原生 agent（Codex CLI / Claude Code CLI / DSH 内建 agent / 图像接口 / 任意 OpenAI·Anthropic 兼容中转）。
 
+> 仓库标签：`dsh` · `deepseek-harness` · `cordis` · `plugin` · `multi-agent` · `agent-orchestration` · `codex` · `claude` · `ai-agents`
+
 ## 安装
 
 ```bash
