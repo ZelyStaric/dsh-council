@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+# 本地状态与产物（绝不入库）
+*.local.json
+state.json
+screenshots/
+video-*/
