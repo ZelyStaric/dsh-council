@@ -15,8 +15,9 @@
  *     默认 persistent:false 仍回收；council_member create 默认持久，显式 persistent:false → 临时
  *   - council_delegate 返回值是 lossless JSON（stringify→parse deep-equal；staffingCreated/pruned 字符串数组）
  *   - POST /members/prune 与 council_member prune：dryRun / 真删 / 30 天阈值
- *   - POST /groups/prune-archived 归档组清理：归档 40 天被删（连成员/usage）/ 10 天保留 /
- *     未归档保留 / 缺 archivedAt 保留（保守）/ dryRun 不动盘 / 前后端路由一致
+ *   - POST /groups/prune-archived 归档组清理：默认 keepDays=7（8 天前删、6 天前留）/
+ *     归档 40 天被删（连成员/usage）/ 未归档保留 / 缺 archivedAt 保留（保守）/ dryRun 不动盘 / 前后端路由一致
+ *   - 归档 → 取消 → 再归档：取消时清 archived/archivedAt，再归档写入更大的 archivedAt（保留期重新计时）
  *   - POST /sessions/prune 子会话目录清理：保留集合 / 过期删除 / keepDays 窗口 / dryRun 不动盘 /
  *     路径白名单（不跟随符号链接、不动非 uuid 目录）
  *   - pruneChildSessionDirs：本轮只删本轮新建且无引用的子会话目录（保留集合含所有成员 convId，字面执行）
@@ -698,6 +699,36 @@ try {
     return `g5 取消归档 · changed=${changed}`
   })
 
+  await check('归档同步②b：归档 → 取消 → 再归档，archivedAt 变大（保留期重新计时）', async () => {
+    setState(structuredClone(fixture))
+    await writeArchivedFixture(['session-g5'])
+    await mod.syncArchivedGroups()
+    const first = mod.state.groups.find((g) => g.id === 'g5')
+    const archivedAt1 = first.archivedAt
+    assert.equal(first.archived, true)
+    assert.equal(typeof archivedAt1, 'number')
+
+    // 取消归档：archived 与 archivedAt 必须一起消失（否则再次归档不会重新计时）
+    await writeArchivedFixture([])
+    await mod.syncArchivedGroups()
+    assert.equal(first.archived, undefined, '取消归档后 archived 没清')
+    assert.equal(first.archivedAt, undefined, '取消归档后 archivedAt 没清')
+
+    // 等过至少 1ms，保证再归档的 Date.now() 严格更大（同一毫秒内比较没有意义）
+    while (Date.now() <= archivedAt1) { /* spin ~1ms */ }
+
+    await writeArchivedFixture(['session-g5'])
+    await mod.syncArchivedGroups()
+    const archivedAt2 = first.archivedAt
+    assert.equal(first.archived, true, '再归档后 archived 没置回')
+    assert.equal(typeof archivedAt2, 'number', '再归档后 archivedAt 没写')
+    assert.ok(archivedAt2 > archivedAt1, `再归档 archivedAt 没有变大：${archivedAt1} → ${archivedAt2}`)
+    // 落盘也必须是新的时间
+    const saved = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
+    assert.equal(saved.groups.find((g) => g.id === 'g5').archivedAt, archivedAt2, '落盘的 archivedAt 不是新的')
+    return `archivedAt ${archivedAt1} → 取消清空 → ${archivedAt2}（+${archivedAt2 - archivedAt1}ms）`
+  })
+
   await check('归档同步③：无 sessionId 的组不受影响', async () => {
     setState(structuredClone(fixture))
     await writeArchivedFixture(['session-g5', 'g1', 'session-zzz'])
@@ -795,8 +826,8 @@ try {
   /* ── 归档组清理：只删「已归档且归档超过 keepDays 天」的组，会话目录一律不碰 ── */
   const ARCHIVED_DAY = 86400_000
   /**
-   * 四种组各一个 + 一个共用成员：只有 g_old（归档 40 天）该被删；
-   * g_recent（10 天）、g_live（未归档）、g_noat（归档但缺 archivedAt）都必须保留。
+   * 四种组各一个 + 一个共用成员：默认 keepDays=7 下，只有 g_old（归档 40 天）该被删；
+   * g_recent（6 天，阈值内）、g_live（未归档）、g_noat（归档但缺 archivedAt）都必须保留。
    */
   function setArchivedPruneState() {
     const now = Date.now()
@@ -811,7 +842,7 @@ try {
       ],
       groups: [
         { id: 'g_old', name: '40 天前归档', archived: true, archivedAt: now - 40 * ARCHIVED_DAY, memberIds: ['m_old'] },
-        { id: 'g_recent', name: '10 天前归档', archived: true, archivedAt: now - 10 * ARCHIVED_DAY, memberIds: ['m_recent'] },
+        { id: 'g_recent', name: '6 天前归档', archived: true, archivedAt: now - 6 * ARCHIVED_DAY, memberIds: ['m_recent'] },
         { id: 'g_live', name: '未归档', memberIds: ['m_live', 'm_live_spare'] },
         { id: 'g_noat', name: '归档但缺时间', archived: true, memberIds: ['m_noat'] },
       ],
@@ -845,7 +876,7 @@ try {
     return `removed=${data.removed.map((r) => r.id).join(',')} · g_old / m_old / usage 均已清`
   })
 
-  await check('POST /groups/prune-archived ②：归档 10 天前的组保留（阈值内）', async () => {
+  await check('POST /groups/prune-archived ②：归档 6 天前的组在 keepDays=30 下保留（阈值内）', async () => {
     setArchivedPruneState()
     const data = await (await post('/groups/prune-archived', { keepDays: 30 })).json()
     assert.ok(!data.removed.some((row) => row.id === 'g_recent'), '未满 30 天的归档组被判成可清理')
@@ -854,8 +885,35 @@ try {
     assert.ok(mod.state.usage.m_recent, 'g_recent 成员的 usage 被清了')
     // keepDays 调小到 5 天才应可清理（证明窗口是真的按参数算的）
     const narrow = await (await post('/groups/prune-archived', { keepDays: 5, dryRun: true })).json()
-    assert.ok(narrow.removed.some((row) => row.id === 'g_recent'), 'keepDays=5 时 10 天前的组应可清理')
+    assert.ok(narrow.removed.some((row) => row.id === 'g_recent'), 'keepDays=5 时 6 天前的组应可清理')
     return `keepDays=30 保留 · keepDays=5 可清理 · kept=${data.kept}`
+  })
+
+  await check('POST /groups/prune-archived ②b：默认 keepDays=7（归档 8 天前可删、6 天前不可删）', async () => {
+    const now = Date.now()
+    setState({
+      roles: [],
+      members: [],
+      groups: [
+        { id: 'g_8d', name: '8 天前归档', archived: true, archivedAt: now - 8 * ARCHIVED_DAY, memberIds: [] },
+        { id: 'g_6d', name: '6 天前归档', archived: true, archivedAt: now - 6 * ARCHIVED_DAY, memberIds: [] },
+      ],
+      usage: {},
+      runs: [],
+    })
+    // 不传 keepDays：走 Host 的 ARCHIVED_KEEP_DAYS 默认值
+    const data = await (await post('/groups/prune-archived', {})).json()
+    assert.ok(data.removed.some((row) => row.id === 'g_8d'), '默认 7 天时，归档 8 天的组应可清理')
+    assert.ok(!data.removed.some((row) => row.id === 'g_6d'), '默认 7 天时，归档 6 天的组不该被清理')
+    assert.ok(groupIds().includes('g_6d'), '归档 6 天的组被删了')
+    assert.ok(!groupIds().includes('g_8d'), '归档 8 天的组没被删')
+    // 默认阈值必须前后端一致（按钮文案跟随 Host 默认值，不能各写各的）
+    const clientSrc = await readFile(path.join(ROOT, 'client.js'), 'utf8')
+    const hostSrc = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    const literalOf = (src) => Number((/ARCHIVED_KEEP_DAYS\s*=\s*(\d+)/.exec(src) || [])[1])
+    assert.equal(literalOf(hostSrc), 7, 'Host 的 ARCHIVED_KEEP_DAYS 默认值应为 7')
+    assert.equal(literalOf(clientSrc), 7, 'Client 的 ARCHIVED_KEEP_DAYS 默认值应为 7（按钮文案 7 天）')
+    return `默认 7 天：g_8d removed · g_6d kept=${data.kept} · host/client 常量都是 7`
   })
 
   await check('POST /groups/prune-archived ③：未归档组保留（成员/usage 不动）', async () => {
@@ -887,12 +945,12 @@ try {
     assert.equal(data.dryRun, true)
     assert.equal(data.removed.length, 1, 'dryRun 只应报 1 个（g_old）')
     assert.equal(data.removed[0].id, 'g_old')
-    assert.equal(data.kept, 2, 'kept 应等于没删的归档组数（10 天 / 缺 archivedAt）')
+    assert.equal(data.kept, 2, 'kept 应等于没删的归档组数（6 天 / 缺 archivedAt）')
     assert.equal(JSON.stringify(mod.state), beforeState, 'dryRun 改了内存 state')
     assert.equal(await readFile(stateFile, 'utf8').catch(() => null), beforeFile, 'dryRun 落盘了（council.json 变了）')
     const real = await (await post('/groups/prune-archived', {})).json()
     assert.equal(real.removed.length, 1)
-    assert.equal(real.kept, 2, '真删后归档组只剩 10 天 / 缺时间两个')
+    assert.equal(real.kept, 2, '真删后归档组只剩 6 天 / 缺时间两个')
     assert.ok(!groupIds().includes('g_old'), '真删没生效')
     return `dryRun removed=1 kept=2 未动盘 → 真删 kept=${real.kept}`
   })

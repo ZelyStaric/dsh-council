@@ -21,8 +21,8 @@ window.__ModuleLoader__.load({
      * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
      */
     const ARCHIVED_PRUNE_PATH = '/groups/prune-archived'
-    /** 与 Host 半 `ARCHIVED_KEEP_DAYS` 一致：只清理归档超过 30 天的小组。 */
-    const ARCHIVED_KEEP_DAYS = 30
+    /** 与 Host 半 `ARCHIVED_KEEP_DAYS` 一致：只清理归档超过 7 天的小组。 */
+    const ARCHIVED_KEEP_DAYS = 7
 
     /** Both halves live in this module, so a tiny listener set keeps them in sync. */
     const councilListeners = new Set()
@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
       button: { fontSize: 12, padding: '5px 10px', cursor: 'pointer', borderRadius: 6, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)' },
       primary: { fontSize: 12, padding: '5px 10px', cursor: 'pointer', borderRadius: 6, fontWeight: 600, color: 'var(--dsw-alias-label-primary-foreground)', background: 'var(--dsw-alias-brand-primary)', border: '1px solid var(--dsw-alias-brand-primary)' },
       muted: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 },
-      /** 淡色小字按钮：工具栏里「清理 30 天前归档」用，视觉上不抢主按钮。 */
+      /** 淡色小字按钮：工具栏里「清理 7 天前归档」用，视觉上不抢主按钮。 */
       linkButton: { fontSize: 11, padding: '1px 2px', cursor: 'pointer', border: 'none', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', opacity: 0.7, textDecoration: 'underline' },
       roleRow: { border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: 8, padding: 10, marginBottom: 10, minHeight: 56 },
       dropActive: { borderColor: 'var(--dsw-alias-brand-primary)', background: 'var(--dsw-alias-bg-layer-2)' },
@@ -306,7 +306,7 @@ window.__ModuleLoader__.load({
       /**
        * 子会话目录清理（⚠ 手动可达，UI 不暴露）：
        * 路由 `POST /council/api/sessions/prune` 保留（可 curl 手动调用做只读 dryRun），
-       * 但工具栏里**不再有入口** —— 2026-11-02 需求：只清理「归档超过 30 天」的小组，
+       * 但工具栏里**不再有入口** —— 2026-11-02 需求：只清理「归档超过 7 天」的小组，
        * 不再给用户「删会话目录」的按钮。函数留着是为了保留 dryRun 自测路径，别接回 UI。
        */
       async function pruneChildSessions() {

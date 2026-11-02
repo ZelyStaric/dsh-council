@@ -95,7 +95,7 @@ for (const [name, state] of FIXTURES) {
     } else if (id === 'council' && name !== 'empty') {
       // 与产品规则一致：已归档的组不再算「当前组」（v0.2.10 起归档组不进 groupForSession）
       const bound = Boolean(boundGroupOf(state))
-      expected = bound ? ['职位', '成员', '总画师风格', '清理 30 天前归档'] : ['单人模式']
+      expected = bound ? ['职位', '成员', '总画师风格', '清理 7 天前归档'] : ['单人模式']
       if (name === 'archived') expected = expected.concat(['已归档 1 个'])
     }
     const missing = expected.filter((m) => !text.includes(m))
@@ -107,7 +107,7 @@ for (const [name, state] of FIXTURES) {
     }
   }
 }
-// 「清理 30 天前归档」两段式按钮：真点一次（React 桩 + 假 fetch），验证第一下 dryRun、第二下才真删，
+// 「清理 7 天前归档」两段式按钮：真点一次（React 桩 + 假 fetch），验证第一下 dryRun、第二下才真删，
 // 且前后端路由逐字相同（客户端请求 /council/api/groups/prune-archived）。
 // 同时断言上一版的「清理子会话」按钮已从 UI 移除（路由可手动调，但页面没有入口）。
 try {
@@ -122,8 +122,8 @@ try {
 process.exitCode = failed ? 1 : 0
 
 /**
- * 用带状态存储的 React 桩渲染「小组」页，找到「清理 30 天前归档」按钮并依次点两下：
- *   第 1 下必须 dryRun=true + keepDays=30；第 2 下必须 dryRun=false；
+ * 用带状态存储的 React 桩渲染「小组」页，找到「清理 7 天前归档」按钮并依次点两下：
+ *   第 1 下必须 dryRun=true + keepDays=7；第 2 下必须 dryRun=false；
  *   两次都打 /council/api/groups/prune-archived。同时断言「清理子会话」已无 UI 入口。
  */
 async function clickArchivedPruneTwoStage(state) {
@@ -199,15 +199,15 @@ async function clickArchivedPruneTwoStage(state) {
   const labelOf = (node) => (Array.isArray(node.children) ? node.children[0] : undefined)
 
   const first = findButton(tree)
-  if (!first) throw new Error('工具栏里没找到「清理 30 天前归档」按钮')
-  if (labelOf(first) !== '清理 30 天前归档') throw new Error('按钮文案不对：' + labelOf(first))
+  if (!first) throw new Error('工具栏里没找到「清理 7 天前归档」按钮')
+  if (labelOf(first) !== '清理 7 天前归档') throw new Error('按钮文案不对：' + labelOf(first))
   await first.props.onClick()
   const pruneRequests = () => requests.filter((request) => request.url === '/council/api/groups/prune-archived')
   const previewRequest = pruneRequests().pop()
   if (!previewRequest) throw new Error('第一下点击没有发请求')
   const previewBody = JSON.parse(previewRequest.init.body)
   if (previewBody.dryRun !== true) throw new Error('第一下必须是 dryRun=true，实际 ' + previewBody.dryRun)
-  if (previewBody.keepDays !== 30) throw new Error('keepDays 应为 30，实际 ' + previewBody.keepDays)
+  if (previewBody.keepDays !== 7) throw new Error('keepDays 应为 7，实际 ' + previewBody.keepDays)
   if (!flatText(tree).includes('可清理 1 个组')) throw new Error('dryRun 后没有显示「可清理 1 个组」')
 
   const confirm = findButton(tree)
@@ -220,7 +220,7 @@ async function clickArchivedPruneTwoStage(state) {
   if (realRequest === previewRequest) throw new Error('第二下没有发新请求')
   if (JSON.parse(realRequest.init.body).dryRun !== false) throw new Error('第二下必须 dryRun=false')
   const afterDelete = findButton(tree)
-  if (afterDelete && labelOf(afterDelete) !== '清理 30 天前归档') throw new Error('清理后按钮没复位：' + labelOf(afterDelete))
+  if (afterDelete && labelOf(afterDelete) !== '清理 7 天前归档') throw new Error('清理后按钮没复位：' + labelOf(afterDelete))
   return '「' + confirmLabel + '」→ 真删 · 请求 ' + realRequest.url + ' · 两次 dryRun ' + previewBody.dryRun + '→' + JSON.parse(realRequest.init.body).dryRun
 }
 
