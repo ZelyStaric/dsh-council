@@ -6,7 +6,7 @@
  * /council/api that the Client half calls with same-origin fetch.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
@@ -27,6 +27,14 @@ const PROFILE_CANDIDATES = [
   path.join(os.homedir(), '.dsh', 'profiles', 'web'),
 ].filter(Boolean)
 const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
+
+/**
+ * 子会话清理路由：内层路径（handler 已经剥掉 `/council/api`），
+ * HTTP 实际地址 = `/council/api` + 本值 = `POST /council/api/sessions/prune`。
+ * 前端 `client.js` 的 `SESSIONS_PRUNE_PATH` 必须与本值**逐字相同**；
+ * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
+ */
+const SESSIONS_PRUNE_ROUTE = '/sessions/prune'
 
 /** 命令是否存在：避免 spawn 失败时只抛 ENOENT。 */
 async function commandExists(bin) {
@@ -381,7 +389,7 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
   return null
 }
 
-async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs = 6 * 60_000, presetId, callId) {
+async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs = 6 * 60_000, presetId, callId, childSink) {
   const subagents = ctx.get('subagents')
   if (!subagents || !parent) {
     return { ok: false, text: '', error: 'DSH subagent seam unavailable (no parent agent)', usage: null }
@@ -420,6 +428,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       signal: callId ? signalFor(callId, timeoutMs) : AbortSignal.timeout(timeoutMs),
       delivery: 'caller',
     })
+    // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录
+    if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
     try {
       const result = await activation.result
       const text = (result.output || [])
@@ -749,11 +759,11 @@ function verdictOf(text) {
 let runKindOverride = null
 
 /** 测试可替换的成员执行器入口；生产环境恒走 runKindImpl。 */
-function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
-  return (runKindOverride || runKindImpl)(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId)
+function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink) {
+  return (runKindOverride || runKindImpl)(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink)
 }
 
-async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
+async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink) {
   await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
   let result
@@ -762,7 +772,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
     const imagePrompt = style ? `[统一风格规范]\n${style}\n\n[画面]\n${prompt}` : prompt
     result = await runImage(member, imagePrompt, config)
   } else if (member.kind === 'deepseek') {
-    result = await runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId)
+    result = await runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId, childSink)
   } else {
     if (member.kind === 'claude') {
       const cfgCheck = apiSettings(config)
@@ -937,7 +947,7 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   }
 }
 
-async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId) {
+async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   const role = roleOf(member)
   const memory = (state.memberMemory || {})[member.id]
   const memoryBlock = memory && memory.digest && (state.config || {}).memoryInject !== false
@@ -946,7 +956,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   const standardBlock = group.standard ? '\n\n[验收标准]\n' + group.standard : ''
   const prompt = memberPrompt(member, task) + standardBlock + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
   if (onStage) onStage('执行中（' + member.kind + '）')
-  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId)
+  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId, childSink)
   // watchdog retry: a timeout / dead agent gets one more attempt on the same member
   const maxAttempts = 2
   let attempt = 1
@@ -955,7 +965,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     const why = String(result.error || '无输出')
     if (onStage) onStage('重试中（第 ' + attempt + ' 次，上次：' + why.slice(0, 40) + '）')
     const retryPrompt = prompt + '\n\n[上次失败] ' + why + '\n请重新完成任务，直接给出结果。'
-    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent, undefined, callId)
+    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent, undefined, callId, childSink)
     await save().catch(() => {})
   }
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
@@ -1014,7 +1024,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
       if (onStage) onStage('返工（第 ' + round + ' 次）')
       const rework = `${memberPrompt(member, task)}${standardBlock}${WORK_STYLE}\n\n${blocks.join('\n')}\n请修正后重新提交。`
       review.attempts = 1 + round              // 先记次数：返工即使失败也算尝试过
-      const second = await runKind(ctx, member, rework, config, group, styleOverride, parent, undefined, callId)
+      const second = await runKind(ctx, member, rework, config, group, styleOverride, parent, undefined, callId, childSink)
       if (!second.ok) {
         reworkFailed = true
         reworkError = String(second.error || '返工未返回产出')
@@ -1343,6 +1353,16 @@ export function createHandler(ctx, config = {}) {
               delete state.usage[body.id]
               await save()
               return send(res, 200, { state })
+            }
+            if (route === SESSIONS_PRUNE_ROUTE) {
+              // 历史子会话清理（POST /council/api/sessions/prune）：只删 $DSH_HOME/sessions/<桶>/<uuid>/
+              // （两层直接子目录、非符号链接、不在保留集合、keepDays 内目录没动过）；dryRun 只预览。默认保留 7 天。
+              const keepDays = Number(body.keepDays)
+              const result = await pruneSessionDirs(ctx, {
+                dryRun: Boolean(body.dryRun),
+                keepDays: Number.isFinite(keepDays) && keepDays >= 0 ? keepDays : 7,
+              })
+              return send(res, 200, result)
             }
             if (route === '/members/prune') {
               // 手动清理：不属于任何组、且从未跑过 / 30 天没动过的成员；dryRun 只预览
@@ -1966,6 +1986,187 @@ function pruneOrphanMembers({ dryRun = false, now = Date.now() } = {}) {
   return { removed, kept: dryRun ? total - removed.length : total, dryRun: Boolean(dryRun) }
 }
 
+/* ── 子会话目录清理（方案 C）───────────────────────────────────────────────
+ *
+ * 每次 council_delegate 都会经 DSH subagent seam 建一批子会话，目录留在
+ * $DSH_HOME/sessions/<项目桶>/<uuid>/ 且从不删除（实测累积 300+）。
+ *
+ * 两道清理（保留集合都是 `sessionKeepIds()`，不各自另算）：
+ *   1) 本轮清理：council_delegate 结束时只删「本轮新建、且没有任何持久引用」的子会话；
+ *   2) 历史清理：`POST /council/api/sessions/prune` 扫 sessions 目录，
+ *      删「uuid 名 + 不在保留集合 + keepDays 内没动」的目录。
+ *      路由内层常量 = `SESSIONS_PRUNE_ROUTE`，与前端 `SESSIONS_PRUNE_PATH` 逐字一致。
+ *
+ * 删除前的硬性校验（两条路径共用）：
+ *   - 路径必须是 $DSH_HOME/sessions/<桶>/<目录> 的**直接两层子目录**；
+ *   - 桶与目录都不得是符号链接（用 realpath 反查，任一层是符号链接就拒绝）；
+ *   - 目录名必须是 uuid 形式（兼容 `session-<uuid>` 前缀）。
+ */
+const SESSIONS_DIR = path.join(DSH_HOME, 'sessions')
+const SESSION_DIR_NAME_RE = /^(?:session-)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+
+/** 目录名 / 会话 id → 归一化小写 uuid；不是 uuid 形式返回 null。 */
+function sessionDirUuid(value) {
+  const match = SESSION_DIR_NAME_RE.exec(String(value || '').trim())
+  return match ? match[1].toLowerCase() : null
+}
+
+/** 仍在 registry 里的活跃 agent（复用模式下的子会话就在这里，绝不能删）。 */
+function liveAgentIds(ctx) {
+  const ids = new Set()
+  try {
+    const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    if (agents && typeof agents.list === 'function') {
+      for (const agent of agents.list()) {
+        const uuid = sessionDirUuid(agent && agent.id)
+        if (uuid) ids.add(uuid)
+      }
+    }
+  } catch { /* 拿不到活跃列表时只依赖静态保留集合 */ }
+  return ids
+}
+
+/**
+ * 保留集合（两条清理路径**共用同一份**，不允许各自另算）：
+ *   - 每个组的 `sessionId`（组的主会话）；
+ *   - 每个组的 `commanderConvId`（指挥子会话）；
+ *   - **每个成员的 `convId`**（deepseek 成员当前挂着的子会话；本轮写回的也算，写回即受保护）；
+ *   - 审校角色专用的子会话（`state.reviewChildren`）；
+ *   - registry 里仍然活着的 agent（复用模式下的子会话都在这里）。
+ * 这些 id 一律不删，历史清理与本轮清理都从这里取。
+ */
+function sessionKeepIds(ctx) {
+  const keep = new Set()
+  const add = (value) => { const uuid = sessionDirUuid(value); if (uuid) keep.add(uuid) }
+  for (const group of state.groups || []) {
+    add(group.sessionId)
+    add(group.commanderConvId)
+  }
+  for (const member of state.members || []) add(member && member.convId)
+  for (const value of Object.values(state.reviewChildren || {})) add(value)
+  for (const id of liveAgentIds(ctx)) keep.add(id)
+  return keep
+}
+
+/**
+ * 校验并解析一个候选会话目录。rootReal = realpath($DSH_HOME/sessions)。
+ * 只有 realpath 恰好等于「根 + 桶 + 目录」时才返回，借此拒绝任意深度的路径与符号链接。
+ */
+async function resolveSessionDir(rootReal, bucket, name) {
+  if (!rootReal || !bucket || !name) return null
+  if (bucket === '.' || bucket === '..' || name === '.' || name === '..') return null
+  if (bucket.includes('/') || name.includes('/') || bucket.includes(path.sep) || name.includes(path.sep)) return null
+  const resolved = path.resolve(path.join(SESSIONS_DIR, bucket, name))
+  if (path.dirname(path.dirname(resolved)) !== path.resolve(SESSIONS_DIR)) return null // 必须正好两层
+  const linkStat = await lstat(resolved).catch(() => null)
+  if (!linkStat || linkStat.isSymbolicLink() || !linkStat.isDirectory()) return null
+  const real = await realpath(resolved).catch(() => null)
+  if (real !== path.join(rootReal, bucket, name)) return null // 桶或目录是符号链接 → 拒绝
+  return { dir: resolved, stat: linkStat }
+}
+
+/** 目录占用字节数（不跟随符号链接）。 */
+async function dirSizeBytes(dir, depth = 0) {
+  if (depth > 8) return 0
+  let total = 0
+  let entries = []
+  try { entries = await readdir(dir, { withFileTypes: true }) } catch { return 0 }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const entryPath = path.join(dir, entry.name)
+    if (entry.isDirectory()) total += await dirSizeBytes(entryPath, depth + 1)
+    else if (entry.isFile()) {
+      const stat = await lstat(entryPath).catch(() => null)
+      if (stat && stat.isFile()) total += stat.size
+    }
+  }
+  return total
+}
+
+/**
+ * 历史一次性清理：扫 $DSH_HOME/sessions/<桶>/<目录>/，只删同时满足
+ * 「uuid 名 + 不在保留集合（sessionKeepIds）+ 目录 mtime 早于 keepDays」的直接两层子目录。
+ * 删除失败（权限/被占用）默默跳过。`kept` = 扫到的会话目录里没删掉（含删失败）的个数。
+ */
+async function pruneSessionDirs(ctx, { dryRun = false, keepDays = 7, now = Date.now() } = {}) {
+  const days = Number(keepDays)
+  const windowDays = Number.isFinite(days) && days >= 0 ? days : 7
+  const cutoff = now - windowDays * 24 * 60 * 60 * 1000
+  const keep = sessionKeepIds(ctx)
+  const result = { removed: [], kept: 0, dryRun: Boolean(dryRun) }
+  let total = 0
+  const rootReal = await realpath(SESSIONS_DIR).catch(() => null)
+  if (!rootReal) return result
+  let buckets = []
+  try { buckets = await readdir(SESSIONS_DIR, { withFileTypes: true }) } catch { return result }
+  for (const bucket of buckets) {
+    if (!bucket.isDirectory() || bucket.isSymbolicLink()) continue
+    let entries = []
+    try { entries = await readdir(path.join(SESSIONS_DIR, bucket.name), { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const uuid = sessionDirUuid(entry.name)
+      if (!uuid || !entry.isDirectory() || entry.isSymbolicLink()) continue
+      const target = await resolveSessionDir(rootReal, bucket.name, entry.name)
+      if (!target) continue
+      total += 1
+      if (keep.has(uuid) || target.stat.mtimeMs > cutoff) continue
+      const sizeMb = Math.round(((await dirSizeBytes(target.dir)) / 1048576) * 100) / 100
+      if (!dryRun) {
+        try {
+          await rm(target.dir, { recursive: true, force: true })
+        } catch {
+          continue // 删不掉就跳过（计入 kept）
+        }
+      }
+      result.removed.push({ id: uuid, sizeMb, mtime: target.stat.mtimeMs })
+    }
+  }
+  result.kept = total - result.removed.length
+  return result
+}
+
+/** 在任意项目桶里找一个会话目录（本轮新建的子会话不知道落在哪个 cwd 桶）。 */
+async function findSessionDir(uuid) {
+  const rootReal = await realpath(SESSIONS_DIR).catch(() => null)
+  if (!rootReal) return null
+  let buckets = []
+  try { buckets = await readdir(SESSIONS_DIR, { withFileTypes: true }) } catch { return null }
+  for (const bucket of buckets) {
+    if (!bucket.isDirectory() || bucket.isSymbolicLink()) continue
+    for (const name of [uuid, 'session-' + uuid]) {
+      const target = await resolveSessionDir(rootReal, bucket.name, name)
+      if (target) return target
+    }
+  }
+  return null
+}
+
+/**
+ * 本轮清理：只删「本轮新建、且没有任何持久引用」的子会话目录，删不掉的默默跳过。
+ *
+ * 硬约束（与历史清理**共用** sessionKeepIds，不另算）：任何组 `sessionId`、任何成员
+ * `convId`、任何 `group.commanderConvId`、审校子会话、活跃 agent 一律不删。
+ * 注意这条约束是字面执行的：deepseek 成员本轮最后写回的 `convId` 就一定被保住；
+ * 真正被回收的是「重试 / 返工多出来的那几条子会话」以及失败后没有被任何引用记住的子会话。
+ */
+async function pruneChildSessionDirs(ctx, ids) {
+  const removed = []
+  if (!ids || typeof ids[Symbol.iterator] !== 'function') return removed
+  // 必须在成员 convId 写回之后取，才能保护「本轮最后一次子会话」
+  const keep = sessionKeepIds(ctx)
+  for (const value of ids) {
+    const uuid = sessionDirUuid(value)
+    if (!uuid || keep.has(uuid)) continue
+    const target = await findSessionDir(uuid)
+    if (!target) continue
+    try {
+      await rm(target.dir, { recursive: true, force: true })
+      removed.push(uuid)
+    } catch { /* 删不掉（占用/权限）就跳过 */ }
+  }
+  return removed
+}
+
 function rosterText(group) {
   const members = (group.memberIds || [])
     .map((id) => state.members.find((m) => m.id === id))
@@ -2047,6 +2248,7 @@ function bindAgent(ctx, config, group, agent) {
             staffing: { type: 'array', items: { type: 'string' } },
             staffingCreated: { type: 'array', items: { type: 'string' }, description: '本次新建（并会被回收）的临时成员 id' },
             pruned: { type: 'array', items: { type: 'string' }, description: '本次回收的临时成员（如“建模（临时）”）' },
+            prunedSessions: { type: 'array', items: { type: 'string' }, description: '本次清理的子会话目录 id（pruneChildSessions:false 时不清理）' },
             plan: { type: 'object', additionalProperties: true },
             members: {
               type: 'array',
@@ -2088,13 +2290,18 @@ function bindAgent(ctx, config, group, agent) {
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
           const pruned = value.pruned?.length ? '\n\n## 回收\n已回收：' + value.pruned.join('、') : ''
-          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned }]
+          const prunedSessions = value.prunedSessions?.length
+            ? '\n\n## 子会话\n已清理 ' + value.prunedSessions.length + ' 个子会话目录'
+            : ''
+          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions }]
         },
       },
       async execute(args, exec) {
         const live = state.groups.find((g) => g.id === group.id) || group
         // 本次派活新建的临时成员：成功 / 失败 / 取消都在 finally 里回收
         const ephemeral = []
+        // 本次派活新建的 deepseek 子会话（subagent seam 的 childId）：结束时回收目录
+        const childSessions = new Set()
         const response = { members: [], staffing: [] }
         try {
         // 用标签块收住主流程：没有可派任务时 break 出去，让 finally 仍能回收 + 末尾统一 JSON 安全化
@@ -2184,7 +2391,7 @@ function bindAgent(ctx, config, group, agent) {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
               const body = work.ok ? (work.text || '') : '失败：' + (work.error || '')
               append('## ' + member.name + '（' + member.kind + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
-            }, callId)
+            }, callId, childSessions)
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
           const reviewChunks = []
           if (result.review && result.review.self) {
@@ -2240,6 +2447,15 @@ function bindAgent(ctx, config, group, agent) {
         } finally {
           // 回收本次临时新建的成员（失败/取消也会走到这里）
           response.pruned = await pruneEphemeralMembers(live, ephemeral)
+          // 本轮子会话清理：只删本轮新建、且没有任何持久引用的子会话目录，删不掉的默默跳过。
+          // 保留集合由 pruneChildSessionDirs 内部统一取 sessionKeepIds（含所有成员 convId），这里不另算。
+          if (config.pruneChildSessions !== false) {
+            try {
+              response.prunedSessions = await pruneChildSessionDirs(ctx, childSessions)
+            } catch {
+              response.prunedSessions = []
+            }
+          }
         }
         // created 改成普通字段；pruned 保持字符串数组。出口再做一次 JSON 往返自检。
         response.staffingCreated = ephemeral.filter((id) => typeof id === 'string')
