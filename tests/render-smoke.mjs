@@ -119,6 +119,30 @@ try {
   console.log(((error && error.stack) || '').split('\n').slice(0, 6).join('\n'))
 }
 
+// 进度条三态（无真成员时）：有指挥占位阶段 → 显示阶段；等超过 90s → 「等待成员…（Ns）」；
+// 刚开工 → 「准备中…」。三种情况都必须有「停止」按钮（点了要能发 /runs/cancel）。
+const NOW = Date.now()
+const PROGRESS_CASES = [
+  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中', '停止'], ['准备中…']],
+  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）', '停止'], ['准备中…']],
+  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…', '停止'], ['等待成员…']],
+]
+for (const [label, entry, need, forbid] of PROGRESS_CASES) {
+  try {
+    const result = renderOne('council-progress', payload.state, [entry, NOW, false, false])
+    if (result.error) throw result.error
+    const text = result.text
+    const missing = need.filter((m) => !text.includes(m))
+    if (missing.length) throw new Error('缺 ' + missing.join(' / ') + '（实际：' + text + '）')
+    const bad = forbid.filter((m) => text.includes(m))
+    if (bad.length) throw new Error('不该出现 ' + bad.join(' / ') + '（实际：' + text + '）')
+    console.log('ok   progress/' + label + ': ' + text)
+  } catch (error) {
+    failed++
+    console.log('FAIL progress/' + label + ': ' + (error && error.message))
+  }
+}
+
 process.exitCode = failed ? 1 : 0
 
 /**
@@ -224,12 +248,12 @@ async function clickArchivedPruneTwoStage(state) {
   return '「' + confirmLabel + '」→ 真删 · 请求 ' + realRequest.url + ' · 两次 dryRun ' + previewBody.dryRun + '→' + JSON.parse(realRequest.init.body).dryRun
 }
 
-function renderOne(id, state) {
+function renderOne(id, state, seedOverride) {
   try {
     let captured
     const registrations = []
     const window = { __ModuleLoader__: { load: (mod) => { captured = mod } } }
-    const seed = (SEEDS[id] || (() => [state]))(state)
+    const seed = seedOverride || (SEEDS[id] || (() => [state]))(state)
     let index = 0
     const React = {
       createElement: (type, props, ...children) => ({ type, props, children }),

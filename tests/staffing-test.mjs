@@ -21,6 +21,9 @@
  *   - POST /sessions/prune 子会话目录清理：保留集合 / 过期删除 / keepDays 窗口 / dryRun 不动盘 /
  *     路径白名单（不跟随符号链接、不动非 uuid 目录）
  *   - pruneChildSessionDirs：本轮只删本轮新建且无引用的子会话目录（保留集合含所有成员 convId，字面执行）
+ *   - 进度条收尾：POST /runs/cancel 写 finishedAt+cancelled 并返回 clearedProgress（all / callId）/
+ *     GET /progress 自愈（11 分钟未完成 → stale、9 分钟不动、陈旧项留 5 分钟、完成项留 24 小时）/
+ *     council_delegate 的 __stage__ 拆解中 → 派活中 → 结束删除
  *   - 路由一致性：client 的 SESSIONS_PRUNE_PATH === host 的 SESSIONS_PRUNE_ROUTE
  *
  * Usage: node tests/staffing-test.mjs
@@ -39,12 +42,13 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
 export function __resetArchivedCache() { archivedIdsCache = { at: 0, ids: null } }
 export function __boundAgentsSize() { return boundAgents.size }
+export function __resetProgress() { progressMap.clear(); activeCalls.clear() }
 `
 const moduleFile = path.join(HOME, 'index.exposed.mjs')
 await writeFile(moduleFile, exposed)
@@ -1203,6 +1207,116 @@ try {
       return `prunedSessions=[${out.prunedSessions.join(',')}] · convId 指向的保留`
     } finally {
       ctx.get = prevGet
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  /* ── 进度条自愈 / cancel 收尾 / 指挥占位阶段 ─────────────────────────── */
+  const getProgress = async () => (await (await fetch(base + '/progress')).json()).progress
+  const waitFor = async (fn, timeoutMs = 3000) => {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs) {
+      if (fn()) return true
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return false
+  }
+
+  await check('/progress 自愈：11 分钟前未完成 → finishedAt+stale；9 分钟前不动；完成项超 24h 删除', async () => {
+    mod.__resetProgress()
+    const now = Date.now()
+    mod.progressInit('call-11min', 'session-g5')
+    mod.progressMap.get('call-11min').startedAt = now - 11 * 60_000
+    mod.progressInit('call-9min', 'session-g5')
+    mod.progressMap.get('call-9min').startedAt = now - 9 * 60_000
+    mod.progressInit('call-done-old', 'session-g5')
+    Object.assign(mod.progressMap.get('call-done-old'), { startedAt: now - 26 * 3600_000, finishedAt: now - 25 * 3600_000 })
+    mod.progressInit('call-done-fresh', 'session-g5')
+    Object.assign(mod.progressMap.get('call-done-fresh'), { startedAt: now - 2 * 3600_000, finishedAt: now - 3600_000 })
+
+    const p = await getProgress()
+    assert.ok(p['call-11min'], '11 分钟的未完成项应还在（保留 5 分钟供前端看到一次）')
+    assert.equal(typeof p['call-11min'].finishedAt, 'number', '11 分钟的未完成项必须被写入 finishedAt')
+    assert.equal(p['call-11min'].stale, true, '必须标 stale:true')
+    assert.equal(p['call-9min'].finishedAt, undefined, '9 分钟不该被当陈旧（阈值 10 分钟）')
+    assert.equal(p['call-9min'].stale, undefined)
+    assert.equal(p['call-done-old'], undefined, '超过 24 小时的已完成项应被删')
+    assert.ok(p['call-done-fresh'], '1 小时前的已完成项应保留')
+
+    // 陈旧项最多留 5 分钟：把标记时间往前拨 6 分钟 → 下一次读取就该消失
+    mod.progressMap.get('call-11min').staleAt = now - 6 * 60_000
+    const again = await getProgress()
+    assert.equal(again['call-11min'], undefined, '陈旧项超过 5 分钟必须从 Map 删除')
+    assert.equal(mod.healProgress(), 0, '自愈后不该再产生新的陈旧项')
+    return '11min→stale+finishedAt · 9min 不动 · 25h 删除 · 陈旧项 5 分钟后移除'
+  })
+
+  await check('POST /runs/cancel：{all} 把未完成 progress 标结束（clearedProgress=1），带 callId 只清那一条', async () => {
+    mod.__resetProgress()
+    mod.progressInit('call-stuck-all', 'session-g5')
+    assert.equal(mod.progressMap.get('call-stuck-all').finishedAt, undefined)
+    const all = await (await post('/runs/cancel', { all: true })).json()
+    assert.equal(all.clearedProgress, 1, 'cancel(all) 必须清掉 1 条未完成 progress')
+    const stuck = mod.progressMap.get('call-stuck-all')
+    assert.equal(typeof stuck.finishedAt, 'number', 'cancel 后必须写 finishedAt')
+    assert.equal(stuck.cancelled, true, 'cancel 后必须标 cancelled')
+    const again = await (await post('/runs/cancel', { all: true })).json()
+    assert.equal(again.clearedProgress, 0, '已结束的条目不该重复计入 clearedProgress')
+
+    // 带 callId：只清那一条
+    mod.progressInit('call-stuck-a', 'session-g5')
+    mod.progressInit('call-stuck-b', 'session-g5')
+    const single = await (await post('/runs/cancel', { callId: 'call-stuck-a' })).json()
+    assert.equal(single.clearedProgress, 1)
+    assert.equal(typeof mod.progressMap.get('call-stuck-a').finishedAt, 'number')
+    assert.equal(mod.progressMap.get('call-stuck-b').finishedAt, undefined, '带 callId 时不该动其它条目')
+    return `all→clearedProgress=${all.clearedProgress}（再次 ${again.clearedProgress}）· callId→${single.clearedProgress}`
+  })
+
+  await check('council_delegate：开工立刻有 __stage__「拆解中」→「派活中」→ 结束删除并写 finishedAt', async () => {
+    const stageState = structuredClone(fixture)
+    stageState.roles.push({ id: 'r_cmd', name: '指挥', prompt: '拆解', kind: 'deepseek', model: 'deepseek-flash' })
+    stageState.members.push({ id: 'm_cmd', name: '指挥', kind: 'deepseek', model: 'deepseek-flash', roleId: 'r_cmd' })
+    stageState.groups = [{
+      id: 'g_stage', name: 'Stage', sessionId: 'session-g5', memberIds: ['m_cmd', 'm_code'],
+      requirePrelim: false, requireCommander: false,
+    }]
+    setState(stageState)
+    mod.__resetProgress()
+    let releasePlan
+    let releaseWork
+    const planGate = new Promise((resolve) => { releasePlan = resolve })
+    const workGate = new Promise((resolve) => { releaseWork = resolve })
+    mod.__setRunKind(async (ctxArg, member, prompt) => {
+      const text = String(prompt || '')
+      if (text.includes('你是这个小组的指挥')) {
+        await planGate
+        return { ok: true, text: JSON.stringify({ assignments: [{ member: '代码', task: '写点东西' }] }) }
+      }
+      await workGate
+      return { ok: true, text: '做完了' }
+    })
+    try {
+      await getState('?sessionId=session-g5') // 触发 bindAgent：把 council_delegate 注册到本组
+      const tool = registered.council_delegate
+      const pending = tool.execute({ request: '做个事' }, { callId: 'call-stage', agent: { id: 'agent-stage' } })
+      const stageOf = () => {
+        const entry = mod.progressMap.get('call-stage')
+        return entry && entry.members && entry.members.__stage__ ? entry.members.__stage__.stage : undefined
+      }
+      assert.ok(await waitFor(() => stageOf() === '拆解中'), 'progressInit 之后必须立刻有 __stage__=拆解中，实际 ' + stageOf())
+      releasePlan()
+      assert.ok(await waitFor(() => stageOf() === '派活中'), '拿到 assignments 后 __stage__ 应变成派活中，实际 ' + stageOf())
+      releaseWork()
+      const out = await pending
+      assert.equal(out.members.length, 1)
+      assert.equal(out.members[0].name, '代码')
+      const entry = mod.progressMap.get('call-stage')
+      assert.equal(entry.members.__stage__, undefined, '结束后占位阶段必须删掉')
+      assert.equal(typeof entry.finishedAt, 'number', '结束后必须写 finishedAt')
+      assert.equal(mod.activeCalls.has('call-stage'), false, '结束后必须从 activeCalls 摘掉')
+      return '拆解中 → 派活中 → 完成（finishedAt 已写、__stage__ 已删、activeCalls 已清）'
+    } finally {
       mod.__setRunKind(undefined)
     }
   })

@@ -1012,7 +1012,10 @@ window.__ModuleLoader__.load({
       }, [phase, props && props.callId])
 
       if (phase !== 'result') {
-        const members = progress && progress.members ? Object.keys(progress.members).map((id) => progress.members[id]) : []
+        const stageEntry = progress && progress.members ? progress.members.__stage__ : null
+        const members = progress && progress.members
+          ? Object.keys(progress.members).filter((id) => id !== '__stage__').map((id) => progress.members[id])
+          : []
         const started = progress && progress.startedAt ? Math.round((now - progress.startedAt) / 1000) : null
         return h('div', { style: styles.card },
           h('div', { style: styles.who }, '小组派发中…' + (started === null ? '' : ' ' + started + 's')),
@@ -1021,7 +1024,9 @@ window.__ModuleLoader__.load({
               h(Avatar, { kind: m.kind, name: m.name }),
               h('span', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
                 + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))))
-            : h('div', { style: styles.muted }, planned.length ? planned.join('、') + '（等待开始）' : '准备中'))
+            : h('div', { style: styles.muted }, stageEntry
+              ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中')
+              : (planned.length ? planned.join('、') + '（等待开始）' : '准备中')))
       }
 
       const sections = parseCouncilText(text)
@@ -1353,8 +1358,16 @@ window.__ModuleLoader__.load({
       if (!entry) return jumpChip ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip) : null
 
 
-      const members = Object.keys(entry.members || {}).map((id) => entry.members[id])
+      const stageEntry = entry.members ? entry.members.__stage__ : null
+      const members = Object.keys(entry.members || {}).filter((id) => id !== '__stage__').map((id) => entry.members[id])
       const total = entry.startedAt ? Math.round((now - entry.startedAt) / 1000) : null
+      // 没有真成员时：指挥占位阶段优先（拆解中/派活中）；再没有就看等了多久——超过 90s
+      // 说明卡在选成员或子代理启动，别再只说「准备中」。
+      const waited = total === null ? 0 : total
+      const waiting = total !== null && waited > 90
+      const idleText = stageEntry
+        ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中') + (waiting ? '（等待成员…）' : '')
+        : (waiting ? '等待成员…（' + waited + 's）' : '准备中…')
       return h('div', {
         style: {
           display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 8px 6px',
@@ -1367,7 +1380,7 @@ window.__ModuleLoader__.load({
       members.length
         ? members.map((m, i) => h('span', { key: i, style: styles.chip },
           (m.name || '成员') + ' · ' + (m.stage || '…') + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')))
-        : h('span', { style: styles.muted }, '准备中…'),
+        : h('span', { style: styles.muted }, idleText),
       h('span', { style: { flex: 1 } }),
       h('span', {
         onClick: async () => {
