@@ -42,8 +42,8 @@ const SESSIONS_PRUNE_ROUTE = '/sessions/prune'
  * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
  */
 const ARCHIVED_PRUNE_ROUTE = '/groups/prune-archived'
-/** 默认只清理「归档超过 30 天」的组（前端按钮文案也用这个数）。 */
-const ARCHIVED_KEEP_DAYS = 30
+/** 默认只清理「归档超过 7 天」的组（前端按钮文案也用这个数）。 */
+const ARCHIVED_KEEP_DAYS = 7
 
 /** 命令是否存在：避免 spawn 失败时只抛 ENOENT。 */
 async function commandExists(bin) {
@@ -198,6 +198,12 @@ async function archivedSessionIds() {
 /**
  * 让「组」跟着会话的归档状态走：会话进 archivedSessionIds → 组 archived=true；
  * 从列表里移除（取消归档）→ 清掉 archived/archivedAt。无 sessionId 的组不动。
+ *
+ * **重新计时**：取消归档会把 `archived` 与 `archivedAt` 一起删掉，所以再次归档时
+ * `desired === Boolean(group.archived)` 必然不相等、会走到下面的归档分支，写入**新的**
+ * `archivedAt = Date.now()`，保留期从这次归档重新算（不会沿用旧时间）。
+ * 缺 `archivedAt` 的已归档旧数据保持原样：prune 的保守规则是「判不出时长就保留」，
+ * 这里不擅自补时间。
  * @returns {Promise<number>} 变更的组数
  */
 async function syncArchivedGroups() {
@@ -211,6 +217,7 @@ async function syncArchivedGroups() {
       if (desired === Boolean(group.archived)) continue
       if (desired) {
         group.archived = true
+        // 每次归档都取当前时间；取消归档已把旧 archivedAt 删掉，所以这是全新计时起点。
         group.archivedAt = Date.now()
       } else {
         delete group.archived
@@ -1305,7 +1312,7 @@ export function apply(ctx, config = {}) {
   // 每 20 秒自愈一次：重启/恢复的会话能重新拿到 council_* 工具（绑定是幂等的）
   setInterval(rebindExisting, 20_000).unref?.()
   // 会话归档 → 对应小组跟着归档：初始化后一次 + 每 30 秒自愈（/state 里也会同步）
-  // 归档同步之后安静地清一次「归档超过 30 天」的小组：启动一次 + 跟着 30 秒循环走。
+  // 归档同步之后安静地清一次「归档超过 7 天」的小组：启动一次 + 跟着 30 秒循环走。
   // 失败只记一行日志，绝不影响同步/页面；没有可清理的组时完全静默。
   const syncAndPruneArchived = async () => {
     try { await syncArchivedGroups() } catch { /* syncArchivedGroups 内部已记日志 */ }
