@@ -1549,6 +1549,7 @@ export function createHandler(ctx, config = {}) {
             if (route === '/runs/cancel') {
               console.error('[council] cancel requested at ' + Date.now() + ' running=' + JSON.stringify([...activeCalls.keys()]))
               const target = body.callId || body.id
+              const at = Date.now()
               let stopped = 0
               if (!target || body.all) {
                 for (const [id, entry] of activeCalls) { entry.cancelled = true; try { entry.controller.abort() } catch { /* */ } stopped += 1 }
@@ -1558,7 +1559,17 @@ export function createHandler(ctx, config = {}) {
                 try { entry.controller.abort() } catch { /* */ }
                 stopped = 1
               }
-              return send(res, 200, { stopped, running: [...activeCalls.keys()], at: Date.now() })
+              // activeCalls 只管得到「已在执行」的调用；卡在选成员/拆解/子代理启动、或进程重启打断的
+              // 进度条目不在里面，必须一起收尾，否则进度条永远停在「准备中」。
+              let clearedProgress = 0
+              if (!target || body.all) {
+                for (const entry of progressMap.values()) {
+                  if (finishProgressEntry(entry, at, { cancelled: true })) clearedProgress += 1
+                }
+              } else if (finishProgressEntry(progressMap.get(target), at, { cancelled: true })) {
+                clearedProgress = 1
+              }
+              return send(res, 200, { stopped, clearedProgress, running: [...activeCalls.keys()], at })
             }
             if (route === '/groups/policy') {
               const group = findGroup(body.id)
@@ -1626,6 +1637,8 @@ export function createHandler(ctx, config = {}) {
             }
           }
           if (req.method === 'GET' && route === '/progress') {
+            // 读取时自愈：陈旧的未完成项在这里收尾，不指望派活自己回来写 finishedAt
+            healProgress()
             const out = {}
             for (const [id, entry] of progressMap) out[id] = entry
             return send(res, 200, { progress: out })
@@ -1761,6 +1774,15 @@ const boundAgents = new Map()
 /** Live delegation progress keyed by tool call id, so the card can show stages. */
 const progressMap = new Map()
 
+/** 未完成且启动超过 10 分钟 → 当陈旧项自动收尾（派活卡在选成员/拆解/子代理启动时不会永远「准备中」）。 */
+const PROGRESS_STALE_MS = 10 * 60_000
+/** 陈旧项标完后最多再留 5 分钟，够前端看到一次就删。 */
+const PROGRESS_STALE_KEEP_MS = 5 * 60_000
+/** 已完成项最多留 24 小时。 */
+const PROGRESS_DONE_KEEP_MS = 24 * 60 * 60_000
+/** 指挥占位阶段的成员 id：没有真正成员时用它显示「拆解中 / 派活中」。 */
+const PROGRESS_STAGE_ID = '__stage__'
+
 function progressInit(callId, sessionId) {
   if (!callId) return
   progressMap.set(callId, { startedAt: Date.now(), sessionId: sessionId, members: {} })
@@ -1772,6 +1794,44 @@ function progressSet(callId, memberId, patch) {
   const entry = progressMap.get(callId)
   if (!entry) return
   entry.members[memberId] = Object.assign({ at: Date.now() }, entry.members[memberId] || {}, patch)
+}
+
+/** 写「指挥」占位阶段：成员还没拆出来时进度条也有东西可显示。 */
+function progressStage(callId, stage, name = '指挥') {
+  progressSet(callId, PROGRESS_STAGE_ID, { name, stage, stageOnly: true })
+}
+
+/** 把一条进度标成结束；已结束（含 cancel 先标过）返回 false，避免把 clearedProgress 算重。 */
+function finishProgressEntry(entry, now, patch) {
+  if (!entry || entry.finishedAt) return false
+  entry.finishedAt = now
+  if (patch) Object.assign(entry, patch)
+  return true
+}
+
+/**
+ * `/progress` 读取时自愈，返回本次新标成陈旧的条数：
+ *  - 未完成且 startedAt 超过 10 分钟 → 写 finishedAt + stale:true（staleAt 记标记时间）
+ *  - 已标 stale 的 entry 超过 5 分钟 → 从 Map 删除（前端最多看到一次）
+ *  - 已完成的 entry 超过 24 小时 → 删除
+ */
+function healProgress(now = Date.now()) {
+  let markedStale = 0
+  for (const [id, entry] of progressMap) {
+    if (!entry) { progressMap.delete(id); continue }
+    if (!entry.finishedAt && now - (entry.startedAt || 0) > PROGRESS_STALE_MS) {
+      entry.finishedAt = now
+      entry.stale = true
+      entry.staleAt = now
+      markedStale += 1
+    }
+    if (entry.finishedAt && entry.stale && now - (entry.staleAt || entry.finishedAt) > PROGRESS_STALE_KEEP_MS) {
+      progressMap.delete(id)
+      continue
+    }
+    if (entry.finishedAt && now - entry.finishedAt > PROGRESS_DONE_KEEP_MS) progressMap.delete(id)
+  }
+  return markedStale
 }
 
 /** Human/roster text injected into a bound chat session's system prompt. */
@@ -2393,14 +2453,19 @@ function bindAgent(ctx, config, group, agent) {
         const ephemeral = []
         // 本次派活新建的 deepseek 子会话（subagent seam 的 childId）：结束时回收目录
         const childSessions = new Set()
+        // 在 try 外声明：finally 要用它收尾 progressMap / activeCalls（提前 break、抛错、取消都要收）
+        let callId
         const response = { members: [], staffing: [] }
         try {
         // 用标签块收住主流程：没有可派任务时 break 出去，让 finally 仍能回收 + 末尾统一 JSON 安全化
         delegate: {
-        const staffing = await ensureStaffing(live, args?.staffing, ephemeral)
-        const callId = exec && exec.callId
+        // progress + 取消登记必须早于 ensureStaffing：选成员（补员）本身也可能卡住，
+        // 等它之后才建进度条就会出现「一直准备中，停止键还没生效」的空窗。
+        callId = exec && exec.callId
         progressInit(callId, exec && exec.agent && exec.agent.id)
+        progressStage(callId, '拆解中')
         if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
+        const staffing = await ensureStaffing(live, args?.staffing, ephemeral)
         let assignments = Array.isArray(args && args.assignments) ? args.assignments : []
         let planRaw
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
@@ -2421,6 +2486,8 @@ function bindAgent(ctx, config, group, agent) {
             && !resolveMember(live, a.member))
           .map((a) => ({ role: a.member }))
         staffing.push(...await ensureStaffing(live, missingRoles, ephemeral))
+        // 成员已经定下来了，占位阶段从「拆解中」推进到「派活中」
+        progressStage(callId, '派活中')
         const sid = exec && exec.agent && exec.agent.id
         let userText = requestText
         if (!userText && exec && exec.agent && exec.agent.session) {
@@ -2522,12 +2589,7 @@ function bindAgent(ctx, config, group, agent) {
           const done = state.members.find((m) => m.id === item.member || m.name === item.member)
           if (done) progressSet(callId, done.id, { stage: '完成' })
         }
-        if (callId) {
-          const progressEntry = progressMap.get(callId)
-          if (progressEntry) progressEntry.finishedAt = Date.now()
-        }
         entry.endSeq = currentSeq()
-        if (callId) activeCalls.delete(callId)
         entry.running = false
         history.at = Date.now()
         history.text = entry.text
@@ -2536,6 +2598,16 @@ function bindAgent(ctx, config, group, agent) {
         response.staffing = staffing
         } // delegate
         } finally {
+          // 进度条 / 取消登记统一在 finally 收尾：成功、抛错、提前 break、被停止都不能留下
+          // 一条永远没有 finishedAt 的 entry（前端会一直显示「准备中」）。
+          if (callId) {
+            const progressEntry = progressMap.get(callId)
+            if (progressEntry) {
+              if (progressEntry.members) delete progressEntry.members[PROGRESS_STAGE_ID]
+              finishProgressEntry(progressEntry, Date.now())
+            }
+            activeCalls.delete(callId)
+          }
           // 回收本次临时新建的成员（失败/取消也会走到这里）
           response.pruned = await pruneEphemeralMembers(live, ephemeral)
           // 本轮子会话清理：只删本轮新建、且没有任何持久引用的子会话目录，删不掉的默默跳过。
