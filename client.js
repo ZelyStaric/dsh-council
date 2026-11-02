@@ -6,6 +6,13 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback, useRef } = React
 
     const API = '/council/api'
+    /**
+     * 子会话清理路由（内层路径，`call()` 会自动加上 `/council/api`）：
+     * 实际请求 = `POST /council/api/sessions/prune`。
+     * 必须与 Host 半 `index.js` 的 `SESSIONS_PRUNE_ROUTE` 逐字相同，
+     * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
+     */
+    const SESSIONS_PRUNE_PATH = '/sessions/prune'
 
     /** Both halves live in this module, so a tiny listener set keeps them in sync. */
     const councilListeners = new Set()
@@ -191,6 +198,8 @@ window.__ModuleLoader__.load({
       const [editing, setEditing] = useState(null)
       const [prunePreview, setPrunePreview] = useState(null)
       const [pruneNote, setPruneNote] = useState(null)
+      const [sessionPrune, setSessionPrune] = useState(null)
+      const [sessionPruneNote, setSessionPruneNote] = useState(null)
 
       const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
 
@@ -277,6 +286,26 @@ window.__ModuleLoader__.load({
             notifyCouncilChange()
           }
         } catch (e) { setError(String(e.message || e)); setPrunePreview(null) }
+        finally { setBusy(null) }
+      }
+
+      /** 子会话目录清理：同样两段式（第一次 dryRun 只报「可清理 N 个 / X MB」，再点才真删）。 */
+      async function pruneChildSessions() {
+        const preview = sessionPrune && (sessionPrune.removed || []).length
+        const dryRun = !preview
+        setBusy('sessions'); setError(null)
+        try {
+          const data = await call(SESSIONS_PRUNE_PATH, { dryRun: dryRun, keepDays: 7 })
+          const count = (data.removed || []).length
+          const mb = Math.round(((data.removed || []).reduce((sum, item) => sum + (Number(item.sizeMb) || 0), 0)) * 10) / 10
+          if (dryRun) {
+            setSessionPrune(data)
+            setSessionPruneNote(count ? ('可清理 ' + count + ' 个 / ' + mb + ' MB') : '没有可清理的子会话')
+          } else {
+            setSessionPrune(null)
+            setSessionPruneNote('已清理 ' + count + ' 个 / ' + mb + ' MB，保留 ' + (data.kept ?? 0) + ' 个')
+          }
+        } catch (e) { setError(String(e.message || e)); setSessionPrune(null) }
         finally { setBusy(null) }
       }
 
@@ -527,6 +556,19 @@ window.__ModuleLoader__.load({
             ? '确认清理 ' + prunePreview.removed.length + ' 个'
             : '重新检查孤立成员')),
         pruneNote ? h('span', { style: styles.muted }, pruneNote) : null,
+        h(Button, {
+          disabled: busy === 'sessions',
+          onClick: pruneChildSessions,
+          title: sessionPrune
+            ? '再点一次确认删除（共 ' + (sessionPrune.removed || []).length + ' 个子会话）'
+            : '先预览：扫描 sessions 目录里 7 天没动、且不属于任何组/成员的子会话',
+        }, !sessionPrune
+          ? '清理子会话'
+          : ((sessionPrune.removed || []).length
+            ? '确认清理 ' + sessionPrune.removed.length + ' 个 / '
+              + (Math.round(((sessionPrune.removed || []).reduce((sum, item) => sum + (Number(item.sizeMb) || 0), 0)) * 10) / 10) + ' MB'
+            : '重新检查子会话')),
+        sessionPruneNote ? h('span', { style: styles.muted }, sessionPruneNote) : null,
         h(Button, {
           onClick: () => {
             if (typeof window === 'undefined' || !window.confirm) return

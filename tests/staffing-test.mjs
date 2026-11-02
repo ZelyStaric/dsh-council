@@ -15,10 +15,15 @@
  *     默认 persistent:false 仍回收；council_member create 默认持久，显式 persistent:false → 临时
  *   - council_delegate 返回值是 lossless JSON（stringify→parse deep-equal；staffingCreated/pruned 字符串数组）
  *   - POST /members/prune 与 council_member prune：dryRun / 真删 / 30 天阈值
+ *   - POST /sessions/prune 子会话目录清理：保留集合 / 过期删除 / keepDays 窗口 / dryRun 不动盘 /
+ *     路径白名单（不跟随符号链接、不动非 uuid 目录）
+ *   - pruneChildSessionDirs：本轮只删本轮新建且无引用的子会话目录（保留集合含所有成员 convId，字面执行）
+ *   - 路由一致性：client 的 SESSIONS_PRUNE_PATH === host 的 SESSIONS_PRUNE_ROUTE
  *
  * Usage: node tests/staffing-test.mjs
  */
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, utimes, symlink } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
@@ -31,7 +36,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -784,6 +789,239 @@ try {
     assert.ok(registered.council_delegate, 'council_delegate 未注册')
     return `归档时 +0 绑定 · 取消归档后 +1（${before} → ${mod.__boundAgentsSize()}）`
   })
+
+  /* ── 子会话目录清理（方案 C） ─────────────────────────────────────────── */
+  const SESSIONS = path.join(HOME, 'sessions')
+  const DAY = 86400_000
+  const KEEP_GROUP = '11111111-1111-4111-8111-111111111111'
+  const KEEP_MEMBER = '22222222-2222-4222-8222-222222222222'
+  const KEEP_COMMANDER = '33333333-3333-4333-8333-333333333333'
+  const STALE = '44444444-4444-4444-8444-444444444444'
+
+  /** 造一个会话目录夹具：写一个文件后把**目录** mtime 拨回 ageDays 天前。 */
+  async function makeSessionDir(name, { bucket = '--home-nanami--', ageDays = 20, bytes = 4096 } = {}) {
+    const dir = path.join(SESSIONS, bucket, name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(path.join(dir, 'session.v4.jsonl.zstd'), Buffer.alloc(bytes, 1))
+    const when = new Date(Date.now() - ageDays * DAY)
+    await utimes(dir, when, when)
+    return dir
+  }
+
+  /** 每个用例都从空 sessions 目录开始，避免互相计数污染。 */
+  async function resetSessions() {
+    await rm(SESSIONS, { recursive: true, force: true })
+    await mkdir(SESSIONS, { recursive: true })
+  }
+
+  /** 保留集合来自组 sessionId / 组 commanderConvId / 成员 convId。 */
+  function setSessionPruneState() {
+    setState({
+      ...structuredClone(fixture),
+      groups: [{ id: 'g1', name: 'G1', sessionId: 'session-' + KEEP_GROUP, commanderConvId: KEEP_COMMANDER, memberIds: ['m_code'] }],
+      members: [{ id: 'm_code', name: '代码', kind: 'deepseek', convId: KEEP_MEMBER }],
+    })
+  }
+
+  await check('POST /sessions/prune：保留集合内的目录不删（组 sessionId / 成员 convId / 指挥 convId）', async () => {
+    setSessionPruneState()
+    await resetSessions()
+    const dirs = [
+      await makeSessionDir(KEEP_GROUP, { bucket: '--keep--' }),
+      await makeSessionDir(KEEP_MEMBER, { bucket: '--keep--' }),
+      await makeSessionDir(KEEP_COMMANDER, { bucket: '--keep--' }),
+    ]
+    const res = await post('/sessions/prune', { dryRun: true, keepDays: 7 })
+    assert.equal(res.status, 200)
+    const data = await res.json()
+    const ids = data.removed.map((row) => row.id)
+    for (const uuid of [KEEP_GROUP, KEEP_MEMBER, KEEP_COMMANDER]) {
+      assert.ok(!ids.includes(uuid), '保留集合内的目录被判成可清理：' + uuid)
+    }
+    for (const dir of dirs) assert.ok(existsSync(dir), 'dryRun 不该动盘：' + dir)
+    assert.equal(data.kept, 3, '三个保留目录都应计入 kept')
+    return `removed=${ids.length} kept=${data.kept}`
+  })
+
+  await check('POST /sessions/prune：过期且不在保留集合的目录被删（返回 id/sizeMb/mtime）', async () => {
+    setSessionPruneState()
+    await resetSessions()
+    const staleDir = await makeSessionDir(STALE, { bucket: '--stale--', bytes: 314572 })
+    const res = await post('/sessions/prune', { keepDays: 7 })
+    assert.equal(res.status, 200)
+    const data = await res.json()
+    assert.equal(data.dryRun, false)
+    const row = data.removed.find((item) => item.id === STALE)
+    assert.ok(row, '过期且不在保留集合的目录没被删')
+    assert.ok(row.sizeMb > 0, 'sizeMb 必须大于 0（实测 ' + row.sizeMb + '）')
+    assert.ok(Date.now() - row.mtime > 7 * DAY, 'mtime 应是 20 天前')
+    assert.equal(existsSync(staleDir), false, '目录还在盘上')
+    return `${STALE} sizeMb=${row.sizeMb} mtime=${new Date(row.mtime).toISOString()}`
+  })
+
+  await check('POST /sessions/prune：keepDays 内不删（2 天前 + keepDays=7 保留，keepDays=1 才可清理）', async () => {
+    setSessionPruneState()
+    await resetSessions()
+    const dir = await makeSessionDir(STALE, { bucket: '--window--', ageDays: 2 })
+    const within = await (await post('/sessions/prune', { dryRun: true, keepDays: 7 })).json()
+    assert.ok(!within.removed.some((row) => row.id === STALE), 'keepDays 内的目录被判成可清理')
+    assert.ok(existsSync(dir))
+    const narrow = await (await post('/sessions/prune', { dryRun: true, keepDays: 1 })).json()
+    assert.ok(narrow.removed.some((row) => row.id === STALE), 'keepDays=1 时 2 天前的目录应可清理')
+    assert.ok(existsSync(dir), 'dryRun 不该动盘')
+    return `keepDays=7 kept · keepDays=1 removable=${narrow.removed.length}`
+  })
+
+  await check('POST /sessions/prune：dryRun 只预览不动盘，真删后目录消失', async () => {
+    setSessionPruneState()
+    await resetSessions()
+    const dir = await makeSessionDir(STALE, { bucket: '--preview--', bytes: 16384 })
+    const before = await (await post('/sessions/prune', { dryRun: true, keepDays: 7 })).json()
+    assert.equal(before.dryRun, true)
+    assert.equal(before.removed.length + before.kept, 1, 'dryRun 下 removed + kept 必须等于目录总数（一个都不会真删）')
+    assert.ok(existsSync(dir), 'dryRun 删了盘上的目录')
+    const after = await (await post('/sessions/prune', { keepDays: 7 })).json()
+    assert.equal(after.removed.length, 1)
+    assert.equal(after.kept, 0)
+    assert.equal(existsSync(dir), false)
+    return `dryRun removed=${before.removed.length} kept=${before.kept} → 真删后 kept=${after.kept}`
+  })
+
+  await check('POST /sessions/prune：路径白名单（不跟随符号链接、不动非 uuid 目录与符号链接桶）', async () => {
+    setSessionPruneState()
+    await resetSessions()
+    // 1) uuid 名的符号链接指向 sessions 外面 → 必须跳过，外面临时目录不受影响
+    const outside = path.join(HOME, 'outside-target')
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'keep.txt'), 'keep')
+    const linkBucket = path.join(SESSIONS, '--link--')
+    await mkdir(linkBucket, { recursive: true })
+    await symlink(outside, path.join(linkBucket, STALE))
+    // 2) 非 uuid 目录（如 import-*）不参与清理
+    const importDir = await makeSessionDir('import-ses_abc123', { bucket: '--link--' })
+    // 3) 桶本身是符号链接 → 整桶跳过
+    const outsideBucket = path.join(HOME, 'outside-bucket')
+    await mkdir(path.join(outsideBucket, STALE), { recursive: true })
+    await symlink(outsideBucket, path.join(SESSIONS, '--linkbucket--'))
+    const data = await (await post('/sessions/prune', { keepDays: 7 })).json()
+    assert.ok(!data.removed.some((row) => row.id === STALE), '符号链接目录被判成可清理')
+    assert.ok(existsSync(path.join(outside, 'keep.txt')), '符号链接目标被删了（越界删除）')
+    assert.ok(existsSync(importDir), '非 uuid 目录被删了')
+    assert.ok(existsSync(path.join(outsideBucket, STALE)), '符号链接桶里的目录被删了（越界删除）')
+    return `removed=${data.removed.length} · 符号链接/非 uuid 目录均未动`
+  })
+
+  await check('路由一致性：前端 SESSIONS_PRUNE_PATH === 后端 SESSIONS_PRUNE_ROUTE（/sessions/prune）', async () => {
+    const clientSrc = await readFile(path.join(ROOT, 'client.js'), 'utf8')
+    const hostSrc = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    const literalOf = (src, name) => {
+      const match = new RegExp(name + "\\s*=\\s*'([^']+)'").exec(src)
+      return match ? match[1] : null
+    }
+    const clientPath = literalOf(clientSrc, 'SESSIONS_PRUNE_PATH')
+    const hostRoute = literalOf(hostSrc, 'SESSIONS_PRUNE_ROUTE')
+    assert.ok(clientPath, 'client.js 里找不到 SESSIONS_PRUNE_PATH 常量')
+    assert.ok(hostRoute, 'index.js 里找不到 SESSIONS_PRUNE_ROUTE 常量')
+    assert.equal(clientPath, hostRoute, '前后端路由不一致：client=' + clientPath + ' host=' + hostRoute)
+    assert.equal(hostRoute, '/sessions/prune', '路由必须是 /sessions/prune（HTTP 实际地址 /council/api + 本值）')
+    // 两半都必须用常量而不是硬编码字符串，否则改一处就会静默漂移
+    assert.match(hostSrc, /route === SESSIONS_PRUNE_ROUTE/, 'handler 必须比较 SESSIONS_PRUNE_ROUTE 常量')
+    assert.match(clientSrc, /call\(SESSIONS_PRUNE_PATH/, 'client 必须用 SESSIONS_PRUNE_PATH 常量调用')
+    return `client ${clientPath} === host ${hostRoute}`
+  })
+
+  await check('pruneChildSessionDirs：本轮清理排除所有成员 convId / 组 sessionId / 指挥 convId / 活跃 agent', async () => {
+    await resetSessions()
+    // 本轮成员最后写回的 convId（最容易误删：它就是本轮刚建的）
+    const memberRound = '66666666-6666-4666-8666-666666666666'
+    // 其它成员（上一轮）的 convId
+    const otherMember = '77777777-7777-4777-8777-777777777777'
+    const groupSid = '88888888-8888-4888-8888-888888888888'
+    const commander = '99999999-9999-4999-8999-999999999999'
+    const live = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    // 重试多出来的、没有任何引用的子会话 → 唯一该删的
+    const retryChild = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    setState({
+      ...structuredClone(fixture),
+      groups: [{ id: 'g1', name: 'G1', sessionId: 'session-' + groupSid, commanderConvId: commander, memberIds: ['m_code', 'm_art'] }],
+      members: [
+        { id: 'm_code', name: '代码', kind: 'deepseek', convId: memberRound },
+        { id: 'm_art', name: '画师', kind: 'image', convId: otherMember },
+      ],
+    })
+    const dirs = {}
+    for (const id of [memberRound, otherMember, groupSid, commander, live, retryChild]) {
+      dirs[id] = await makeSessionDir(id, { bucket: '--round--', ageDays: 0 })
+    }
+    const roundCtx = { get: (name) => (name === 'agents' ? { list: () => [{ id: live }] } : undefined) }
+    const removed = await mod.pruneChildSessionDirs(roundCtx, new Set([memberRound, otherMember, groupSid, commander, live, retryChild]))
+    assert.equal(removed.length, 1, '只该删 1 个无引用目录，实际：' + removed.join(','))
+    assert.equal(removed[0], retryChild)
+    for (const id of [memberRound, otherMember, groupSid, commander, live]) {
+      assert.ok(existsSync(dirs[id]), '保留集合里的目录被删了：' + id)
+    }
+    assert.equal(existsSync(dirs[retryChild]), false, '无引用的重试子会话目录没删掉')
+    return `removed=[${retryChild}] · 成员/组/指挥/活跃目录全保留`
+  })
+
+  await check('council_delegate 本轮清理（端到端，假 seam）：重试多出来的子会话被删，成员 convId 指向的保住', async () => {
+    setState(structuredClone(fixture))
+    await resetSessions()
+    const workFail = 'c1111111-1111-4111-8111-111111111111'   // 第 1 次失败
+    const workOk = 'c2222222-2222-4222-8222-222222222222'     // 重试成功
+    const selfReviewId = 'c3333333-3333-4333-8333-333333333333' // 自审（最后写回 member.convId）
+    const bucket = '--e2e--'
+    const workFailDir = await makeSessionDir(workFail, { bucket, ageDays: 0 })
+    const workOkDir = await makeSessionDir(workOk, { bucket, ageDays: 0 })
+    const selfReviewDir = await makeSessionDir(selfReviewId, { bucket, ageDays: 0 })
+    let workCalls = 0
+    const fakeSubagents = {
+      // 假 seam：只回文本，不碰真实子会话；子会话 id 固定，方便比对目录
+      getProvider: () => ({ id: 'spawn' }),
+      startActivation: async (opts) => {
+        const text = (opts.request.prompt || []).map((block) => block.text || '').join('\n')
+        if (text.includes('【自审】')) {
+          return {
+            childId: selfReviewId,
+            result: Promise.resolve({ output: [{ type: 'text', text: '{"ok":true,"reason":"自审通过"}' }], stopReason: 'completed' }),
+            dispose: async () => {},
+          }
+        }
+        workCalls += 1
+        if (workCalls === 1) {
+          return { childId: workFail, result: Promise.resolve({ output: [], stopReason: 'error' }), dispose: async () => {} }
+        }
+        return {
+          childId: workOk,
+          result: Promise.resolve({ output: [{ type: 'text', text: '{"ok":true,"reason":"完成"}' }], stopReason: 'completed' }),
+          dispose: async () => {},
+        }
+      },
+    }
+    const prevGet = ctx.get
+    ctx.get = (name) => (name === 'subagents' ? fakeSubagents : prevGet.call(ctx, name))
+    try {
+      await getState('?sessionId=session-g5') // g5 只有一个 deepseek 成员 → 走 seam
+      const tool = registered.council_delegate
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '随便做点什么' }] },
+        { callId: 'c-round-prune', agent: { id: 'agent-test' } },
+      )
+      assert.equal(workCalls, 2, '第一次失败应触发一次重试（共 2 次真实工作子会话），实际 ' + workCalls)
+      assert.deepEqual(out.prunedSessions, [workFail, workOk], '本轮只该清掉这两条无引用子会话')
+      assert.equal(existsSync(workFailDir), false, '失败的那条子会话目录没删掉')
+      assert.equal(existsSync(workOkDir), false, '重试成功那条（convId 已被自审顶替）没删掉')
+      assert.ok(existsSync(selfReviewDir), '成员 convId 指向的子会话被误删了')
+      assert.equal(findMember('m_code').convId, selfReviewId)
+      const rendered = tool.output.render({}, out)[0].text
+      assert.match(rendered, /## 子会话\n已清理 2 个子会话目录/)
+      return `prunedSessions=[${out.prunedSessions.join(',')}] · convId 指向的保留`
+    } finally {
+      ctx.get = prevGet
+      mod.__setRunKind(undefined)
+    }
+  })
+
 } finally {
   await new Promise((resolve) => server.close(resolve))
   await rm(HOME, { recursive: true, force: true })
