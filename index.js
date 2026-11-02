@@ -16,7 +16,12 @@ import { pathToFileURL } from 'node:url'
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const STATE_FILE = path.join(DSH_HOME, 'storages', 'council.json')
+const WORKSPACE_FILE = path.join(DSH_HOME, 'storages', 'workspace.json')
 const IMAGE_DIR = path.join(DSH_HOME, 'storages', 'council-images')
+/** 归档真源是 workspace.json 的 global.archivedSessionIds；10 秒缓存避免高频 IO。 */
+const ARCHIVED_CACHE_MS = 10_000
+const normalizeSessionId = (value) => String(value || '').replace(/^session-/, '')
+let archivedIdsCache = { at: 0, ids: null }
 const PROFILE_CANDIDATES = [
   process.env.DSH_PROFILE_DIR,
   path.join(os.homedir(), '.dsh', 'profiles', 'web'),
@@ -99,6 +104,56 @@ function save() {
     await writeFile(STATE_FILE, body, 'utf8')
   }).catch((error) => { ctx0?.logger?.('council').warn?.(`save failed: ${error?.message ?? error}`) })
   return saving
+}
+
+/** 读 workspace.json 的 global.archivedSessionIds（归一化去掉 `session-` 前缀），10 秒缓存。 */
+async function archivedSessionIds() {
+  const now = Date.now()
+  if (archivedIdsCache.ids && now - archivedIdsCache.at < ARCHIVED_CACHE_MS) return archivedIdsCache.ids
+  const ids = new Set()
+  try {
+    const parsed = JSON.parse(await readFile(WORKSPACE_FILE, 'utf8'))
+    const list = parsed && parsed.global && Array.isArray(parsed.global.archivedSessionIds)
+      ? parsed.global.archivedSessionIds
+      : []
+    for (const value of list) {
+      const norm = normalizeSessionId(value)
+      if (norm) ids.add(norm)
+    }
+  } catch { /* 读不到就跳过，不报错 */ }
+  archivedIdsCache = { at: now, ids }
+  return ids
+}
+
+/**
+ * 让「组」跟着会话的归档状态走：会话进 archivedSessionIds → 组 archived=true；
+ * 从列表里移除（取消归档）→ 清掉 archived/archivedAt。无 sessionId 的组不动。
+ * @returns {Promise<number>} 变更的组数
+ */
+async function syncArchivedGroups() {
+  try {
+    await load()
+    const ids = await archivedSessionIds()
+    let changed = 0
+    for (const group of state.groups || []) {
+      if (!group || !group.sessionId) continue
+      const desired = ids.has(normalizeSessionId(group.sessionId))
+      if (desired === Boolean(group.archived)) continue
+      if (desired) {
+        group.archived = true
+        group.archivedAt = Date.now()
+      } else {
+        delete group.archived
+        delete group.archivedAt
+      }
+      changed += 1
+    }
+    if (changed) await save()
+    return changed
+  } catch (error) {
+    try { ctx0?.logger?.('council').warn?.(`syncArchivedGroups failed: ${error?.message ?? error}`) } catch { /* ignore */ }
+    return 0
+  }
 }
 
 let ctx0
@@ -1090,6 +1145,45 @@ function activeGroup() {
   return findGroup(state.activeGroupId) ?? state.groups[0]
 }
 
+/**
+ * 拥有这个会话的小组（1:1 绑定）。**归档组不算「当前组」**：
+ * 重新打开一个已归档的会话时不能自动进它的旧小组（组归档只打标、不清 sessionId）。
+ * @param {object} stateLike 组状态（默认取模块 state）
+ * @param {string} sessionId 会话 id，`session-` 前缀可有可无
+ */
+function groupForSession(stateLike, sessionId) {
+  const target = normalizeSessionId(sessionId)
+  if (!stateLike || !target) return null
+  return (stateLike.groups || []).find((group) =>
+    group && group.sessionId && !group.archived && normalizeSessionId(group.sessionId) === target) || null
+}
+
+/**
+ * 会话归档（`workspace/session-stop`）的回调：只打 `archived` + `archivedAt` 标记，
+ * **保留 `sessionId`** —— 否则用户取消归档时 syncArchivedGroups() 找不到这个组，
+ * 自动恢复绑定就断了。绑定的 council_* 工具在这里照旧清理。
+ * @param {string} sessionId 被归档的会话 id
+ * @returns {Promise<object|null>} 被归档的组（没有就不动）
+ */
+async function archiveGroupForSession(sessionId) {
+  await load()
+  const group = groupForSession(state, sessionId)
+  if (!group) return null
+  if (!group.archived) {
+    group.archived = true
+    group.archivedAt = Date.now()
+  }
+  // 绑定键是 `group.id\0<agent.id>`，agent.id 未必等于事件里的 sessionId：
+  // 按组前缀把这个组的绑定全部清掉（cleanup 自己会从 boundAgents 里删）。
+  const prefix = group.id + '\u0000'
+  for (const [key, cleanup] of [...boundAgents]) {
+    if (!key.startsWith(prefix)) continue
+    try { cleanup() } catch { /* ignore */ }
+  }
+  await save()
+  return group
+}
+
 export function apply(ctx, config = {}) {
   ctx0 = ctx
   ctx.inject(['webServer'], (scope) => {
@@ -1112,29 +1206,22 @@ export function apply(ctx, config = {}) {
   ctx.on('workspace/session-stop', (request) => {
     const sid = request && (request.sessionId || (request.session && request.session.id))
     if (!sid) return
-    load().then(async () => {
-      const group = state.groups.find((g) => g.sessionId === sid)
-      if (!group || group.archived) return
-      group.archived = true
-      group.sessionId = undefined
-      const cleanupKey = boundAgents.get(group.id + '\u0000' + sid)
-      if (cleanupKey) { try { cleanupKey() } catch { /* ignore */ } }
-      await save()
-    })
+    archiveGroupForSession(sid)
+      .catch((error) => console.error('[council] archive on session-stop failed:', String(error?.message ?? error)))
   })
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
   // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
+  // 已归档的组不补绑：归档会话不该再拿到 council_* 工具。
   const rebindExisting = () => {
     load().then(() => {
       const agents = ctx.get('agents')
       if (!agents || typeof agents.list !== 'function') return
       let list = []
       try { list = agents.list() || [] } catch { list = [] }
-      const norm = (v) => String(v || '').replace(/^session-/, '')
       for (const agent of list) {
-        const aid = norm(agent && agent.id)
+        const aid = agent && agent.id
         if (!aid) continue
-        const group = state.groups.find((g) => g.sessionId && norm(g.sessionId) === aid)
+        const group = groupForSession(state, aid)
         if (!group) continue
         try { bindAgent(ctx, config, group, agent) } catch (error) {
           console.error('[council] rebind failed:', String((error && error.stack) || error))
@@ -1145,10 +1232,13 @@ export function apply(ctx, config = {}) {
   rebindExisting()
   // 每 20 秒自愈一次：重启/恢复的会话能重新拿到 council_* 工具（绑定是幂等的）
   setInterval(rebindExisting, 20_000).unref?.()
+  // 会话归档 → 对应小组跟着归档：初始化后一次 + 每 30 秒自愈（/state 里也会同步）
+  syncArchivedGroups().catch((error) => console.error('[council] archived sync failed:', String(error?.message ?? error)))
+  setInterval(() => { syncArchivedGroups().catch(() => {}) }, 30_000).unref?.()
   ctx.inject(['agents'], (scope) => {
     scope.on('agent/created', ({ agent }) => {
       load().then(() => {
-        const group = state.groups.find((g) => g.sessionId === agent.id)
+        const group = groupForSession(state, agent && agent.id)
         if (group) { try { bindAgent(ctx, config, group, agent) } catch { /* keep the session usable */ } }
       })
     })
@@ -1164,11 +1254,13 @@ export function createHandler(ctx, config = {}) {
         try {
           await applyProxy(config)
           if (req.method === 'GET' && route === '/state') {
+            // 归档状态随 /state 一起刷新（10 秒缓存内只是一次 Set 查找）
+            try { await syncArchivedGroups() } catch { /* 同步失败不影响状态读取 */ }
             try {
               const sid = url.searchParams.get('sessionId')
               if (sid) {
-                const norm = (v) => String(v || '').replace(/^session-/, '')
-                const group = state.groups.find((g) => g.sessionId && norm(g.sessionId) === norm(sid))
+                // 已归档的组不惰性补绑：归档会话不该再注册 council_* 工具
+                const group = groupForSession(state, sid)
                 const agents = ctx.get('agents')
                 const agent = agents && group && (agents.get?.(group.sessionId) || agents.get?.(sid))
                 if (group && agent) bindAgent(ctx, config, group, agent)
@@ -1283,6 +1375,7 @@ export function createHandler(ctx, config = {}) {
                 workspacePath: body.workspacePath || config.defaultWorkspace || os.homedir(),
                 commander: {},
                 memberIds: [],
+                archived: false,
               }
               state.groups.push(group)
               state.activeGroupId = group.id

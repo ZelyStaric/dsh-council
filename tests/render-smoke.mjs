@@ -30,10 +30,25 @@ withReview.runs = [{
   at: Date.now(),
 }, ...(withReview.runs || [])]
 
+// 会话归档 → 组归档：小组页要显示一行「已归档 N 个」，且列表里不出现归档组
+const archived = structuredClone(payload.state)
+archived.groups = [
+  { id: 'g_bound', name: '当前组', sessionId: 'session-arch-live', memberIds: [] },
+  { id: 'g_old', name: '已归档组', sessionId: 'session-arch-old', archived: true, archivedAt: Date.now(), memberIds: [] },
+]
+
+// 重新打开「已归档会话」（组还带着 sessionId）：不能自动进它的旧小组，页面应回落到「单人模式」
+const archivedBound = structuredClone(payload.state)
+archivedBound.groups = [
+  { id: 'g_old_bound', name: '已归档组（带绑定）', sessionId: 'session-arch-old', archived: true, archivedAt: Date.now(), memberIds: [] },
+]
+
 const FIXTURES = [
   ['live', payload.state],
   ['empty', EMPTY],
   ['with-review', withReview],
+  ['archived', archived],
+  ['archived-bound', archivedBound],
 ]
 
 const CARD_PROPS = {
@@ -74,9 +89,13 @@ for (const [name, state] of FIXTURES) {
     const text = result.text
     if (name === 'empty' && text.length === 0) { console.log(`ok   ${name}/${id}: (no UI for this state)`); continue }
     let expected = (EXPECT[name] || {})[id] || []
-    if (id === 'council' && name !== 'empty') {
+    if (id === 'council' && name === 'archived-bound') {
+      // 组还带着 sessionId 但已归档 → groupForSession 必须排除它，页面回落到「单人模式」
+      expected = ['单人模式', '已归档 1 个']
+    } else if (id === 'council' && name !== 'empty') {
       const bound = Boolean((((state.groups || [])[0]) || {}).sessionId)
       expected = bound ? ['职位', '成员', '总画师风格'] : ['单人模式']
+      if (name === 'archived') expected = expected.concat(['已归档 1 个'])
     }
     const missing = expected.filter((m) => !text.includes(m))
     if (missing.length) {
