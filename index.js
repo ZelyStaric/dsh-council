@@ -36,6 +36,15 @@ const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
  */
 const SESSIONS_PRUNE_ROUTE = '/sessions/prune'
 
+/**
+ * 归档组清理路由：HTTP 实际地址 = `POST /council/api/groups/prune-archived`。
+ * 前端 `client.js` 的 `ARCHIVED_PRUNE_PATH` 必须与本值**逐字相同**；
+ * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
+ */
+const ARCHIVED_PRUNE_ROUTE = '/groups/prune-archived'
+/** 默认只清理「归档超过 30 天」的组（前端按钮文案也用这个数）。 */
+const ARCHIVED_KEEP_DAYS = 30
+
 /** 命令是否存在：避免 spawn 失败时只抛 ENOENT。 */
 async function commandExists(bin) {
   if (!bin) return false
@@ -102,6 +111,59 @@ function pruneGroups() {
     save().catch(() => {})
   }
   return before - state.groups.length
+}
+
+/**
+ * 删掉一个组的名册成员和它们的 usage（组本身由调用方从 state.groups 移除）。
+ * `/groups/delete` 与 `pruneArchivedGroups` 共用，保证「删组」语义只有一份。
+ * @returns {number} 实际从 state.members 里移走的人数
+ */
+function dropGroupRoster(group) {
+  let dropped = 0
+  for (const memberId of (group && group.memberIds) || []) {
+    const before = state.members.length
+    state.members = state.members.filter((member) => member.id !== memberId)
+    if (state.members.length !== before) dropped += 1
+    delete state.usage[memberId]
+  }
+  return dropped
+}
+
+/**
+ * 只清理「已归档且归档时长 > keepDays 天」的小组。
+ *
+ * 入选条件（三条同时满足）：`archived === true`、`archivedAt` 是有限数字、
+ * `now - archivedAt > keepDays * 86400e3`。**缺 `archivedAt` 的归档组一律保留** ——
+ * 判不出归档时长就保守处理，宁可留一个空壳也不误删。
+ * 删除语义与 `POST /groups/delete` 完全一致（连名册成员与 usage 一起清），dryRun 只预览不动 state。
+ *
+ * @param {{dryRun?: boolean, keepDays?: number, now?: number}} [options]
+ * @returns {Promise<{removed: Array<{id: string, name: string, archivedAt: number, members: number}>, kept: number, dryRun: boolean}>}
+ *   `kept` = 归档组里本次没删的数量（含未满 keepDays 的、缺 archivedAt 的）。
+ */
+async function pruneArchivedGroups({ dryRun = false, keepDays = ARCHIVED_KEEP_DAYS, now = Date.now() } = {}) {
+  await load()
+  const windowMs = keepDays * 86_400_000
+  const archivedGroups = (state.groups || []).filter((group) => group && group.archived === true)
+  const doomed = archivedGroups.filter((group) =>
+    typeof group.archivedAt === 'number'
+    && Number.isFinite(group.archivedAt)
+    && (now - group.archivedAt) > windowMs)
+  // members 是名册成员数（与删除动作一一对应；重复 id 极罕见，仍按名册长度报）
+  const removed = doomed.map((group) => ({
+    id: group.id,
+    name: group.name,
+    archivedAt: group.archivedAt,
+    members: (group.memberIds || []).length,
+  }))
+  if (!dryRun && doomed.length) {
+    const ids = new Set(doomed.map((group) => group.id))
+    for (const group of doomed) dropGroupRoster(group)
+    state.groups = state.groups.filter((group) => !ids.has(group.id))
+    if (state.activeGroupId && ids.has(state.activeGroupId)) state.activeGroupId = undefined
+    await save()
+  }
+  return { removed, kept: archivedGroups.length - removed.length, dryRun: Boolean(dryRun) }
 }
 
 let saving = Promise.resolve()
@@ -1243,8 +1305,25 @@ export function apply(ctx, config = {}) {
   // 每 20 秒自愈一次：重启/恢复的会话能重新拿到 council_* 工具（绑定是幂等的）
   setInterval(rebindExisting, 20_000).unref?.()
   // 会话归档 → 对应小组跟着归档：初始化后一次 + 每 30 秒自愈（/state 里也会同步）
-  syncArchivedGroups().catch((error) => console.error('[council] archived sync failed:', String(error?.message ?? error)))
-  setInterval(() => { syncArchivedGroups().catch(() => {}) }, 30_000).unref?.()
+  // 归档同步之后安静地清一次「归档超过 30 天」的小组：启动一次 + 跟着 30 秒循环走。
+  // 失败只记一行日志，绝不影响同步/页面；没有可清理的组时完全静默。
+  const syncAndPruneArchived = async () => {
+    try { await syncArchivedGroups() } catch { /* syncArchivedGroups 内部已记日志 */ }
+    try {
+      const result = await pruneArchivedGroups({ dryRun: false })
+      if (result.removed.length) {
+        try {
+          ctx0?.logger?.('council').info?.(
+            `archived prune: removed ${result.removed.length} group(s) archived > ${ARCHIVED_KEEP_DAYS}d, kept ${result.kept}`,
+          )
+        } catch { /* logger 不可用时不影响清理 */ }
+      }
+    } catch (error) {
+      try { ctx0?.logger?.('council').warn?.(`archived prune failed: ${error?.message ?? error}`) } catch { /* ignore */ }
+    }
+  }
+  syncAndPruneArchived().catch(() => {})
+  setInterval(() => { syncAndPruneArchived().catch(() => {}) }, 30_000).unref?.()
   ctx.inject(['agents'], (scope) => {
     scope.on('agent/created', ({ agent }) => {
       load().then(() => {
@@ -1435,16 +1514,21 @@ export function createHandler(ctx, config = {}) {
             }
             if (route === '/groups/delete') {
               const doomed = findGroup(body.id)
-              if (doomed) {
-                // members belong to their group; deleting the group deletes its roster
-                for (const memberId of doomed.memberIds || []) {
-                  state.members = state.members.filter((m) => m.id !== memberId)
-                  delete state.usage[memberId]
-                }
-              }
+              // members belong to their group; deleting the group deletes its roster
+              if (doomed) dropGroupRoster(doomed)
               state.groups = state.groups.filter((g) => g.id !== body.id)
               await save()
               return send(res, 200, { state })
+            }
+            if (route === ARCHIVED_PRUNE_ROUTE) {
+              // 只清理「已归档且归档时长 > keepDays 天」的小组（HTTP: POST /council/api/groups/prune-archived）。
+              // 缺 archivedAt 的归档组一律保留；dryRun 只预览。返回 { removed, kept, dryRun }。
+              const keepDays = Number(body.keepDays)
+              const result = await pruneArchivedGroups({
+                dryRun: Boolean(body.dryRun),
+                keepDays: Number.isFinite(keepDays) && keepDays >= 0 ? keepDays : ARCHIVED_KEEP_DAYS,
+              })
+              return send(res, 200, result)
             }
             if (route === '/groups/workspace') {
               const group = findGroup(body.id)
