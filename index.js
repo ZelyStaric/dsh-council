@@ -103,8 +103,21 @@ function save() {
 
 let ctx0
 
+/** 正在跑的小组派活：callId → { cancelled, reason }；供 /runs/cancel 停止。 */
+const activeCalls = new Map()
+function callCancelled(callId) {
+  const entry = callId && activeCalls.get(callId)
+  return Boolean(entry && entry.cancelled)
+}
+function signalFor(callId, timeoutMs) {
+  const parts = [AbortSignal.timeout(timeoutMs)]
+  const entry = callId && activeCalls.get(callId)
+  if (entry && entry.controller) parts.push(entry.controller.signal)
+  return parts.length > 1 ? AbortSignal.any(parts) : parts[0]
+}
+
 /** Collect stdout+stderr of one child process; caller owns the timeout. */
-function run(bin, args, { cwd, env, input, timeoutMs = 6 * 60_000 } = {}) {
+function run(bin, args, { cwd, env, input, timeoutMs = 6 * 60_000, signal } = {}) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
       cwd,
@@ -114,6 +127,12 @@ function run(bin, args, { cwd, env, input, timeoutMs = 6 * 60_000 } = {}) {
     let out = ''
     let err = ''
     const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs)
+    const hardKill = () => { try { child.kill('SIGKILL') } catch { /* ignore */ } }
+    const onAbort = () => { try { child.kill('SIGTERM') } catch { /* ignore */ } setTimeout(hardKill, 3000) }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
     child.stdout.on('data', (b) => { out += b })
     child.stderr.on('data', (b) => { err += b })
     child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out, err: `${err}${e.message}` }) })
@@ -134,12 +153,12 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
-  const { code, out, err } = await run(CODEX_BIN, args, { cwd, env })
+  const { code, out, err } = await run(CODEX_BIN, args, { cwd, env, signal })
   const events = jsonLines(out)
   const started = events.find((e) => e.type === 'thread.started')
   const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
@@ -149,6 +168,7 @@ async function runCodex({ cwd, model, resume, prompt, env }) {
   return {
     ok: code === 0 && text.length > 0,
     text,
+    error: text.length ? undefined : 'codex 没有返回任何消息（检查 base/key 或网络）',
     convId: resume ?? started?.thread_id,
     usage: {
       input: usage.input_tokens ?? 0,
@@ -160,7 +180,7 @@ async function runCodex({ cwd, model, resume, prompt, env }) {
 }
 
 /** One Claude Code turn. Resumes the stored session when present. */
-async function runClaude({ cwd, model, resume, prompt, env, noTools }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -170,7 +190,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools }) {
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   if (resume) args.push('--resume', resume)
-  const { code, out, err } = await run(claudeBin, args, { cwd, env })
+  const { code, out, err } = await run(claudeBin, args, { cwd, env, signal })
   const events = jsonLines(out)
   const texts = []
   for (const event of events) {
@@ -249,12 +269,12 @@ async function agentComposition(ctx) {
 /** Run one DeepSeek member through the subagent seam (concurrency + cancellation owned by it). */
 
 /** Continue an already-created child agent instead of spawning a new one. */
-async function continueChild(ctx, parent, member, prompt, timeoutMs) {
+async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
   const subagents = ctx.get('subagents')
   const agents = ctx.get('agents')
   if (!subagents || !agents || typeof subagents.sendMessage !== 'function') return null
   try {
-    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal: AbortSignal.timeout(timeoutMs) })
+    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal: callId ? signalFor(callId, timeoutMs) : AbortSignal.timeout(timeoutMs) })
   } catch (error) {
     console.error('[council] reuse sendMessage failed:', String((error && error.stack) || error))
     return null
@@ -306,7 +326,7 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs) {
   return null
 }
 
-async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs = 6 * 60_000, presetId) {
+async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs = 6 * 60_000, presetId, callId) {
   const subagents = ctx.get('subagents')
   if (!subagents || !parent) {
     return { ok: false, text: '', error: 'DSH subagent seam unavailable (no parent agent)', usage: null }
@@ -342,7 +362,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
         },
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: callId ? signalFor(callId, timeoutMs) : AbortSignal.timeout(timeoutMs),
       delivery: 'caller',
     })
     try {
@@ -430,7 +450,7 @@ async function runDeepseek(ctx, member, prompt, config) {
 }
 
 /** Ask an Anthropic-family member whether an image matches the group style. */
-async function reviewImage(ctx, group, result, config, styleOverride) {
+async function reviewImage(ctx, group, result, config, styleOverride, callId) {
   const inGroup = (m) => (group.memberIds || []).indexOf(m.id) >= 0
   const reviewerId = (group.reviewerId && inGroup({ id: group.reviewerId }) ? group.reviewerId : undefined)
     || (state.members.find((m) => inGroup(m) && m.kind === 'claude') || {}).id
@@ -552,7 +572,7 @@ function rootUrl(value) {
 async function ensureCodexHome(config) {
   const settings = apiSettings(config)
   const key = settings.codexToken || await codexToken()
-  const base = rootUrl(settings.codexBase)
+  const base = rootUrl(settings.codexBase) || rootUrl(await codexCliBase())
   if (!key && !base) return config.codexHome || undefined   // 完全没配 → 用用户自己的 ~/.codex
   const dir = path.join(os.homedir(), '.dsh', 'storages', 'council-codex')
   const wire = String(config.codexWireApi || 'responses')
@@ -614,6 +634,14 @@ function memberPrompt(member, task) {
   return `${head}[任务]\n${task}`
 }
 
+function commanderRole(group) {
+  if (group.commanderPrompt) {
+    return { name: '指挥', prompt: group.commanderPrompt }
+  }
+  const roles = state.roles || []
+  return roles.find((r) => r.name === '指挥' || r.name.indexOf('指挥') === 0) || { name: '指挥', prompt: '' }
+}
+
 function account(memberId, usage) {
   const row = state.usage[memberId] ?? { calls: 0, input: 0, output: 0, costUsd: 0 }
   row.calls += 1
@@ -663,7 +691,7 @@ function verdictOf(text) {
 /** One turn on the member's own framework, preserving its session and tools. */
 
 
-async function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs) {
+async function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
   await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
   let result
@@ -672,7 +700,7 @@ async function runKind(ctx, member, prompt, config, group, styleOverride, parent
     const imagePrompt = style ? `[统一风格规范]\n${style}\n\n[画面]\n${prompt}` : prompt
     result = await runImage(member, imagePrompt, config)
   } else if (member.kind === 'deepseek') {
-    result = await runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, member.__preset)
+    result = await runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId)
   } else {
     if (member.kind === 'claude') {
       const cfgCheck = apiSettings(config)
@@ -688,6 +716,7 @@ async function runKind(ctx, member, prompt, config, group, styleOverride, parent
       prompt,
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
+      signal: callId ? signalFor(callId, 6 * 60_000) : undefined,
     })
   }
   if (result.convId) member.convId = result.convId
@@ -696,9 +725,9 @@ async function runKind(ctx, member, prompt, config, group, styleOverride, parent
 }
 
 /** Stage one: the producing agent reviews its own output in its own session. */
-async function selfReview(ctx, member, task, output, config, group, styleOverride, parent) {
+async function selfReview(ctx, member, task, output, config, group, styleOverride, parent, callId) {
   if (member.kind === 'image') {
-    const verdict = await reviewImage(ctx, group, { file: output.file, task }, config, styleOverride)
+    const verdict = await reviewImage(ctx, group, { file: output.file, task }, config, styleOverride, callId)
     return verdict ? { ok: verdict.ok, reason: verdict.reason, by: verdict.by } : null
   }
   const prompt = [
@@ -709,10 +738,10 @@ async function selfReview(ctx, member, task, output, config, group, styleOverrid
     output.text,
     '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
   ].join('\n')
-  const result = await runKind(ctx, member, prompt, config, group, undefined, parent)
+  const result = await runKind(ctx, member, prompt, config, group, undefined, parent, undefined, callId)
   let parsed = verdictOf(result.text)
   if (parsed === null && result.ok) {
-    const retry = await runKind(ctx, member, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent)
+    const retry = await runKind(ctx, member, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, undefined, callId)
     parsed = verdictOf(retry.text)
   }
   if (parsed === null) console.error('[council] selfReview unparsed raw:', JSON.stringify(String(result.text || '').slice(0, 400)))
@@ -722,11 +751,11 @@ async function selfReview(ctx, member, task, output, config, group, styleOverrid
 }
 
 /** Preliminary check by the member holding the 审校 role. */
-async function prelimReview(ctx, group, member, task, output, config, styleOverride, parent, brief) {
+async function prelimReview(ctx, group, member, task, output, config, styleOverride, parent, brief, callId) {
   const reviewer = memberWithRole(group, '审校')
   if (!reviewer) return null
   if (output && output.image) {
-    return reviewImage(ctx, group, { file: output.file, task }, config, styleOverride)
+    return reviewImage(ctx, group, { file: output.file, task }, config, styleOverride, callId)
   }
   const prompt = [
     '你是这个小组的审校，做初步校验（之后还有指挥的最终审核）。',
@@ -740,11 +769,11 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
   ].join('\n')
   const reviewChildKey = '__reviewConvId'
   reviewer[reviewChildKey] = (state.reviewChildren || {})[reviewer.id]
-  const result = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt, config, group, undefined, parent, 120_000)
+  const result = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt, config, group, undefined, parent, 120_000, callId)
   if (result && result.convId) { state.reviewChildren = state.reviewChildren || {}; state.reviewChildren[reviewer.id] = result.convId; save().catch(() => {}) }
   let parsed = verdictOf(result.text)
   if (parsed === null && result.ok) {
-    const retry = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000)
+    const retry = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000, callId)
     parsed = verdictOf(retry.text)
   }
   const verdict = parsed ?? { ok: null, reason: result.ok ? '审校输出无法解析（已重试一次）' : (result.error || '审校失败') }
@@ -753,14 +782,17 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
 }
 
 /** Stage two: the commander accepts or rejects the delivered work. */
-async function commanderReview(ctx, group, member, task, output, config, parent, brief, styleOverride) {
+async function commanderReview(ctx, group, member, task, output, config, parent, brief, styleOverride, callId) {
   // 指挥 is whichever member holds the 指挥 role in this group.
   const commanderMember = memberWithRole(group, '指挥')
   if (commanderMember && output && output.image && output.file) {
     // 图片产出：任何腿都要真看图（claude 用 Read，deepseek 子代理用 read_image）
     const style = String(styleOverride || (group && group.style) || '')
     const filePath = JSON.stringify(String(output.file))
+    const cmdRole = commanderRole(group)
     const imagePrompt = [
+      `[你的职位] ${cmdRole.name}`,
+      cmdRole.prompt ? `[职位职责与风格]\n${cmdRole.prompt}\n` : '',
       '你是这个小组的指挥，现在对这张图做最终验收。',
       '统一风格规范：' + (style || '（未指定，按画面要求判断）'),
       '',
@@ -770,10 +802,10 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 80 字的中文理由"}',
     ].join('\n')
     const imgReviewer = Object.assign({}, commanderMember, { convId: commanderMember.convId, __reuse: true })
-    let seen = await runKind(ctx, imgReviewer, imagePrompt, config, group, styleOverride, parent, 120_000)
+    let seen = await runKind(ctx, imgReviewer, imagePrompt, config, group, styleOverride, parent, 120_000, callId)
     let parsed = verdictOf(seen.text)
     if (parsed === null && seen.ok) {
-      const retry = await runKind(ctx, imgReviewer, imagePrompt + '\n\n注意：只输出 JSON，不要任何解释。', config, group, styleOverride, parent, 120_000)
+      const retry = await runKind(ctx, imgReviewer, imagePrompt + '\n\n注意：只输出 JSON，不要任何解释。', config, group, styleOverride, parent, 120_000, callId)
       parsed = verdictOf(retry.text)
     }
     const verdict = parsed ?? { ok: null, reason: seen.ok ? '指挥看图后输出无法解析（已重试一次）' : (seen.error || '指挥读图失败') }
@@ -782,7 +814,10 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     return verdict
   }
   if (commanderMember) {
+    const cmdRole = commanderRole(group)
     const prompt = [
+      `[你的职位] ${cmdRole.name}`,
+      cmdRole.prompt ? `[职位职责与风格]\n${cmdRole.prompt}\n` : '',
       '你是这个小组的指挥，现在做验收。',
       '禁止使用任何工具，也不要浏览文件系统；只根据下面的信息判断，立即只输出 JSON。',
       '注意：你看不到磁盘，不要以"缺截图/缺文件"为由驳回；只判文本层面的缺失与矛盾。',
@@ -794,10 +829,10 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
     const reviewMember = Object.assign({}, commanderMember, { convId: commanderMember.convId, __preset: 'minimal', __noTools: true, __reuse: true })
-    const result = await runKind(ctx, reviewMember, prompt, config, group, undefined, parent, 120_000)
+    const result = await runKind(ctx, reviewMember, prompt, config, group, undefined, parent, 120_000, callId)
     let parsed = verdictOf(result.text)
     if (parsed === null && result.ok) {
-      const retry = await runKind(ctx, reviewMember, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000)
+      const retry = await runKind(ctx, reviewMember, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000, callId)
       parsed = verdictOf(retry.text)
     }
     const verdict = parsed ?? { ok: null, reason: result.ok ? '指挥审核输出无法解析（已重试一次）' : (result.error || '审核失败') }
@@ -826,7 +861,7 @@ async function planWithCommander(ctx, group, request, config, parent) {
     ? '\n\n[你之前为这个小组做过的事（摘要）]\n' + cmem.digest
     : ''
   const commanderOpts = { convId: commander.convId, __preset: 'minimal', __noTools: true, __reuse: true }
-  const planned = await runKind(ctx, Object.assign({}, commander, commanderOpts), prompt + cdigest, config, group, undefined, parent)
+  const planned = await runKind(ctx, Object.assign({}, commander, commanderOpts), prompt + cdigest, config, group, undefined, parent, undefined, callId)
   if (planned && planned.convId) { commander.convId = planned.convId; save().catch(() => {}) }
   const plan = parsePlan(planned.text)
   return {
@@ -836,15 +871,16 @@ async function planWithCommander(ctx, group, request, config, parent) {
   }
 }
 
-async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork) {
+async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId) {
   const role = roleOf(member)
   const memory = (state.memberMemory || {})[member.id]
   const memoryBlock = memory && memory.digest && (state.config || {}).memoryInject !== false
     ? '\n\n[你之前为这个小组做过的事（摘要）]\n' + memory.digest
     : ''
-  const prompt = memberPrompt(member, task) + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
+  const standardBlock = group.standard ? '\n\n[验收标准]\n' + group.standard : ''
+  const prompt = memberPrompt(member, task) + standardBlock + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
   if (onStage) onStage('执行中（' + member.kind + '）')
-  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent)
+  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId)
   // watchdog retry: a timeout / dead agent gets one more attempt on the same member
   const maxAttempts = 2
   let attempt = 1
@@ -853,10 +889,11 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     const why = String(result.error || '无输出')
     if (onStage) onStage('重试中（第 ' + attempt + ' 次，上次：' + why.slice(0, 40) + '）')
     const retryPrompt = prompt + '\n\n[上次失败] ' + why + '\n请重新完成任务，直接给出结果。'
-    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent)
+    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent, undefined, callId)
     await save().catch(() => {})
   }
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
+  if (callCancelled(callId)) return { memberId: member.id, name: member.name, role: role?.name, kind: member.kind, model: member.model, ok: false, accepted: false, acceptance: 'cancelled', text: '', error: '已被用户停止' }
   if (onWork) { try { onWork(result) } catch { /* ignore */ } }
   if (result && result.ok) {
     // 用完即弃的子 agent：把这次的关键结论压成摘要，下一轮重新注入
@@ -869,9 +906,16 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   }
   const review = { self: null, commander: null, attempts: 1 }
   const verdictOf = (v) => (v ? (v.ok === true ? 'passed' : v.ok === false ? 'rejected' : 'unverified') : null)
+  const requirePrelim = group.requirePrelim ?? true
+  const requireCommander = group.requireCommander ?? true
+  const maxRework = group.maxRework ?? 1
+  const hasPrelimReviewer = Boolean(memberWithRole(group, '审校'))
+  const hasCommanderReviewer = Boolean(memberWithRole(group, '指挥'))
+  const expectReviews = (requirePrelim && hasPrelimReviewer) || (requireCommander && hasCommanderReviewer)
   const acceptanceOf = () => {
     const list = [review.self, review.commander].map(verdictOf).filter(Boolean)
-    if (!list.length) return 'none'            // 本组没配审校/指挥 → 不做验收
+    // 本组根本没有审核位 → 不做验收；配了审核却一粒结论都没拿到 → 未判定（必须返工）
+    if (!list.length) return expectReviews ? 'unverified' : 'none'
     if (list.includes('rejected')) return 'rejected'
     if (list.includes('unverified')) return 'unverified'
     return 'passed'
@@ -881,35 +925,49 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   let reworkFailed = false
 
   if (result.ok) {
-    if (onStage) onStage('初审（审校）')
-    review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief)
-    review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent)
-    if (onStage) onStage('终审（指挥）')
-    review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride)
+    if (requirePrelim) {
+      if (onStage) onStage('初审（审校）')
+      review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
+      review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
+    }
+    if (requireCommander) {
+      if (onStage) onStage('终审（指挥）')
+      review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
+    }
     acceptance = acceptanceOf()
 
-    // 被否 / 未判定 都要返工一次（之前 null 被当成通过）
-    if (acceptance === 'rejected' || acceptance === 'unverified') {
+    // 被否 / 未判定 一律返工，次数由 maxRework 控制（0 = 不返工，仅标记）
+    let round = 0
+    while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework) {
+      round += 1
       const blocks = []
       if (verdictOf(review.self) === 'rejected') blocks.push(`[自审未通过] ${review.self.reason}`)
       if (verdictOf(review.self) === 'unverified') blocks.push(`[自审未判定] ${review.self.reason}`)
       if (verdictOf(review.commander) === 'rejected') blocks.push(`[指挥验收未通过] ${review.commander.reason}`)
       if (verdictOf(review.commander) === 'unverified') blocks.push(`[指挥验收未判定] ${review.commander.reason}`)
-      const rework = `${memberPrompt(member, task)}${WORK_STYLE}\n\n${blocks.join('\n')}\n请修正后重新提交。`
-      review.attempts = 2                      // 先记次数：返工即使失败也算尝试过
-      const second = await runKind(ctx, member, rework, config, group, styleOverride, parent)
-      if (second.ok) {
-        result = second
-        review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief)
-        review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent)
-        if (onStage) onStage('终审（指挥）')
-        review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride)
-        acceptance = acceptanceOf()
-      } else {
+      if (onStage) onStage('返工（第 ' + round + ' 次）')
+      const rework = `${memberPrompt(member, task)}${standardBlock}${WORK_STYLE}\n\n${blocks.join('\n')}\n请修正后重新提交。`
+      review.attempts = 1 + round              // 先记次数：返工即使失败也算尝试过
+      const second = await runKind(ctx, member, rework, config, group, styleOverride, parent, undefined, callId)
+      if (!second.ok) {
         reworkFailed = true
         reworkError = String(second.error || '返工未返回产出')
-        acceptance = 'rework-failed'           // 保留首次产出，但明确标记返工失败
+        acceptance = 'rework-failed'           // 保留上一次产出，但明确标记返工失败
+        break
       }
+      result = second
+      review.reworkError = undefined
+      if (requirePrelim) {
+        review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
+        review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
+      }
+      if (requireCommander) {
+        if (onStage) onStage('终审（指挥）')
+        review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
+      }
+      acceptance = acceptanceOf()
+      reworkFailed = false
+      reworkError = undefined
     }
   }
 
@@ -1052,6 +1110,29 @@ export function apply(ctx, config = {}) {
       await save()
     })
   })
+  // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
+  // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
+  const rebindExisting = () => {
+    load().then(() => {
+      const agents = ctx.get('agents')
+      if (!agents || typeof agents.list !== 'function') return
+      let list = []
+      try { list = agents.list() || [] } catch { list = [] }
+      const norm = (v) => String(v || '').replace(/^session-/, '')
+      for (const agent of list) {
+        const aid = norm(agent && agent.id)
+        if (!aid) continue
+        const group = state.groups.find((g) => g.sessionId && norm(g.sessionId) === aid)
+        if (!group) continue
+        try { bindAgent(ctx, config, group, agent) } catch (error) {
+          console.error('[council] rebind failed:', String((error && error.stack) || error))
+        }
+      }
+    }).catch((error) => console.error('[council] rebind load failed:', String(error?.message ?? error)))
+  }
+  rebindExisting()
+  // 每 20 秒自愈一次：重启/恢复的会话能重新拿到 council_* 工具（绑定是幂等的）
+  setInterval(rebindExisting, 20_000).unref?.()
   ctx.inject(['agents'], (scope) => {
     scope.on('agent/created', ({ agent }) => {
       load().then(() => {
@@ -1071,6 +1152,16 @@ export function createHandler(ctx, config = {}) {
         try {
           await applyProxy(config)
           if (req.method === 'GET' && route === '/state') {
+            try {
+              const sid = url.searchParams.get('sessionId')
+              if (sid) {
+                const norm = (v) => String(v || '').replace(/^session-/, '')
+                const group = state.groups.find((g) => g.sessionId && norm(g.sessionId) === norm(sid))
+                const agents = ctx.get('agents')
+                const agent = agents && group && (agents.get?.(group.sessionId) || agents.get?.(sid))
+                if (group && agent) bindAgent(ctx, config, group, agent)
+              }
+            } catch { /* 绑定失败不影响状态读取 */ }
             return send(res, 200, { state, config: publicConfig(config) })
           }
           if (req.method === 'POST') {
@@ -1128,6 +1219,10 @@ export function createHandler(ctx, config = {}) {
               return send(res, 200, { state, member })
             }
             if (route === '/members/delete') {
+              // 与 council_member 工具同样保护：不许把组里最后一个成员删光（面板误点会直接废掉小组）
+              const owning = state.groups.filter((g) => (g.memberIds || []).includes(body.id))
+              const wouldEmpty = owning.find((g) => (g.memberIds || []).length <= 1)
+              if (wouldEmpty) return send(res, 409, { error: 'cannot delete the last member of group ' + wouldEmpty.id })
               state.members = state.members.filter((m) => m.id !== body.id)
               for (const g of state.groups) g.memberIds = g.memberIds.filter((id) => id !== body.id)
               delete state.usage[body.id]
@@ -1215,6 +1310,31 @@ export function createHandler(ctx, config = {}) {
                 group.workspacePath = body.workspacePath
                 await ensureWorkspace(ctx, group)
               }
+              await save()
+              return send(res, 200, { state })
+            }
+            if (route === '/runs/cancel') {
+              console.error('[council] cancel requested at ' + Date.now() + ' running=' + JSON.stringify([...activeCalls.keys()]))
+              const target = body.callId || body.id
+              let stopped = 0
+              if (!target || body.all) {
+                for (const [id, entry] of activeCalls) { entry.cancelled = true; try { entry.controller.abort() } catch { /* */ } stopped += 1 }
+              } else if (activeCalls.has(target)) {
+                const entry = activeCalls.get(target)
+                entry.cancelled = true
+                try { entry.controller.abort() } catch { /* */ }
+                stopped = 1
+              }
+              return send(res, 200, { stopped, running: [...activeCalls.keys()], at: Date.now() })
+            }
+            if (route === '/groups/policy') {
+              const group = findGroup(body.id)
+              if (!group) return send(res, 404, { error: 'group not found' })
+              if (body.maxRework !== undefined) group.maxRework = Math.max(0, Math.floor(body.maxRework))
+              if (body.requirePrelim !== undefined) group.requirePrelim = Boolean(body.requirePrelim)
+              if (body.requireCommander !== undefined) group.requireCommander = Boolean(body.requireCommander)
+              if (body.standard !== undefined) group.standard = String(body.standard)
+              if (body.commanderPrompt !== undefined) group.commanderPrompt = String(body.commanderPrompt)
               await save()
               return send(res, 200, { state })
             }
@@ -1421,6 +1541,17 @@ function progressSet(callId, memberId, patch) {
 }
 
 /** Human/roster text injected into a bound chat session's system prompt. */
+function mandateText(group) {
+  return [
+    '【小组模式约束】',
+    '本会话已开启「小组模式」。凡是用户提出的任务类请求（写代码、改文件、跑命令、出图、做音乐、建模、调研等），必须用 council_delegate 工具派给成员完成。',
+    '你自己不得编写实现代码、不得直接修改文件或执行构建命令来完成任务（只能读取、检查、验收）。',
+    '例外只有三种：① 用户明确说"你自己做"或"你直接改"；② 只是回答关于小组本身的问题（怎么用、成员有谁、为什么失败）；③ 需要检查文件/日志/状态来验收或排障（只读操作）。',
+    '若你发现自己在写代码或跑构建命令，立即停下，改用 council_delegate 派给成员。',
+    '违反这条 = 任务失败。',
+  ].join('\n')
+}
+
 function rosterText(group) {
   const members = (group.memberIds || [])
     .map((id) => state.members.find((m) => m.id === id))
@@ -1431,7 +1562,7 @@ function rosterText(group) {
     })
     .join('\n')
   return [
-    `你是小组「${group.name}」的指挥，正在一个群聊会话里。需要成员干活时调用 council_delegate，一次把全部任务派下去。`,
+    `你是小组「${group.name}」的指挥，正在群聊会话里。任务类请求必须用 council_delegate 派给成员。`,
     `工作区：${group.workspacePath || ''}`,
     group.style ? `统一风格规范（出图默认用这条）：${group.style}` : '',
     '派图任务时如需换风格，给该条 assignment 加 style 字段覆盖默认值；审校会按实际使用的风格判定。',
@@ -1450,6 +1581,11 @@ function bindAgent(ctx, config, group, agent) {
   const agentCtx = agent.ctx || ctx
   const disposers = []
   try {
+    disposers.push(agentCtx.systemPrompt.section({
+      name: 'council:mandate:' + group.id,
+      order: 100,
+      text: () => mandateText(state.groups.find((g) => g.id === group.id) || group),
+    }))
     disposers.push(agentCtx.systemPrompt.section({
       name: 'council:roster:' + group.id,
       order: 1500,
@@ -1518,7 +1654,8 @@ function bindAgent(ctx, config, group, agent) {
             const accept = m.accepted === false
               ? `\n验收：未通过（${m.acceptance === 'rework-failed' ? '返工失败：' + (m.reworkError || '未返回产出') : m.acceptance === 'unverified' ? '审核未判定' : '审核拒绝'}）`
               : ''
-            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}`
+            const noReview = m.acceptance === 'none' ? '\n验收：无审核位（本组没有审校/指挥），本轮未做验收' : ''
+            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           return [{ type: 'text', text: planLine ? planLine + '\n\n' + body : body }]
@@ -1528,6 +1665,7 @@ function bindAgent(ctx, config, group, agent) {
         const live = state.groups.find((g) => g.id === group.id) || group
         const callId = exec && exec.callId
         progressInit(callId, exec && exec.agent && exec.agent.id)
+        if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
         let assignments = Array.isArray(args && args.assignments) ? args.assignments : []
         let planRaw
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
@@ -1597,13 +1735,18 @@ function bindAgent(ctx, config, group, agent) {
           }
           const brief = briefParts.join('\n')
           progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '排队中' })
+          if (callCancelled(callId)) {
+            progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '已停止' })
+            return { name: member.name, kind: member.kind, ok: false, text: '', error: '已被用户停止', accepted: false, acceptance: 'cancelled' }
+          }
           const result = await callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
               const body = work.ok ? (work.text || '') : '失败：' + (work.error || '')
               append('## ' + member.name + '（' + member.kind + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
-            })
+            }, callId)
+          if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
           const reviewChunks = []
           if (result.review && result.review.self) {
             const who = result.review.prelim && reviewer ? reviewer : member
@@ -1647,11 +1790,223 @@ function bindAgent(ctx, config, group, agent) {
           if (progressEntry) progressEntry.finishedAt = Date.now()
         }
         entry.endSeq = currentSeq()
+        if (callId) activeCalls.delete(callId)
         entry.running = false
         history.at = Date.now()
         history.text = entry.text
         await save()
         return { members: results }
+      },
+    }))
+    disposers.push(agentCtx.tools.register({
+      name: 'council_member',
+      description: '管理小组成员：列出、创建、更新或删除成员。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['list', 'create', 'update', 'delete'], description: '操作类型' },
+          id: { type: 'string', description: 'update/delete 时的成员 id' },
+          name: { type: 'string', description: '成员名字' },
+          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'], description: '成员类型' },
+          model: { type: 'string', description: '模型名称' },
+          roleId: { type: 'string', description: '职位 id' },
+          cwd: { type: 'string', description: '工作目录' },
+        },
+        required: ['action'],
+      },
+            output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {members: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }},
+        },
+        render(_args, value) { const rows = (value.members || []).map((m) => `- ${m.name}（${m.kind}${m.model ? ' / ' + m.model : ''}${m.roleName ? ' / ' + m.roleName : ''}）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无成员）') }] },
+      },
+async execute(args) {
+        const live = state.groups.find((g) => g.id === group.id) || group
+        if (args.action === 'list') {
+          const members = (live.memberIds || [])
+            .map((id) => state.members.find((m) => m.id === id))
+            .filter(Boolean)
+            .map((m) => {
+              const role = m.roleId ? state.roles.find((r) => r.id === m.roleId) : undefined
+              return { id: m.id, name: m.name, kind: m.kind, model: m.model, roleId: m.roleId, roleName: role?.name, cwd: m.cwd }
+            })
+          return { members }
+        }
+        if (args.action === 'create') {
+          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
+          const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
+          const member = {
+            id: `m_${randomUUID().slice(0, 8)}`,
+            name: args.name || '新成员',
+            kind,
+            model: args.model || defaultModels[kind],
+            provider: kind === 'deepseek' ? 'deepseek-official' : undefined,
+            roleId: args.roleId,
+            cwd: args.cwd || undefined,
+          }
+          state.members.push(member)
+          if (!live.memberIds.includes(member.id)) live.memberIds.push(member.id)
+          await save()
+          return { ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model } }
+        }
+        if (args.action === 'update') {
+          if (!args.id) return { ok: false, error: 'id required for update' }
+          const member = state.members.find((m) => m.id === args.id)
+          if (!member) return { ok: false, error: 'member not found: ' + args.id }
+          if (args.name !== undefined) member.name = args.name
+          if (args.kind !== undefined && args.kind !== member.kind) {
+            member.kind = args.kind
+            delete member.convId
+          }
+          if (args.model !== undefined) member.model = args.model
+          if (args.roleId !== undefined) member.roleId = args.roleId || undefined
+          if (args.cwd !== undefined) member.cwd = args.cwd || undefined
+          await save()
+          return { ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model } }
+        }
+        if (args.action === 'delete') {
+          if (!args.id) return { ok: false, error: 'id required for delete' }
+          const inGroup = (live.memberIds || []).includes(args.id)
+          if (!inGroup) return { ok: false, error: 'member not in this group' }
+          if (live.memberIds.length <= 1) return { ok: false, error: 'cannot delete the last member' }
+          const agents = ctx.get('agents')
+          const parentAgent = agents ? agents.get(live.sessionId) : undefined
+          if (parentAgent && args.id === parentAgent.id) return { ok: false, error: 'cannot delete the parent session' }
+          state.members = state.members.filter((m) => m.id !== args.id)
+          live.memberIds = live.memberIds.filter((id) => id !== args.id)
+          delete state.usage[args.id]
+          await save()
+          return { ok: true }
+        }
+        return { ok: false, error: 'unknown action' }
+      },
+    }))
+    disposers.push(agentCtx.tools.register({
+      name: 'council_role',
+      description: '管理职位：列出、创建、更新（含改名）、删除或分配职位。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['list', 'create', 'update', 'delete', 'assign'], description: '操作类型' },
+          id: { type: 'string', description: 'update/delete/assign 时的职位 id' },
+          name: { type: 'string', description: '职位名称' },
+          prompt: { type: 'string', description: '职位提示词' },
+          color: { type: 'string', description: '职位颜色' },
+          memberId: { type: 'string', description: 'assign 时的成员 id' },
+        },
+        required: ['action'],
+      },
+            output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {roles: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }},
+        },
+        render(_args, value) { const rows = (value.roles || []).map((r) => `- ${r.name}（${r.assigned || 0} 人）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无职位）') }] },
+      },
+async execute(args) {
+        if (args.action === 'list') {
+          const roles = state.roles.map((r) => ({ id: r.id, name: r.name, prompt: r.prompt, color: r.color }))
+          return { roles }
+        }
+        if (args.action === 'create') {
+          const role = {
+            id: `r_${randomUUID().slice(0, 8)}`,
+            name: args.name || '新职位',
+            prompt: args.prompt || '',
+            color: args.color || undefined,
+          }
+          state.roles.push(role)
+          await save()
+          return { ok: true, role: { id: role.id, name: role.name } }
+        }
+        if (args.action === 'update') {
+          if (!args.id) return { ok: false, error: 'id required for update' }
+          const role = state.roles.find((r) => r.id === args.id)
+          if (!role) return { ok: false, error: 'role not found: ' + args.id }
+          if (args.name !== undefined) role.name = args.name
+          if (args.prompt !== undefined) role.prompt = args.prompt
+          if (args.color !== undefined) role.color = args.color
+          await save()
+          return { ok: true, role: { id: role.id, name: role.name } }
+        }
+        if (args.action === 'delete') {
+          if (!args.id) return { ok: false, error: 'id required for delete' }
+          state.roles = state.roles.filter((r) => r.id !== args.id)
+          for (const m of state.members) if (m.roleId === args.id) delete m.roleId
+          await save()
+          return { ok: true }
+        }
+        if (args.action === 'assign') {
+          if (!args.id) return { ok: false, error: 'role id required for assign' }
+          if (!args.memberId) return { ok: false, error: 'memberId required for assign' }
+          const role = state.roles.find((r) => r.id === args.id)
+          if (!role) return { ok: false, error: 'role not found: ' + args.id }
+          const member = state.members.find((m) => m.id === args.memberId)
+          if (!member) return { ok: false, error: 'member not found: ' + args.memberId }
+          member.roleId = args.id
+          await save()
+          return { ok: true, member: { id: member.id, name: member.name, roleName: role.name } }
+        }
+        return { ok: false, error: 'unknown action' }
+      },
+    }))
+    disposers.push(agentCtx.tools.register({
+      name: 'council_policy',
+      description: '获取或设置小组的验收策略（maxRework, requirePrelim, requireCommander, standard, commanderPrompt）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['get', 'set'], description: '操作类型' },
+          maxRework: { type: 'number', description: '最多返工次数（0 表示不返工）' },
+          requirePrelim: { type: 'boolean', description: '是否需要初审' },
+          requireCommander: { type: 'boolean', description: '是否需要指挥审核' },
+          standard: { type: 'string', description: '验收标准文本' },
+          commanderPrompt: { type: 'string', description: '指挥提示词' },
+        },
+        required: ['action'],
+      },
+            output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {maxRework: { type: 'number' }, requirePrelim: { type: 'boolean' }, requireCommander: { type: 'boolean' }, standard: { type: 'string' }, commanderPrompt: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' }},
+        },
+        render(_args, value) { if (value.error) return [{ type: 'text', text: '失败：' + value.error }]; return [{ type: 'text', text: `返工次数=${value.maxRework} 初审=${Boolean(value.requirePrelim)} 指挥审核=${Boolean(value.requireCommander)} 规范=${value.standard ? '已设置' : '空'} 指挥提示词=${value.commanderPrompt ? '已覆盖' : '默认'}` }] },
+      },
+async execute(args) {
+        const live = state.groups.find((g) => g.id === group.id) || group
+        if (args.action === 'get') {
+          return {
+            maxRework: live.maxRework ?? 1,
+            requirePrelim: live.requirePrelim ?? true,
+            requireCommander: live.requireCommander ?? true,
+            standard: live.standard ?? '',
+            commanderPrompt: live.commanderPrompt ?? '',
+          }
+        }
+        if (args.action === 'set') {
+          if (args.maxRework !== undefined) live.maxRework = Math.max(0, Math.floor(args.maxRework))
+          if (args.requirePrelim !== undefined) live.requirePrelim = Boolean(args.requirePrelim)
+          if (args.requireCommander !== undefined) live.requireCommander = Boolean(args.requireCommander)
+          if (args.standard !== undefined) live.standard = String(args.standard)
+          if (args.commanderPrompt !== undefined) live.commanderPrompt = String(args.commanderPrompt)
+          await save()
+          return {
+            ok: true,
+            maxRework: live.maxRework ?? 1,
+            requirePrelim: live.requirePrelim ?? true,
+            requireCommander: live.requireCommander ?? true,
+            standard: live.standard ?? '',
+            commanderPrompt: live.commanderPrompt ?? '',
+          }
+        }
+        return { ok: false, error: 'unknown action' }
       },
     }))
   } catch (error) {

@@ -296,7 +296,12 @@ window.__ModuleLoader__.load({
             onBlur: (event) => { mutate('/roles', { id: role.id, name: event.target.value }); setEditing(null) },
             onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
           })
-          : h('strong', { onDoubleClick: () => setEditing(role.id), title: '双击改名' }, role.name)
+          : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+            h('strong', { onDoubleClick: () => setEditing(role.id), title: '双击改名' }, role.name),
+            h('span', {
+              onClick: () => setEditing(role.id), title: '重命名职位',
+              style: { cursor: 'pointer', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+            }, '✎'))
         return h('div', {
           key: role.id,
           style: Object.assign({}, styles.roleRow, dropRole === role.id ? styles.dropActive : null),
@@ -497,6 +502,59 @@ window.__ModuleLoader__.load({
           h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'claude', groupId: group.id }) }, '+ 成员（claude）'),
           h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 成员（deepseek）'),
           h(Button, { onClick: () => mutate('/members', { name: '画师', kind: 'image', groupId: group.id }) }, '+ 成员（image）')),
+        h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
+          h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '验收策略'),
+          h('div', { style: { display: 'flex', gap: 12, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
+            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('span', { style: styles.muted }, '返工次数'),
+              h('select', {
+                id: 'policy-maxRework',
+                style: Object.assign({}, styles.input, { width: 80 }),
+                defaultValue: String(group.maxRework ?? 1),
+              }, ['0', '1', '2'].map((v) => h('option', { key: v, value: v }, v)))),
+            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
+                id: 'policy-requirePrelim',
+                defaultChecked: group.requirePrelim ?? true,
+              }),
+              h('span', { style: styles.muted }, '需要初审')),
+            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
+                id: 'policy-requireCommander',
+                defaultChecked: group.requireCommander ?? true,
+              }),
+              h('span', { style: styles.muted }, '需要指挥审核')),
+            h(Button, {
+              onClick: () => {
+                const maxRework = parseInt(document.getElementById('policy-maxRework').value, 10)
+                const requirePrelim = document.getElementById('policy-requirePrelim').checked
+                const requireCommander = document.getElementById('policy-requireCommander').checked
+                const standard = document.getElementById('policy-standard').value
+                const commanderPrompt = document.getElementById('policy-commanderPrompt').value
+                mutate('/groups/policy', {
+                  id: group.id,
+                  maxRework,
+                  requirePrelim,
+                  requireCommander,
+                  standard,
+                  commanderPrompt,
+                })
+              },
+            }, '保存策略')),
+          h('textarea', {
+            id: 'policy-standard',
+            style: Object.assign({}, styles.input, { marginTop: 8, minHeight: 46, resize: 'vertical' }),
+            defaultValue: group.standard || '',
+            placeholder: '验收标准（追加到每个任务）',
+          }),
+          h('textarea', {
+            id: 'policy-commanderPrompt',
+            style: Object.assign({}, styles.input, { marginTop: 8, minHeight: 46, resize: 'vertical' }),
+            defaultValue: group.commanderPrompt || '',
+            placeholder: '指挥提示词（覆盖「指挥」职位提示词）',
+          })),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '总画师风格（注入所有出图任务；留空则不校验）'),
           h('textarea', {
@@ -1168,7 +1226,23 @@ window.__ModuleLoader__.load({
         ? members.map((m, i) => h('span', { key: i, style: styles.chip },
           (m.name || '成员') + ' · ' + (m.stage || '…') + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')))
         : h('span', { style: styles.muted }, '准备中…'),
-      h('span', { style: { flex: 1 } }), jumpChip)
+      h('span', { style: { flex: 1 } }),
+      h('span', {
+        onClick: async () => {
+          if (entry.stoppedAt) return
+          setEntry((prev) => (prev ? Object.assign({}, prev, { stoppedAt: Date.now() }) : prev))
+          try {
+            await call('/runs/cancel', { all: true })
+          } catch { /* ignore */ }
+        },
+        title: entry.stoppedAt ? '已发送停止请求，正在终止…' : '停止本轮所有成员（立即终止进行中的 CLI / 子代理）',
+        style: {
+          cursor: entry.stoppedAt ? 'default' : 'pointer', padding: '2px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600,
+          color: '#fff', background: entry.stoppedAt ? '#8a5a5a' : '#e5484d', border: '1px solid #c93a3f',
+          opacity: entry.stoppedAt ? 0.7 : 1,
+        },
+      }, entry.stoppedAt ? '取消中…' : '停止'),
+      jumpChip)
     }
 
 
