@@ -31,10 +31,12 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
+export function __resetArchivedCache() { archivedIdsCache = { at: 0, ids: null } }
+export function __boundAgentsSize() { return boundAgents.size }
 `
 const moduleFile = path.join(HOME, 'index.exposed.mjs')
 await writeFile(moduleFile, exposed)
@@ -283,7 +285,7 @@ const agent = {
     effect: () => {},
   },
 }
-const agents = { get: (sid) => (String(sid || '') === 'session-g5' ? agent : undefined) }
+const agents = { get: (sid) => (['session-g5', 'session-arch-test'].includes(String(sid || '')) ? agent : undefined) }
 const ctx = { get: (name) => (name === 'agents' ? agents : undefined), logger: { warn() {} }, effect: () => {} }
 const config = {
   codexBaseUrl: 'http://127.0.0.1:9', claudeBaseUrl: 'http://127.0.0.1:9', claudeApiKey: 'test-key',
@@ -657,6 +659,130 @@ try {
     const state = await getState()
     assert.ok(!state.state.roles.some((r) => r.id === tempId))
     return '已删除'
+  })
+
+  /* ── 归档同步：workspace.json global.archivedSessionIds → group.archived ── */
+  const WORKSPACE_FILE = path.join(HOME, 'storages', 'workspace.json')
+  async function writeArchivedFixture(ids) {
+    await mkdir(path.dirname(WORKSPACE_FILE), { recursive: true })
+    await writeFile(WORKSPACE_FILE, JSON.stringify({ global: { archivedSessionIds: ids } }, null, 2), 'utf8')
+    mod.__resetArchivedCache() // 10 秒缓存对测试不友好，改夹具后必须清掉
+  }
+
+  await check('归档同步①：会话已归档 → 对应组 archived=true + archivedAt', async () => {
+    setState(structuredClone(fixture))
+    await writeArchivedFixture(['session-g5'])
+    const changed = await mod.syncArchivedGroups()
+    const group = mod.state.groups.find((g) => g.id === 'g5')
+    assert.equal(changed, 1)
+    assert.equal(group.archived, true)
+    assert.equal(typeof group.archivedAt, 'number')
+    assert.ok(group.archivedAt > 0)
+    return `g5 archived=true · archivedAt=${group.archivedAt} · changed=${changed}`
+  })
+
+  await check('归档同步②：取消归档 → archived / archivedAt 被清除', async () => {
+    await writeArchivedFixture([])
+    const changed = await mod.syncArchivedGroups()
+    const group = mod.state.groups.find((g) => g.id === 'g5')
+    assert.equal(changed, 1)
+    assert.equal(group.archived, undefined)
+    assert.equal(group.archivedAt, undefined)
+    return `g5 取消归档 · changed=${changed}`
+  })
+
+  await check('归档同步③：无 sessionId 的组不受影响', async () => {
+    setState(structuredClone(fixture))
+    await writeArchivedFixture(['session-g5', 'g1', 'session-zzz'])
+    const changed = await mod.syncArchivedGroups()
+    const g1 = mod.state.groups.find((g) => g.id === 'g1')
+    const g2 = mod.state.groups.find((g) => g.id === 'g2')
+    assert.equal(changed, 1, '只有 g5 应该变')
+    assert.equal('archived' in g1, false)
+    assert.equal('archived' in g2, false)
+    assert.equal(g1.archivedAt, undefined)
+    return 'g1/g2 无 sessionId → 字段完全没被写'
+  })
+
+  await check('GET /state 会顺带同步归档（归档 / 取消归档都能反映）', async () => {
+    setState(structuredClone(fixture))
+    await writeArchivedFixture(['session-g5'])
+    const first = await getState()
+    assert.equal(first.state.groups.find((g) => g.id === 'g5').archived, true)
+    await writeArchivedFixture([])
+    const second = await getState()
+    assert.equal(second.state.groups.find((g) => g.id === 'g5').archived, undefined)
+    return '/state 一次触发归档、一次触发取消归档'
+  })
+
+  await check('POST /groups 新建 → 显式 archived=false', async () => {
+    const res = await post('/groups', { name: '归档字段用例' })
+    assert.equal(res.status, 200)
+    const data = await res.json()
+    assert.equal(data.group.archived, false)
+    await post('/groups/delete', { id: data.group.id })
+    return `新建组 ${data.group.id} archived=false（已删）`
+  })
+
+  /* ── session-stop 归档语义：只打标记、保留 sessionId（否则取消归档恢复不了） ── */
+  await check('session-stop 归档①：archived=true 但 sessionId 仍在（内存 + 落盘），且不算「当前组」', async () => {
+    setState(structuredClone(fixture))
+    // 先确保 g5 真的绑着（惰性绑定），才能验证归档时清理绑定
+    await writeArchivedFixture([])
+    await getState('?sessionId=session-g5')
+    const boundBefore = mod.__boundAgentsSize()
+    await writeArchivedFixture(['session-g5'])
+    const group = await mod.archiveGroupForSession('session-g5')
+    assert.ok(group, 'g5 没被归档')
+    assert.equal(group.archived, true)
+    assert.equal(typeof group.archivedAt, 'number')
+    assert.ok(group.archivedAt > 0)
+    assert.equal(group.sessionId, 'session-g5', 'sessionId 被清掉了 → 取消归档就恢复不了')
+    // 归档要清掉这个组的 council_* 工具绑定（按组前缀，agent.id 不等于 sessionId 时也能清）
+    assert.equal(mod.__boundAgentsSize(), boundBefore - 1, '归档后这个组的绑定没被清掉')
+    // 落盘也要留着 sessionId，否则进程重启后同样丢绑定
+    const saved = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
+    assert.equal(saved.groups.find((g) => g.id === 'g5').sessionId, 'session-g5')
+    // 已归档 → 打开这个会话不该自动进它的旧小组（带不带 session- 前缀都排除）
+    assert.equal(mod.groupForSession(mod.state, 'session-g5'), null, '归档组仍被当成当前组')
+    assert.equal(mod.groupForSession(mod.state, 'g5'), null, '去掉 session- 前缀后仍不该命中')
+    return `g5 archived=true · sessionId=${group.sessionId} · 绑定 ${boundBefore}→${mod.__boundAgentsSize()} · groupForSession=null`
+  })
+
+  await check('session-stop 归档②：取消归档 → archived 清除，sessionId 仍可用（groupForSession 能重新命中）', async () => {
+    await writeArchivedFixture([])
+    const changed = await mod.syncArchivedGroups()
+    const group = mod.state.groups.find((g) => g.id === 'g5')
+    assert.equal(changed, 1, '取消归档应该变更 1 个组')
+    assert.equal(group.archived, undefined)
+    assert.equal(group.archivedAt, undefined)
+    assert.equal(group.sessionId, 'session-g5', '取消归档后 sessionId 必须还能用')
+    assert.equal(mod.groupForSession(mod.state, 'session-g5'), group, '取消归档后应能重新命中这个组')
+    assert.equal(mod.groupForSession(mod.state, 'g5'), group, '带不带 session- 前缀都应命中同一个组')
+    assert.equal(mod.groupForSession(mod.state, 'session-nope'), null, '别的会话不该命中')
+    const saved = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
+    assert.equal(saved.groups.find((g) => g.id === 'g5').archived, undefined)
+    return 'archived 已清 · sessionId=session-g5 · 重新命中 ✓'
+  })
+
+  await check('session-stop 归档③：已归档会话不再惰性补绑 council_* 工具，取消归档后才补', async () => {
+    // 用独立的组/会话，避免和前面已绑定的 g5 抢 boundAgents 里的键
+    setState({
+      ...structuredClone(fixture),
+      groups: [{ id: 'g_arch', name: '归档组', sessionId: 'session-arch-test', archived: true, archivedAt: Date.now(), memberIds: [] }],
+    })
+    // 真源里也有这个会话 → /state 顶部那次 sync 不会把 archived 清掉
+    await writeArchivedFixture(['session-arch-test'])
+    const before = mod.__boundAgentsSize()
+    await getState('?sessionId=session-arch-test')
+    assert.equal(mod.__boundAgentsSize(), before, '归档组不该注册 council_* 工具')
+    // 用户在归档列表里取消归档：真源变空 → sync 清掉 archived → 惰性绑定应重新生效
+    await writeArchivedFixture([])
+    const after = await getState('?sessionId=session-arch-test')
+    assert.equal(after.state.groups.find((g) => g.id === 'g_arch').archived, undefined, '取消归档没同步到组')
+    assert.equal(mod.__boundAgentsSize(), before + 1, '取消归档后应补绑一次')
+    assert.ok(registered.council_delegate, 'council_delegate 未注册')
+    return `归档时 +0 绑定 · 取消归档后 +1（${before} → ${mod.__boundAgentsSize()}）`
   })
 } finally {
   await new Promise((resolve) => server.close(resolve))

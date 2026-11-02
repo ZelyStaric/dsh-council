@@ -203,7 +203,9 @@ window.__ModuleLoader__.load({
         call('/groups/prune', {}).then(applyData).catch(() => {})
       }, [applyData])
 
-      const groupList = state && state.groups ? state.groups : []
+      // 组列表 / 组选择只认未归档的组（归档组由 Host half 按 workspace.json 的 archivedSessionIds 打标）
+      const groupList = (state && state.groups ? state.groups : []).filter((g) => !g.archived)
+      const archivedGroupCount = state && state.groups ? state.groups.filter((g) => g.archived).length : 0
       const group = groupForSession(state, sessionId) || null
       const members = groupMembers(state, group)
       const roles = state ? (state.roles || []) : []
@@ -474,6 +476,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontSize: 14, fontWeight: 600 } }, '单人模式'),
           h('div', { style: styles.muted }, '这个会话还没有自己的小组：没有名册，也没有 council_delegate 工具。'),
           h('div', { style: styles.muted }, '启用后会为这个会话创建一个小组，之后在下面的编排里加成员。'),
+          archivedGroupCount
+            ? h('div', { style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.65 }) }, '已归档 ' + archivedGroupCount + ' 个')
+            : null,
           h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
             h(Button, { primary: true, onClick: enableMode }, sessionId ? '启用小组模式' : '（当前没有会话）'),
             h(Button, { onClick: refresh }, '刷新')))
@@ -499,6 +504,12 @@ window.__ModuleLoader__.load({
         h('span', { style: styles.muted }, '（指挥职位负责拆解 + 终审，审校职位负责初审；对话只负责转达）'),
         h('span', { style: styles.chip }, '指挥：' + (commanderMember ? commanderMember.name : '未分配')),
         h('span', { style: styles.chip }, '审校：' + (reviewerMember ? reviewerMember.name : '未分配')),
+        archivedGroupCount
+          ? h('span', {
+            style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.65 }),
+            title: '会话已归档的小组不再出现在小组列表里',
+          }, '已归档 ' + archivedGroupCount + ' 个')
+          : null,
         h('span', { style: styles.muted }, group.workspacePath || ''),
         h('span', { style: { flex: 1 } }),
         h('span', { style: styles.chip }, balanceLabel),
