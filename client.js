@@ -14,6 +14,16 @@ window.__ModuleLoader__.load({
      */
     const SESSIONS_PRUNE_PATH = '/sessions/prune'
 
+    /**
+     * 归档组清理路由（内层路径，`call()` 会自动加上 `/council/api`）：
+     * 实际请求 = `POST /council/api/groups/prune-archived`。
+     * 必须与 Host 半 `index.js` 的 `ARCHIVED_PRUNE_ROUTE` 逐字相同，
+     * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
+     */
+    const ARCHIVED_PRUNE_PATH = '/groups/prune-archived'
+    /** 与 Host 半 `ARCHIVED_KEEP_DAYS` 一致：只清理归档超过 30 天的小组。 */
+    const ARCHIVED_KEEP_DAYS = 30
+
     /** Both halves live in this module, so a tiny listener set keeps them in sync. */
     const councilListeners = new Set()
     function notifyCouncilChange() {
@@ -132,6 +142,8 @@ window.__ModuleLoader__.load({
       button: { fontSize: 12, padding: '5px 10px', cursor: 'pointer', borderRadius: 6, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)' },
       primary: { fontSize: 12, padding: '5px 10px', cursor: 'pointer', borderRadius: 6, fontWeight: 600, color: 'var(--dsw-alias-label-primary-foreground)', background: 'var(--dsw-alias-brand-primary)', border: '1px solid var(--dsw-alias-brand-primary)' },
       muted: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 },
+      /** 淡色小字按钮：工具栏里「清理 30 天前归档」用，视觉上不抢主按钮。 */
+      linkButton: { fontSize: 11, padding: '1px 2px', cursor: 'pointer', border: 'none', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', opacity: 0.7, textDecoration: 'underline' },
       roleRow: { border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: 8, padding: 10, marginBottom: 10, minHeight: 56 },
       dropActive: { borderColor: 'var(--dsw-alias-brand-primary)', background: 'var(--dsw-alias-bg-layer-2)' },
       chip: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 8px', borderRadius: 999, fontSize: 11, marginRight: 6, marginBottom: 6, border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-2)' },
@@ -200,6 +212,8 @@ window.__ModuleLoader__.load({
       const [pruneNote, setPruneNote] = useState(null)
       const [sessionPrune, setSessionPrune] = useState(null)
       const [sessionPruneNote, setSessionPruneNote] = useState(null)
+      const [archivedPrune, setArchivedPrune] = useState(null)
+      const [archivedPruneNote, setArchivedPruneNote] = useState(null)
 
       const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
 
@@ -289,7 +303,12 @@ window.__ModuleLoader__.load({
         finally { setBusy(null) }
       }
 
-      /** 子会话目录清理：同样两段式（第一次 dryRun 只报「可清理 N 个 / X MB」，再点才真删）。 */
+      /**
+       * 子会话目录清理（⚠ 手动可达，UI 不暴露）：
+       * 路由 `POST /council/api/sessions/prune` 保留（可 curl 手动调用做只读 dryRun），
+       * 但工具栏里**不再有入口** —— 2026-11-02 需求：只清理「归档超过 30 天」的小组，
+       * 不再给用户「删会话目录」的按钮。函数留着是为了保留 dryRun 自测路径，别接回 UI。
+       */
       async function pruneChildSessions() {
         const preview = sessionPrune && (sessionPrune.removed || []).length
         const dryRun = !preview
@@ -306,6 +325,26 @@ window.__ModuleLoader__.load({
             setSessionPruneNote('已清理 ' + count + ' 个 / ' + mb + ' MB，保留 ' + (data.kept ?? 0) + ' 个')
           }
         } catch (e) { setError(String(e.message || e)); setSessionPrune(null) }
+        finally { setBusy(null) }
+      }
+
+      /** 归档组清理：两段式（第一下 dryRun 只报「可清理 M 个组」，再点才真删；只动小组，不碰会话目录）。 */
+      async function pruneArchivedGroups() {
+        const preview = archivedPrune && (archivedPrune.removed || []).length
+        const dryRun = !preview
+        setBusy('archived'); setError(null)
+        try {
+          const data = await call(ARCHIVED_PRUNE_PATH, { dryRun: dryRun, keepDays: ARCHIVED_KEEP_DAYS })
+          const count = (data.removed || []).length
+          if (dryRun) {
+            setArchivedPrune(data)
+            setArchivedPruneNote(count ? ('可清理 ' + count + ' 个组') : '没有可清理的归档组')
+          } else {
+            setArchivedPrune(null)
+            setArchivedPruneNote('已清理 ' + count + ' 个组，保留 ' + (data.kept ?? 0) + ' 个')
+            await refresh()
+          }
+        } catch (e) { setError(String(e.message || e)); setArchivedPrune(null) }
         finally { setBusy(null) }
       }
 
@@ -539,6 +578,22 @@ window.__ModuleLoader__.load({
             title: '会话已归档的小组不再出现在小组列表里',
           }, '已归档 ' + archivedGroupCount + ' 个')
           : null,
+        // 只清理「归档超过 N 天」的小组；会话目录一律不碰（「清理子会话」按钮已从 UI 移除）。
+        h('button', {
+          disabled: busy === 'archived',
+          onClick: pruneArchivedGroups,
+          style: busy === 'archived'
+            ? Object.assign({}, styles.linkButton, { cursor: 'default', opacity: 0.4 })
+            : styles.linkButton,
+          title: archivedPrune
+            ? '再点一次确认删除（共 ' + (archivedPrune.removed || []).length + ' 个组）'
+            : '先预览：只清理已归档且归档超过 ' + ARCHIVED_KEEP_DAYS + ' 天的小组（没有归档时间的组会保留）',
+        }, !archivedPrune
+          ? '清理 ' + ARCHIVED_KEEP_DAYS + ' 天前归档'
+          : ((archivedPrune.removed || []).length
+            ? '确认清理 ' + archivedPrune.removed.length + ' 个组'
+            : '重新检查归档组')),
+        archivedPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, archivedPruneNote) : null,
         h('span', { style: styles.muted }, group.workspacePath || ''),
         h('span', { style: { flex: 1 } }),
         h('span', { style: styles.chip }, balanceLabel),
@@ -556,19 +611,6 @@ window.__ModuleLoader__.load({
             ? '确认清理 ' + prunePreview.removed.length + ' 个'
             : '重新检查孤立成员')),
         pruneNote ? h('span', { style: styles.muted }, pruneNote) : null,
-        h(Button, {
-          disabled: busy === 'sessions',
-          onClick: pruneChildSessions,
-          title: sessionPrune
-            ? '再点一次确认删除（共 ' + (sessionPrune.removed || []).length + ' 个子会话）'
-            : '先预览：扫描 sessions 目录里 7 天没动、且不属于任何组/成员的子会话',
-        }, !sessionPrune
-          ? '清理子会话'
-          : ((sessionPrune.removed || []).length
-            ? '确认清理 ' + sessionPrune.removed.length + ' 个 / '
-              + (Math.round(((sessionPrune.removed || []).reduce((sum, item) => sum + (Number(item.sizeMb) || 0), 0)) * 10) / 10) + ' MB'
-            : '重新检查子会话')),
-        sessionPruneNote ? h('span', { style: styles.muted }, sessionPruneNote) : null,
         h(Button, {
           onClick: () => {
             if (typeof window === 'undefined' || !window.confirm) return
