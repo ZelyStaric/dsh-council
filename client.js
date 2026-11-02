@@ -189,6 +189,8 @@ window.__ModuleLoader__.load({
       const [dragId, setDragId] = useState(null)
       const [dropRole, setDropRole] = useState(null)
       const [editing, setEditing] = useState(null)
+      const [prunePreview, setPrunePreview] = useState(null)
+      const [pruneNote, setPruneNote] = useState(null)
 
       const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
 
@@ -254,6 +256,28 @@ window.__ModuleLoader__.load({
         finally { setBusy(null) }
       }
 
+      /** 两次点击：第一次 dryRun 预览「可清理 N 个」，第二次才真删。 */
+      async function pruneOrphans() {
+        const preview = prunePreview && (prunePreview.removed || []).length
+        const dryRun = !preview
+        setBusy('prune'); setError(null)
+        try {
+          const data = await call('/members/prune', { dryRun: dryRun })
+          const names = (data.removed || []).map((m) => m.name)
+          const shown = names.slice(0, 6).join('、') + (names.length > 6 ? ' 等' : '')
+          if (dryRun) {
+            setPrunePreview(data)
+            setPruneNote(names.length ? ('可清理 ' + names.length + ' 个：' + shown) : '没有可清理的孤立成员')
+          } else {
+            setPrunePreview(null)
+            setPruneNote('已清理 ' + names.length + ' 个' + (names.length ? '：' + shown : '') + '，剩余成员 ' + (data.kept ?? 0) + ' 个')
+            await refresh()
+            notifyCouncilChange()
+          }
+        } catch (e) { setError(String(e.message || e)); setPrunePreview(null) }
+        finally { setBusy(null) }
+      }
+
       function drop(roleId) {
         setDropRole(null)
         const id = dragId
@@ -313,6 +337,19 @@ window.__ModuleLoader__.load({
           nameRow,
           h('span', { style: { flex: 1 } }),
           h(Button, { onClick: () => mutate('/roles/delete', { id: role.id }) }, '删')),
+        h('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
+          h('select', {
+            'aria-label': '职位默认框架', title: '职位默认框架（补员时用它）',
+            value: role.kind || '', style: Object.assign({}, styles.input, { width: 132, flexShrink: 0 }),
+            onChange: (event) => mutate('/roles', { id: role.id, kind: event.target.value, model: '' }),
+          }, h('option', { value: '' }, '框架：claude'),
+          ['codex', 'claude', 'deepseek', 'image'].map((kind) => h('option', { key: kind, value: kind }, '框架：' + kind))),
+          h('select', {
+            'aria-label': '职位默认模型', title: '职位默认模型（补员时用它）',
+            value: role.model || '', style: Object.assign({}, styles.input, { flex: 1, minWidth: 0 }),
+            onChange: (event) => mutate('/roles', { id: role.id, model: event.target.value }),
+          }, h('option', { value: '' }, '模型：默认'),
+          Array.from(new Set([role.model, ...modelOptions(role.kind || 'claude')].filter(Boolean))).map((model) => h('option', { key: model, value: model }, model)))),
         h('textarea', {
           style: Object.assign({}, styles.input, { marginTop: 6, minHeight: 54, resize: 'vertical' }),
           defaultValue: role.prompt, placeholder: '职位提示词（派活时注入）',
@@ -469,6 +506,16 @@ window.__ModuleLoader__.load({
           onClick: () => mutate('/groups/bind', { id: group.id, sessionId: null }).then(refresh),
         }, '切回单人模式'),
         h(Button, { onClick: refresh }, '刷新'),
+        h(Button, {
+          disabled: busy === 'prune',
+          onClick: pruneOrphans,
+          title: prunePreview ? '再点一次确认删除（共 ' + (prunePreview.removed || []).length + ' 个）' : '先预览：列出不属于任何组的孤立成员',
+        }, !prunePreview
+          ? '清理孤立成员'
+          : ((prunePreview.removed || []).length
+            ? '确认清理 ' + prunePreview.removed.length + ' 个'
+            : '重新检查孤立成员')),
+        pruneNote ? h('span', { style: styles.muted }, pruneNote) : null,
         h(Button, {
           onClick: () => {
             if (typeof window === 'undefined' || !window.confirm) return

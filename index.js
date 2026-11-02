@@ -643,6 +643,8 @@ function commanderRole(group) {
 }
 
 function account(memberId, usage) {
+  const member = state.members.find((m) => m.id === memberId)
+  if (member) member.updatedAt = Date.now()
   const row = state.usage[memberId] ?? { calls: 0, input: 0, output: 0, costUsd: 0 }
   row.calls += 1
   row.input += usage.input ?? 0
@@ -689,9 +691,14 @@ function verdictOf(text) {
 }
 
 /** One turn on the member's own framework, preserving its session and tools. */
+let runKindOverride = null
 
+/** 测试可替换的成员执行器入口；生产环境恒走 runKindImpl。 */
+function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
+  return (runKindOverride || runKindImpl)(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId)
+}
 
-async function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
+async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId) {
   await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
   let result
@@ -843,15 +850,18 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
 }
 
 /** Ask the acceptance-commander member to decompose the user's request. */
-async function planWithCommander(ctx, group, request, config, parent) {
+async function planWithCommander(ctx, group, request, config, parent, callId) {
   const commander = memberWithRole(group, '指挥')
   if (!commander) return { assignments: [], raw: '', error: '这个小组还没有分配「指挥」职位给任何成员' }
+  // 先按 10 分钟缓存刷新模型清单，再拼同步文本（section/提示词都必须同步返回）。
+  await modelCatalog(ctx, config).catch(() => {})
   const prompt = [
     '你是这个小组的指挥。把用户的要求拆成给成员的自包含任务。',
     rosterText(group),
+    catalogText(),
     '',
     '只输出一个 JSON 对象，不要其它文字：',
-    '{"assignments":[{"member":"成员id或名字","task":"自包含任务，含背景/目标/验收标准"}]}',
+    '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务，含背景/目标/验收标准"}]}',
     '',
     '[用户要求]',
     request,
@@ -866,6 +876,7 @@ async function planWithCommander(ctx, group, request, config, parent) {
   const plan = parsePlan(planned.text)
   return {
     assignments: plan ? plan.assignments : [],
+    staffing: plan ? plan.staffing : [],
     raw: planned.text || planned.error || '',
     error: planned.ok ? undefined : (planned.error || '指挥调用失败'),
   }
@@ -998,6 +1009,7 @@ function parsePlan(text) {
     if (!Array.isArray(value.assignments)) return null
     return {
       confirmation: String(value.confirmation ?? ''),
+      staffing: Array.isArray(value.staffing) ? value.staffing : [],
       assignments: value.assignments
         .filter((a) => a && typeof a.member === 'string' && typeof a.task === 'string')
         .map((a) => ({ member: a.member, task: a.task })),
@@ -1167,13 +1179,22 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'POST') {
             const body = await readBody(req)
             if (route === '/roles') {
+              // kind 只接受四种框架；空字符串表示“回到默认（claude）”并清掉模型。
+              if (body.kind !== undefined && body.kind !== '' && !STAFF_KINDS.includes(body.kind)) {
+                return send(res, 400, { error: 'unknown kind: ' + body.kind + '（可用：' + STAFF_KINDS.join('/') + '）' })
+              }
               if (body.id) {
                 const role = state.roles.find((r) => r.id === body.id)
-                if (role) Object.assign(role, pick(body, ['name', 'prompt', 'color']))
+                if (role) {
+                  const patch = pick(body, ['name', 'prompt', 'color', 'kind', 'model'])
+                  // 换框架但没给模型：清掉旧框架的模型，回落到新框架的默认模型
+                  if (patch.kind !== undefined && patch.kind !== role.kind && patch.model === undefined) delete role.model
+                  Object.assign(role, patch)
+                }
                 await save()
                 return send(res, 200, { state })
               }
-              const role = { id: `r_${randomUUID().slice(0, 8)}`, name: body.name || '新职位', prompt: body.prompt || '', color: body.color }
+              const role = { id: `r_${randomUUID().slice(0, 8)}`, name: body.name || '新职位', prompt: body.prompt || '', color: body.color, ...pick(body, ['kind', 'model']) }
               state.roles.push(role)
               await save()
               return send(res, 200, { state, role })
@@ -1192,6 +1213,7 @@ export function createHandler(ctx, config = {}) {
                   const kindChanged = body.kind !== undefined && body.kind !== member.kind
                   Object.assign(member, pick(body, ['name', 'kind', 'model', 'provider', 'providerId', 'roleId', 'cwd']))
                   if (kindChanged) delete member.convId
+                  member.updatedAt = Date.now()
                 }
                 await save()
                 return send(res, 200, { state })
@@ -1211,6 +1233,7 @@ export function createHandler(ctx, config = {}) {
                 provider: kind === 'deepseek' ? (body.provider || 'deepseek-official') : undefined,
                 roleId: body.roleId,
                 cwd: body.cwd || undefined,
+                updatedAt: Date.now(),
               }
               state.members.push(member)
               const group = (body.groupId ? findGroup(body.groupId) : undefined) || activeGroup()
@@ -1229,9 +1252,15 @@ export function createHandler(ctx, config = {}) {
               await save()
               return send(res, 200, { state })
             }
+            if (route === '/members/prune') {
+              // 手动清理：不属于任何组、且从未跑过 / 30 天没动过的成员；dryRun 只预览
+              const result = pruneOrphanMembers({ dryRun: Boolean(body.dryRun) })
+              if (!result.dryRun && result.removed.length) await save()
+              return send(res, 200, result)
+            }
             if (route === '/members/role') {
               const member = state.members.find((m) => m.id === body.id)
-              if (member) member.roleId = body.roleId || undefined
+              if (member) { member.roleId = body.roleId || undefined; member.updatedAt = Date.now() }
               await save()
               return send(res, 200, { state })
             }
@@ -1333,6 +1362,7 @@ export function createHandler(ctx, config = {}) {
               if (body.maxRework !== undefined) group.maxRework = Math.max(0, Math.floor(body.maxRework))
               if (body.requirePrelim !== undefined) group.requirePrelim = Boolean(body.requirePrelim)
               if (body.requireCommander !== undefined) group.requireCommander = Boolean(body.requireCommander)
+              if (body.autoPrune !== undefined) group.autoPrune = Boolean(body.autoPrune)
               if (body.standard !== undefined) group.standard = String(body.standard)
               if (body.commanderPrompt !== undefined) group.commanderPrompt = String(body.commanderPrompt)
               await save()
@@ -1552,6 +1582,297 @@ function mandateText(group) {
   ].join('\n')
 }
 
+const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
+const STAFF_KINDS = Object.keys(STAFF_MODELS)
+
+/** 职位的有效默认框架：只认四种，缺省/未知都按 claude。 */
+function roleKind(role) {
+  return STAFF_MODELS[role?.kind] ? role.kind : 'claude'
+}
+
+/** 补员目标的 kind/model：staffing 显式值 > 职位默认 > 框架默认模型。 */
+function staffTarget(role, kind, model) {
+  const nextKind = STAFF_KINDS.includes(kind) ? kind : roleKind(role)
+  const roleModel = roleKind(role) === nextKind ? role.model : undefined
+  return { kind: nextKind, model: model || roleModel || STAFF_MODELS[nextKind] }
+}
+
+/**
+ * 可用模型清单。systemPrompt 的 section.text 必须是同步字符串，所以这里只读
+ * modelCatalog() 的 10 分钟缓存（bindAgent 时预热），没有缓存就用框架默认模型兜底。
+ */
+function catalogText() {
+  const value = (catalog && catalog.value) || {}
+  return [
+    '当前可用模型清单（按框架分组，来自实时缓存）：',
+    ...STAFF_KINDS.map((kind) => {
+      const ids = (value[kind] || []).filter(Boolean)
+      return `- ${kind}: ${(ids.length ? ids : [STAFF_MODELS[kind]]).join('、')}`
+    }),
+    'assignments[].member 可写职位名；缺人时按职位默认自动补员。需要补员或调整模型时在 staffing 中声明 {role, kind?, model?}。',
+    '需要长期保留的成员：在 staffing 里写 `persistent:true`（默认用完即回收）。',
+  ].join('\n')
+}
+
+/** 在组内按 id / 职位名 / 成员名解析派活目标。 */
+function resolveMember(group, key) {
+  const inGroup = (m) => (group.memberIds || []).includes(m.id)
+  const label = String(key ?? '')
+  return state.members.find((m) => inGroup(m) && m.id === label)
+    || state.members.find((m) => inGroup(m) && roleOf(m)?.name === label)
+    || state.members.find((m) => inGroup(m) && m.name === label)
+}
+
+/**
+ * 按 staffing 补员（不重复造人）：
+ *   1) 组内已有人持有该职位 → 直接复用；
+ *   2) 只有别的组有同名成员 → 拉进本组（不新建）；
+ *   3) 都没有 → 新建，name = 职位名；默认打 ephemeral 标记（派活结束后回收），
+ *      staffing 项写 persistent:true 时改打持久成员：不打 ephemeral、不进回收名单。
+ * 显式给了不相同 kind/model 时更新该成员（并删掉 convId，换模型后不续旧线程）。
+ *
+ * createdIds：可选收集器，本次新建且会被回收的临时成员 id 会 push 进去（council_delegate 用来回收）。
+ * 持久成员（persistent:true）不进这个收集器；复用到的旧临时成员被标成持久时也会从收集器里摘掉。
+ * 返回值就是「补员变更」字符串数组（调用方用 push(...) 展开），不带任何附加属性——
+ * 这个数组会链进工具返回值，必须保持纯 JSON 安全（DSH 会做 lossless JSON 校验）。
+ */
+async function ensureStaffing(group, staffing, createdIds) {
+  const changes = []
+  const created = Array.isArray(createdIds) ? createdIds : []
+  let dirty = false
+  const inGroup = (m) => (group.memberIds || []).includes(m.id)
+  if (!Array.isArray(group.memberIds)) group.memberIds = []
+  for (const item of Array.isArray(staffing) ? staffing : []) {
+    const changesBefore = changes.length
+    const roleName = item && typeof item.role === 'string' ? item.role.trim() : ''
+    if (!roleName) { changes.push('- 跳过：staffing 项缺少 role'); continue }
+    const role = (state.roles || []).find((r) => r.name === roleName)
+    if (!role) { changes.push(`- 跳过：职位「${roleName}」不存在`); continue }
+    // 空串表示“用默认”，与没填等价
+    const wantKind = item.kind === '' ? undefined : item.kind
+    const wantModel = item.model === '' ? undefined : item.model
+    // 是否建持久成员：默认 false（用完即回收）。只认显式 true，字符串 "true" 之类一律按 false。
+    const wantPersistent = Boolean(item) && item.persistent === true
+    if (wantKind !== undefined && !STAFF_KINDS.includes(wantKind)) {
+      changes.push(`- 跳过：职位「${roleName}」的框架「${wantKind}」未知`)
+      continue
+    }
+    let member = state.members.find((m) => inGroup(m) && m.roleId === role.id)
+    let reused = false
+    if (!member) {
+      const sibling = state.members.find((m) => m.name === role.name && (!m.roleId || m.roleId === role.id))
+      if (sibling) { member = sibling; reused = !inGroup(sibling) }
+    }
+    if (!member) {
+      const target = staffTarget(role, wantKind, wantModel)
+      member = {
+        id: `m_${randomUUID().slice(0, 8)}`, name: role.name, roleId: role.id,
+        kind: target.kind, model: target.model,
+        provider: target.kind === 'deepseek' ? 'deepseek-official' : undefined,
+        updatedAt: Date.now(),
+      }
+      if (!wantPersistent) member.ephemeral = true // 持久成员不打临时标记
+      state.members.push(member)
+      if (!wantPersistent) created.push(member.id) // 持久成员不进自动回收名单
+      changes.push(`- 新建 ${role.name}（${target.kind} / ${target.model}）${wantPersistent ? '（持久）' : ''}`)
+      dirty = true
+    } else {
+      if (wantPersistent) {
+        // 显式要持久：清掉临时标记，并从本轮回收名单摘掉（即便本轮刚建也保留）
+        if (member.ephemeral) {
+          const wasTracked = created.includes(member.id)
+          delete member.ephemeral
+          dirty = true
+          if (!wasTracked) changes.push(`- ${role.name}（${member.name}）改为持久成员`)
+        }
+        const at = created.indexOf(member.id)
+        if (at >= 0) created.splice(at, 1)
+      } else if (member.ephemeral && !created.includes(member.id)) {
+        // 复用 = 转正：本次新建的（仍在 created 里）不算，别的临时成员不再带标记
+        delete member.ephemeral
+        dirty = true
+      }
+      if (member.roleId !== role.id) {
+        member.roleId = role.id
+        changes.push(`- 指派 ${member.name} → 职位 ${role.name}`)
+        dirty = true
+      }
+      if (wantKind !== undefined || wantModel !== undefined) {
+        // 只改 kind 且与现状相同 → 不动模型（保留成员自己选的模型）；
+        // 换 kind 才回落到职位默认/框架默认，除非显式给了新模型。
+        const nextKind = wantKind || member.kind
+        const target = nextKind === member.kind
+          ? { kind: nextKind, model: wantModel || member.model }
+          : staffTarget(role, nextKind, wantModel)
+        if (member.kind !== target.kind || member.model !== target.model) {
+          delete member.convId
+          member.kind = target.kind
+          member.model = target.model
+          member.provider = target.kind === 'deepseek' ? 'deepseek-official' : undefined
+          changes.push(`- 调整 ${role.name}（${member.name}）→ ${target.kind} / ${target.model}`)
+          dirty = true
+        }
+      }
+      if (reused) {
+        changes.push(`- 复用已有成员 ${member.name}，加入本组`)
+        dirty = true
+      }
+    }
+    if (!group.memberIds.includes(member.id)) { group.memberIds.push(member.id); dirty = true }
+    if (changes.length > changesBefore) member.updatedAt = Date.now()
+  }
+  if (dirty) await save()
+  // 纯字符串数组：新建的 id 已由 createdIds 收集，不在返回值上挂任何非枚举属性
+  return changes
+}
+
+/**
+ * 回收本次派活临时新建的成员（任务 A）：
+ * 从本组 memberIds 移除 + 从 state.members 删除 + 清 state.usage；
+ * 若该成员仍被别的组引用 → 只从本组移除，保留成员本身。
+ * group.autoPrune === false 时整体跳过（默认 true）。
+ * 返回回执里要列出的名字（如「建模（临时）」）。
+ */
+async function pruneEphemeralMembers(group, ids) {
+  const pruned = []
+  if (!Array.isArray(ids) || !ids.length) return pruned
+  if (group.autoPrune === false) return pruned
+  let dirty = false
+  for (const id of ids) {
+    const member = state.members.find((m) => m.id === id)
+    if (!member) continue // 已被别人删掉
+    if (member.persistent === true) continue // 显式持久成员：永不自动回收
+    if (!Array.isArray(group.memberIds) || !group.memberIds.includes(id)) continue // 已不在本组
+    const others = state.groups.filter((g) => g.id !== group.id && (g.memberIds || []).includes(id))
+    group.memberIds = group.memberIds.filter((x) => x !== id)
+    if (others.length) {
+      pruned.push(`${member.name}（临时，仍被其他组引用）`)
+    } else {
+      state.members = state.members.filter((m) => m.id !== id)
+      delete state.usage[id]
+      if (state.memberMemory) delete state.memberMemory[id]
+      pruned.push(`${member.name}（临时）`)
+    }
+    dirty = true
+  }
+  if (dirty) await save()
+  return pruned
+}
+
+/**
+ * 工具返回值必须过 DSH 的 lossless JSON 校验：
+ * 递归只保留「普通对象 / 数组 / 字符串 / 有限数字 / 布尔 / null」，
+ * 丢掉 undefined、函数、Symbol、Set/Map/类实例与循环引用。
+ */
+function jsonSafeClone(value, depth = 0, seen = new Set()) {
+  if (value === null) return { ok: true, value: null }
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return { ok: true, value }
+  if (type === 'number') return Number.isFinite(value) ? { ok: true, value } : { ok: false }
+  if (type !== 'object') return { ok: false } // undefined / function / symbol / bigint
+  if (depth > 32 || seen.has(value)) return { ok: false }
+  seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      const out = []
+      for (const item of value) {
+        const cloned = jsonSafeClone(item, depth + 1, seen)
+        if (cloned.ok) out.push(cloned.value)
+      }
+      return { ok: true, value: out }
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) return { ok: false } // Set/Map/Date/类实例
+    const out = {}
+    for (const key of Object.keys(value)) { // 只取可枚举自有字段
+      const cloned = jsonSafeClone(value[key], depth + 1, seen)
+      if (cloned.ok) out[key] = cloned.value
+    }
+    return { ok: true, value: out }
+  } finally {
+    seen.delete(value)
+  }
+}
+
+function jsonRoundTrip(value) {
+  try {
+    return JSON.parse(JSON.stringify(value))
+  } catch {
+    return undefined
+  }
+}
+
+/** 往返后逐字段比对；哪个字段/元素不一致就把那个丢掉，而不是让整个工具调用失败。 */
+function keepLosslessFields(value, roundTripped) {
+  if (Array.isArray(value)) {
+    if (!Array.isArray(roundTripped)) return undefined
+    const out = []
+    for (let i = 0; i < value.length; i += 1) {
+      const kept = keepLosslessFields(value[i], roundTripped[i])
+      if (kept !== undefined) out.push(kept)
+    }
+    return out
+  }
+  if (value !== null && typeof value === 'object') {
+    if (roundTripped === null || typeof roundTripped !== 'object' || Array.isArray(roundTripped)) return undefined
+    const out = {}
+    for (const key of Object.keys(value)) {
+      const kept = keepLosslessFields(value[key], roundTripped[key])
+      if (kept !== undefined) out[key] = kept
+    }
+    return out
+  }
+  return Object.is(value, roundTripped) ? value : undefined
+}
+
+/**
+ * council_delegate.execute() 的统一出口：
+ * 纯 JSON、无 undefined、无 Set/Map/类实例，`JSON.parse(JSON.stringify(value))` 与 value 在
+ * 可枚举字段上 deep-equal。自检不通过时丢字段（最坏返回 {}），绝不因为“回执不好看”再抛一次错。
+ */
+function losslessToolResult(value) {
+  const cloned = jsonSafeClone(value)
+  if (!cloned.ok) return {}
+  const roundTripped = jsonRoundTrip(cloned.value)
+  if (roundTripped === undefined) return {}
+  return keepLosslessFields(cloned.value, roundTripped)
+}
+
+/** 孤立成员判定：30 天没动过。 */
+const ORPHAN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * 手动清理历史孤立成员（任务 B）：
+ * 「不属于任何组」且「无 convId（从未跑过）或 updatedAt 超过 30 天」→ 删除（清 usage）。
+ * 有 convId 但没有 updatedAt 的老数据无法判断年龄 → 保守保留。
+ * 返回 { removed: [{id,name,kind,reason}], kept: 清理后成员总数, dryRun }。
+ */
+function pruneOrphanMembers({ dryRun = false, now = Date.now() } = {}) {
+  const inAnyGroup = new Set()
+  for (const group of state.groups || []) for (const id of group.memberIds || []) inAnyGroup.add(id)
+  const removed = []
+  const doomed = new Set()
+  for (const member of state.members || []) {
+    if (member.persistent === true) continue // 显式持久成员不清（staffing persistent:true / council_member persistent:true）
+    if (inAnyGroup.has(member.id)) continue
+    const lastActive = Number(member.updatedAt) || 0
+    const neverRan = !member.convId
+    const stale = lastActive > 0 && now - lastActive > ORPHAN_TTL_MS
+    if (!neverRan && !stale) continue
+    doomed.add(member.id)
+    removed.push({ id: member.id, name: member.name, kind: member.kind, reason: neverRan ? 'never-ran' : 'stale-30d' })
+  }
+  if (!dryRun && doomed.size) {
+    state.members = (state.members || []).filter((m) => !doomed.has(m.id))
+    for (const id of doomed) {
+      delete state.usage[id]
+      if (state.memberMemory) delete state.memberMemory[id]
+    }
+  }
+  const total = (state.members || []).length
+  return { removed, kept: dryRun ? total - removed.length : total, dryRun: Boolean(dryRun) }
+}
+
 function rosterText(group) {
   const members = (group.memberIds || [])
     .map((id) => state.members.find((m) => m.id === id))
@@ -1569,6 +1890,8 @@ function rosterText(group) {
     '图片回执由工具卡直接展示；如果要在回答里引用，用 /council/api/image/… 这种地址，不要写本地文件路径（前端预览不了本地路径）。',
     '成员名册：',
     members || '（暂无成员）',
+    '岗位目录：',
+    ...(state.roles || []).map((r) => `- ${r.name}（默认框架=${roleKind(r)}，默认模型=${staffTarget(r, undefined, undefined).model}）${r.prompt ? '：' + r.prompt : ''}`),
     '成员会跑在各自的原生框架里，回执会以工具结果的形式回到这个对话。',
     '需要拆解时，把用户原话作为 request 传给 council_delegate：会由持有「指挥」职位的成员拆解、成员干活、持有「审校」职位的成员初审，最后指挥终审。',
   ].filter(Boolean).join('\n')
@@ -1587,6 +1910,11 @@ function bindAgent(ctx, config, group, agent) {
       text: () => mandateText(state.groups.find((g) => g.id === group.id) || group),
     }))
     disposers.push(agentCtx.systemPrompt.section({
+      name: 'council:catalog:' + group.id,
+      order: 1200,
+      text: () => catalogText(),
+    }))
+    disposers.push(agentCtx.systemPrompt.section({
       name: 'council:roster:' + group.id,
       order: 1500,
       text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
@@ -1599,6 +1927,10 @@ function bindAgent(ctx, config, group, agent) {
         additionalProperties: false,
         properties: {
           request: { type: 'string', description: '用户的原话。给了它就由“验收指挥”成员先拆解成任务，再派给成员。' },
+          staffing: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['role'], properties: {
+            role: { type: 'string' }, kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'] }, model: { type: 'string' },
+            persistent: { type: 'boolean', description: 'true = 建持久成员（派活结束后不回收）；默认 false = 临时成员，用完即回收' },
+          } } },
           assignments: {
             type: 'array',
             description: '要派发的任务；每个任务都必须自包含（背景+目标+验收标准）。',
@@ -1606,7 +1938,7 @@ function bindAgent(ctx, config, group, agent) {
               type: 'object',
               additionalProperties: false,
               properties: {
-                member: { type: 'string', description: '成员名字或 id' },
+                member: { type: 'string', description: '成员名字、id 或职位名' },
                 task: { type: 'string', description: '给这个成员的任务' },
                 style: { type: 'string', description: '可选：覆盖本组默认的统一风格（用于这次任务的画面风格）' },
               },
@@ -1619,6 +1951,9 @@ function bindAgent(ctx, config, group, agent) {
         schema: {
           type: 'object',
           properties: {
+            staffing: { type: 'array', items: { type: 'string' } },
+            staffingCreated: { type: 'array', items: { type: 'string' }, description: '本次新建（并会被回收）的临时成员 id' },
+            pruned: { type: 'array', items: { type: 'string' }, description: '本次回收的临时成员（如“建模（临时）”）' },
             plan: { type: 'object', additionalProperties: true },
             members: {
               type: 'array',
@@ -1658,11 +1993,20 @@ function bindAgent(ctx, config, group, agent) {
             return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
-          return [{ type: 'text', text: planLine ? planLine + '\n\n' + body : body }]
+          const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
+          const pruned = value.pruned?.length ? '\n\n## 回收\n已回收：' + value.pruned.join('、') : ''
+          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned }]
         },
       },
       async execute(args, exec) {
         const live = state.groups.find((g) => g.id === group.id) || group
+        // 本次派活新建的临时成员：成功 / 失败 / 取消都在 finally 里回收
+        const ephemeral = []
+        const response = { members: [], staffing: [] }
+        try {
+        // 用标签块收住主流程：没有可派任务时 break 出去，让 finally 仍能回收 + 末尾统一 JSON 安全化
+        delegate: {
+        const staffing = await ensureStaffing(live, args?.staffing, ephemeral)
         const callId = exec && exec.callId
         progressInit(callId, exec && exec.agent && exec.agent.id)
         if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
@@ -1670,13 +2014,22 @@ function bindAgent(ctx, config, group, agent) {
         let planRaw
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
         if ((!assignments.length) && requestText) {
-          const planned = await planWithCommander(ctx, live, args.request.trim(), config, exec && exec.agent)
+          const planned = await planWithCommander(ctx, live, args.request.trim(), config, exec && exec.agent, callId)
+          staffing.push(...await ensureStaffing(live, planned.staffing, ephemeral))
           planRaw = planned.raw
           assignments = planned.assignments
           if (!assignments.length) {
-            return { plan: { ok: false, raw: planned.raw || '', reason: planned.error || '指挥没有给出可用的拆分' }, members: [] }
+            Object.assign(response, { plan: { ok: false, raw: planned.raw || '', reason: planned.error || '指挥没有给出可用的拆分' }, members: [], staffing })
+            break delegate
           }
         }
+        // assignments 里直接写职位名、但本组还没人持有该职位 → 按职位默认自动补员
+        const missingRoles = assignments
+          .filter((a) => typeof a.member === 'string'
+            && (state.roles || []).some((r) => r.name === a.member)
+            && !resolveMember(live, a.member))
+          .map((a) => ({ role: a.member }))
+        staffing.push(...await ensureStaffing(live, missingRoles, ephemeral))
         const sid = exec && exec.agent && exec.agent.id
         let userText = requestText
         if (!userText && exec && exec.agent && exec.agent.session) {
@@ -1719,14 +2072,7 @@ function bindAgent(ctx, config, group, agent) {
         }
 
         const results = await Promise.all(assignments.map(async (item) => {
-          const inGroup = (m) => (live.memberIds || []).indexOf(m.id) >= 0
-          const roleNamed = (m) => {
-            const role = (state.roles || []).find((r) => r.id === m.roleId)
-            return role && role.name === item.member
-          }
-          const member = state.members.find((m) => inGroup(m) && m.id === item.member)
-            || state.members.find((m) => inGroup(m) && roleNamed(m))
-            || state.members.find((m) => inGroup(m) && m.name === item.member)
+          const member = resolveMember(live, item.member)
           if (!member) return { name: String(item.member), kind: 'unknown', ok: false, error: 'member not found' }
           const briefParts = []
           if (requestText) briefParts.push('用户原话：' + requestText)
@@ -1795,7 +2141,16 @@ function bindAgent(ctx, config, group, agent) {
         history.at = Date.now()
         history.text = entry.text
         await save()
-        return { members: results }
+        response.members = results
+        response.staffing = staffing
+        } // delegate
+        } finally {
+          // 回收本次临时新建的成员（失败/取消也会走到这里）
+          response.pruned = await pruneEphemeralMembers(live, ephemeral)
+        }
+        // created 改成普通字段；pruned 保持字符串数组。出口再做一次 JSON 往返自检。
+        response.staffingCreated = ephemeral.filter((id) => typeof id === 'string')
+        return losslessToolResult(response)
       },
     }))
     disposers.push(agentCtx.tools.register({
@@ -1805,13 +2160,15 @@ function bindAgent(ctx, config, group, agent) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          action: { type: 'string', enum: ['list', 'create', 'update', 'delete'], description: '操作类型' },
+          action: { type: 'string', enum: ['list', 'create', 'update', 'delete', 'prune'], description: '操作类型（prune = 清理不属于任何组的孤立成员）' },
           id: { type: 'string', description: 'update/delete 时的成员 id' },
           name: { type: 'string', description: '成员名字' },
           kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'], description: '成员类型' },
           model: { type: 'string', description: '模型名称' },
           roleId: { type: 'string', description: '职位 id' },
           cwd: { type: 'string', description: '工作目录' },
+          persistent: { type: 'boolean', description: 'create 时是否建持久成员（默认 true）；显式 false = 临时成员，派活结束后自动回收' },
+          dryRun: { type: 'boolean', description: 'prune 时只预览、不删除' },
         },
         required: ['action'],
       },
@@ -1819,12 +2176,25 @@ function bindAgent(ctx, config, group, agent) {
         schema: {
           type: 'object',
           additionalProperties: true,
-          properties: {members: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }},
+          properties: {members: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }, removed: { type: 'array', items: { type: 'object', additionalProperties: true } }, kept: { type: 'number' }, dryRun: { type: 'boolean' }},
         },
-        render(_args, value) { const rows = (value.members || []).map((m) => `- ${m.name}（${m.kind}${m.model ? ' / ' + m.model : ''}${m.roleName ? ' / ' + m.roleName : ''}）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无成员）') }] },
+        render(_args, value) {
+          if (value.dryRun !== undefined) {
+            const names = (value.removed || []).map((m) => m.name + (m.kind ? '（' + m.kind + '）' : ''))
+            const head = value.dryRun ? '可清理 ' + names.length + ' 个' : '已清理 ' + names.length + ' 个'
+            return [{ type: 'text', text: head + (names.length ? '：' + names.join('、') : '') + '\n剩余成员 ' + (value.kept ?? 0) + ' 个' }]
+          }
+          const rows = (value.members || []).map((m) => `- ${m.name}（${m.kind}${m.model ? ' / ' + m.model : ''}${m.roleName ? ' / ' + m.roleName : ''}）`)
+          return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无成员）') }]
+        },
       },
 async execute(args) {
         const live = state.groups.find((g) => g.id === group.id) || group
+        if (args.action === 'prune') {
+          const result = pruneOrphanMembers({ dryRun: Boolean(args.dryRun) })
+          if (!result.dryRun && result.removed.length) await save()
+          return result
+        }
         if (args.action === 'list') {
           const members = (live.memberIds || [])
             .map((id) => state.members.find((m) => m.id === id))
@@ -1838,6 +2208,8 @@ async execute(args) {
         if (args.action === 'create') {
           const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
           const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
+          // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
+          const persistent = args.persistent !== false
           const member = {
             id: `m_${randomUUID().slice(0, 8)}`,
             name: args.name || '新成员',
@@ -1846,11 +2218,13 @@ async execute(args) {
             provider: kind === 'deepseek' ? 'deepseek-official' : undefined,
             roleId: args.roleId,
             cwd: args.cwd || undefined,
+            updatedAt: Date.now(),
           }
+          if (!persistent) member.ephemeral = true
           state.members.push(member)
           if (!live.memberIds.includes(member.id)) live.memberIds.push(member.id)
           await save()
-          return { ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model } }
+          return { ok: true, persistent, member: { id: member.id, name: member.name, kind: member.kind, model: member.model, persistent } }
         }
         if (args.action === 'update') {
           if (!args.id) return { ok: false, error: 'id required for update' }
@@ -1864,6 +2238,7 @@ async execute(args) {
           if (args.model !== undefined) member.model = args.model
           if (args.roleId !== undefined) member.roleId = args.roleId || undefined
           if (args.cwd !== undefined) member.cwd = args.cwd || undefined
+          member.updatedAt = Date.now()
           await save()
           return { ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model } }
         }
@@ -1896,6 +2271,8 @@ async execute(args) {
           name: { type: 'string', description: '职位名称' },
           prompt: { type: 'string', description: '职位提示词' },
           color: { type: 'string', description: '职位颜色' },
+          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'] },
+          model: { type: 'string', description: '职位默认模型' },
           memberId: { type: 'string', description: 'assign 时的成员 id' },
         },
         required: ['action'],
@@ -1906,11 +2283,14 @@ async execute(args) {
           additionalProperties: true,
           properties: {roles: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }},
         },
-        render(_args, value) { const rows = (value.roles || []).map((r) => `- ${r.name}（${r.assigned || 0} 人）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无职位）') }] },
+        render(_args, value) { const rows = (value.roles || []).map((r) => `- ${r.name}（默认：${r.defaultKind || r.kind || 'claude'} / ${r.defaultModel || r.model || '默认'}）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无职位）') }] },
       },
 async execute(args) {
         if (args.action === 'list') {
-          const roles = state.roles.map((r) => ({ id: r.id, name: r.name, prompt: r.prompt, color: r.color }))
+          const roles = state.roles.map((r) => ({
+            id: r.id, name: r.name, prompt: r.prompt, color: r.color, kind: r.kind, model: r.model,
+            defaultKind: roleKind(r), defaultModel: staffTarget(r, undefined, undefined).model,
+          }))
           return { roles }
         }
         if (args.action === 'create') {
@@ -1919,6 +2299,7 @@ async execute(args) {
             name: args.name || '新职位',
             prompt: args.prompt || '',
             color: args.color || undefined,
+            ...pick(args, ['kind', 'model']),
           }
           state.roles.push(role)
           await save()
@@ -1931,6 +2312,9 @@ async execute(args) {
           if (args.name !== undefined) role.name = args.name
           if (args.prompt !== undefined) role.prompt = args.prompt
           if (args.color !== undefined) role.color = args.color
+          // 换框架但没给模型：清掉旧框架的模型，回落到新框架的默认模型
+          if (args.kind !== undefined && args.kind !== role.kind && args.model === undefined) delete role.model
+          Object.assign(role, pick(args, ['kind', 'model']))
           await save()
           return { ok: true, role: { id: role.id, name: role.name } }
         }
@@ -2019,6 +2403,8 @@ async execute(args) {
   }
   boundAgents.set(key, cleanup)
   agentCtx.effect?.(() => cleanup)
+  // 预热模型清单缓存：section.text 必须同步返回，不能在里面 await 网络。
+  modelCatalog(ctx, config).catch(() => {})
   return { bound: true, reused: false }
 }
 
