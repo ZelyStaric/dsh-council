@@ -6,7 +6,7 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
 ## 指针（先读这些，别在代码里猜）
 
 - 插件全貌（架构 / 路由 / 数据模型 / 已知问题）→ [`~/docs/dsh-council.md`](/home/nanami/docs/dsh-council.md)
-- 配乐 / 3D 产线的本机环境（fluidsynth、Blender、trimesh、music-ear 复核）→ [`~/docs/dsh-council-media.md`](/home/nanami/docs/dsh-council-media.md)
+- 配乐 / 3D 产线的本机环境（fluidsynth、Blender、trimesh）→ [`~/docs/dsh-council-media.md`](/home/nanami/docs/dsh-council-media.md)
 - 机器级铁律与环境（SSH、systemd、代理、Node）→ [`~/AGENTS.md`](/home/nanami/AGENTS.md)
 
 ## 本插件当前形态（2026-10-28）
@@ -73,4 +73,4 @@ systemctl --user status dsh-web      # 服务状态
 - 外部腿（codex/claude/image）只回最终答案，拿不到 token 流；"实时"= 每个成员一结束就立刻追加。
 - 审校必须跑在无工具 preset（deepseek → `minimal` + `reasoningEffort: low`；claude → `--disallowedTools`），
   否则它会去 `ls`/`find` 翻文件系统，一次审校磨掉两分钟。
-- 出图渲染链路若没做 `loudnorm`（配乐）或没给 `-g`（fluidsynth），music-ear 会判"疑似静音"。
+- 出图渲染链路若没做 `loudnorm`（配乐）或没给 `-g`（fluidsynth），渲染出来会轻到像静音。

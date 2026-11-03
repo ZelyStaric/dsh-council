@@ -36,6 +36,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
+import { EventEmitter } from 'node:events'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
@@ -45,10 +46,11 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
+export function __setWatchdogTickMs(ms) { WATCHDOG_TICK_MS = Number(ms) > 0 ? Number(ms) : MEMBER_WATCHDOG_TICK_MS }
 export function __resetArchivedCache() { archivedIdsCache = { at: 0, ids: null } }
 export function __boundAgentsSize() { return boundAgents.size }
 export function __resetProgress() { progressMap.clear(); activeCalls.clear() }
@@ -367,6 +369,25 @@ try {
     const on = await (await post('/config', { strictDelegate: true })).json()
     assert.equal(on.config.strictDelegate, true, 'POST true 没生效')
     return 'GET true → POST false → GET false → POST true'
+  })
+
+  await check('GET/POST /config 暴露 memberIdleMinutes（10）与 memberHardLimitMinutes（360），可改可读回', async () => {
+    const before = await (await fetch(base + '/config')).json()
+    assert.equal(before.config.memberIdleMinutes, 10, 'memberIdleMinutes 默认必须是 10')
+    assert.equal(before.config.memberHardLimitMinutes, 360, 'memberHardLimitMinutes 默认必须是 360')
+    assert.equal(before.config.memberTimeoutMinutes, undefined, '已废弃的 memberTimeoutMinutes 不再暴露')
+    const changed = await (await post('/config', { memberIdleMinutes: 6, memberHardLimitMinutes: 0 })).json()
+    assert.equal(changed.config.memberIdleMinutes, 6, 'POST memberIdleMinutes 没生效')
+    assert.equal(changed.config.memberHardLimitMinutes, 0, 'POST memberHardLimitMinutes=0（不限制）没生效')
+    const readBack = await (await fetch(base + '/config')).json()
+    assert.equal(readBack.config.memberIdleMinutes, 6)
+    assert.equal(readBack.config.memberHardLimitMinutes, 0)
+    // 恢复默认，别影响后面的测试
+    await post('/config', { memberIdleMinutes: 10, memberHardLimitMinutes: 360 })
+    const restored = await (await fetch(base + '/config')).json()
+    assert.equal(restored.config.memberIdleMinutes, 10)
+    assert.equal(restored.config.memberHardLimitMinutes, 360)
+    return 'GET 10/360 → POST 6/0 → GET 6/0 → 恢复 10/360'
   })
 
   await check('GET /state?sessionId=… 绑定会话并注册 council_delegate', async () => {
@@ -1242,33 +1263,102 @@ try {
     return false
   }
 
-  await check('/progress 自愈：11 分钟前未完成 → finishedAt+stale；9 分钟前不动；完成项超 24h 删除', async () => {
+  await check('/progress 自愈：默认静默 15 分钟标 stale · 14 分钟不动 · 跑 40 分钟但刚有活动也不动 · 完成项超 24h 删除', async () => {
+    setState(structuredClone(fixture)) // 默认 idle=10 分钟 → 阈值 max(10, 10+5)=15 分钟
     mod.__resetProgress()
     const now = Date.now()
-    mod.progressInit('call-11min', 'session-g5')
-    mod.progressMap.get('call-11min').startedAt = now - 11 * 60_000
+    mod.progressInit('call-14min', 'session-g5')
+    mod.progressMap.get('call-14min').startedAt = now - 14 * 60_000
+    mod.progressInit('call-16min', 'session-g5')
+    mod.progressMap.get('call-16min').startedAt = now - 16 * 60_000
     mod.progressInit('call-9min', 'session-g5')
     mod.progressMap.get('call-9min').startedAt = now - 9 * 60_000
+    // 总时长 40 分钟但 30 秒前还有输出：判陈旧的依据是「静默」，不是「跑了多久」
+    mod.progressInit('call-live-40min', 'session-g5')
+    Object.assign(mod.progressMap.get('call-live-40min'), { startedAt: now - 40 * 60_000, lastActivity: now - 30_000 })
     mod.progressInit('call-done-old', 'session-g5')
     Object.assign(mod.progressMap.get('call-done-old'), { startedAt: now - 26 * 3600_000, finishedAt: now - 25 * 3600_000 })
     mod.progressInit('call-done-fresh', 'session-g5')
     Object.assign(mod.progressMap.get('call-done-fresh'), { startedAt: now - 2 * 3600_000, finishedAt: now - 3600_000 })
 
     const p = await getProgress()
-    assert.ok(p['call-11min'], '11 分钟的未完成项应还在（保留 5 分钟供前端看到一次）')
-    assert.equal(typeof p['call-11min'].finishedAt, 'number', '11 分钟的未完成项必须被写入 finishedAt')
-    assert.equal(p['call-11min'].stale, true, '必须标 stale:true')
-    assert.equal(p['call-9min'].finishedAt, undefined, '9 分钟不该被当陈旧（阈值 10 分钟）')
+    assert.equal(p['call-14min'].finishedAt, undefined, '静默 14 分钟（< 15）不该标 stale')
+    assert.equal(p['call-14min'].stale, undefined)
+    assert.ok(p['call-16min'], '静默 16 分钟的未完成项应还在（保留 5 分钟供前端看到一次）')
+    assert.equal(typeof p['call-16min'].finishedAt, 'number', '超过 15 分钟静默阈值必须被写入 finishedAt')
+    assert.equal(p['call-16min'].stale, true, '必须标 stale:true')
+    assert.equal(p['call-9min'].finishedAt, undefined, '9 分钟不该被当陈旧')
     assert.equal(p['call-9min'].stale, undefined)
+    assert.equal(typeof p['call-9min'].runningMs, 'number', '/progress 必须带 runningMs（now - startedAt）')
+    assert.ok(p['call-9min'].runningMs >= 9 * 60_000, 'runningMs 应 ≈ 9 分钟，实际 ' + p['call-9min'].runningMs)
+    assert.equal(p['call-live-40min'].finishedAt, undefined, '跑了 40 分钟但最近还在输出 → 不许标 stale')
+    assert.ok(p['call-live-40min'].runningMs >= 40 * 60_000, 'runningMs 仍应 ≈ 40 分钟')
     assert.equal(p['call-done-old'], undefined, '超过 24 小时的已完成项应被删')
     assert.ok(p['call-done-fresh'], '1 小时前的已完成项应保留')
 
     // 陈旧项最多留 5 分钟：把标记时间往前拨 6 分钟 → 下一次读取就该消失
-    mod.progressMap.get('call-11min').staleAt = now - 6 * 60_000
+    mod.progressMap.get('call-16min').staleAt = now - 6 * 60_000
     const again = await getProgress()
-    assert.equal(again['call-11min'], undefined, '陈旧项超过 5 分钟必须从 Map 删除')
+    assert.equal(again['call-16min'], undefined, '陈旧项超过 5 分钟必须从 Map 删除')
+    assert.ok(again['call-14min'], '14 分钟的活条目自愈后仍必须在')
     assert.equal(mod.healProgress(), 0, '自愈后不该再产生新的陈旧项')
-    return '11min→stale+finishedAt · 9min 不动 · 25h 删除 · 陈旧项 5 分钟后移除'
+    return '14min 不动 · 16min→stale+finishedAt · 9min 不动 · 40min 但 30s 前有活动→不动 · 25h 删除 · 陈旧项 5 分钟后移除'
+  })
+
+  await check('/progress 自愈：memberIdleMinutes=30 → 阈值 35 分钟（36 标 stale、34 不动）', async () => {
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 30 } })
+    mod.__resetProgress()
+    const now = Date.now()
+    mod.progressInit('call-36min-idle30', 'session-g5')
+    mod.progressMap.get('call-36min-idle30').startedAt = now - 36 * 60_000
+    mod.progressInit('call-34min-idle30', 'session-g5')
+    mod.progressMap.get('call-34min-idle30').startedAt = now - 34 * 60_000
+
+    assert.equal(mod.healProgress(now), 1, 'idle=30 → 阈值 35 分钟：36 分钟标陈旧（34 分钟的不算）')
+    const stale = mod.progressMap.get('call-36min-idle30')
+    assert.equal(typeof stale.finishedAt, 'number')
+    assert.equal(stale.stale, true)
+    assert.equal(mod.progressMap.get('call-34min-idle30').finishedAt, undefined, '34 分钟仍在阈值内，不该动')
+    setState(structuredClone(fixture))
+    return 'memberIdleMinutes=30 → 36min 标 stale · 34min 保留（阈值 = idle + 5 分钟）'
+  })
+
+  await check('/progress 自愈：activeCalls 里的 callId 跑 40 分钟也不标 stale、不删除', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    const now = Date.now()
+    mod.progressInit('call-live-40min', 'session-g5')
+    mod.progressMap.get('call-live-40min').startedAt = now - 40 * 60_000
+    mod.activeCalls.set('call-live-40min', { cancelled: false, controller: new AbortController() })
+
+    assert.equal(mod.healProgress(now), 0, 'activeCalls 里的条目一律不标陈旧')
+    const live = mod.progressMap.get('call-live-40min')
+    assert.equal(live.finishedAt, undefined, '不许写 finishedAt')
+    assert.equal(live.stale, undefined, '不许标 stale')
+    const p = await getProgress()
+    assert.ok(p['call-live-40min'], '正在跑的条目必须继续出现在 /progress')
+    assert.ok(p['call-live-40min'].runningMs >= 40 * 60_000, 'runningMs 应 ≈ 40 分钟，实际 ' + p['call-live-40min'].runningMs)
+
+    // 摘掉 activeCalls（模拟 finally 收尾）后，40 分钟 > 15 分钟静默阈值 → 下一次自愈就该收
+    mod.activeCalls.delete('call-live-40min')
+    assert.equal(mod.healProgress(now + 1), 1, '不在 activeCalls 的 40 分钟未完成项必须被收尾')
+    return 'activeCalls 40min → 不标 stale/不删，runningMs≈40min；摘掉后立刻按 15 分钟静默阈值收尾'
+  })
+
+  await check('/progress 成员条目带 silentMs（now - 最后活动）：刚活动≈0，静默 4 分钟 ≥ 240000', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    mod.progressInit('call-silent', 'session-g5')
+    mod.progressSet('call-silent', 'm_code', { name: '代码', kind: 'deepseek', stage: '执行中' })
+    mod.progressTouch('call-silent', 'm_code')
+    const fresh = await getProgress()
+    assert.equal(typeof fresh['call-silent'].members.m_code.silentMs, 'number', '每个成员条目都必须带 silentMs')
+    assert.ok(fresh['call-silent'].members.m_code.silentMs < 5000, '刚有活动时 silentMs 应接近 0，实际 ' + fresh['call-silent'].members.m_code.silentMs)
+    // 模拟 4 分钟没有任何输出：lastActivity 往前拨
+    mod.progressMap.get('call-silent').members.m_code.lastActivity = Date.now() - 4 * 60_000
+    const quiet = await getProgress()
+    assert.ok(quiet['call-silent'].members.m_code.silentMs >= 4 * 60_000, '静默 4 分钟 silentMs 应 ≥ 240000，实际 ' + quiet['call-silent'].members.m_code.silentMs)
+    return 'fresh≈0 · 4min → ' + quiet['call-silent'].members.m_code.silentMs + 'ms'
   })
 
   await check('POST /runs/cancel：{all} 把未完成 progress 标结束（clearedProgress=1），带 callId 只清那一条', async () => {
@@ -1378,40 +1468,253 @@ try {
     }
   })
 
-  await check('memberTimeoutMinutes：默认 30 / 页面配置优先 / profile 兜底 / 注入检查 AbortSignal 预算', async () => {
-    const defaultState = structuredClone(fixture)
-    defaultState.config = {}
-    setState(defaultState)
-    assert.equal(mod.memberTimeoutMinutes({}), 30)
-    assert.equal(mod.memberTimeoutMinutes({ memberTimeoutMinutes: 12 }), 12)
-    assert.equal(mod.memberTimeoutMs({}), 30 * 60_000, '默认必须是 30 分钟（不再 6 分钟）')
-    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 12 }), 12 * 60_000)
-    // 页面配置优先于 profile 配置；非法值回落默认
-    setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 45 } })
-    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 5 }), 45 * 60_000, 'state.config 应优先')
-    setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 0 } })
-    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 0 }), 30 * 60_000, '非法值必须回落默认 30')
+  /* ── 看门狗：取消「成员总超时」，只按静默判死（注入时钟，不真等 40 分钟） ── */
+  function fakeChildProcess(options = {}) {
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.stdin = { write() {}, end() {} }
+    child.kills = []
+    child.ignoreTerm = Boolean(options.ignoreTerm)
+    child.data = (text) => { child.stdout.emit('data', Buffer.from(String(text))) }
+    child.kill = (signal) => {
+      child.kills.push(signal)
+      if (signal === 'SIGTERM' && child.ignoreTerm) return true
+      child.emit('close', null)
+      return true
+    }
+    return child
+  }
+  /** 假定时器：interval 由测试手动 tick；grace/timeout 定时器不真跑（避免留尾巴）。 */
+  function fakeTimers() {
+    const intervals = []
+    const timeouts = []
+    return {
+      setIntervalFn: (fn) => { intervals.push(fn); return fn },
+      clearIntervalFn: (fn) => { const i = intervals.indexOf(fn); if (i >= 0) intervals.splice(i, 1) },
+      setTimeoutFn: (fn) => { timeouts.push(fn); return fn },
+      clearTimeoutFn: (fn) => { const i = timeouts.indexOf(fn); if (i >= 0) timeouts.splice(i, 1) },
+      tick: () => { for (const fn of [...intervals]) fn() },
+      tickTimeouts: () => { for (const fn of [...timeouts]) fn() },
+      count: () => intervals.length,
+    }
+  }
+  const fakeRun = (child, clock, timers, extra = {}) => mod.run('fake-bin', [], {
+    spawnImpl: () => child,
+    clock: () => clock.t,
+    setIntervalFn: timers.setIntervalFn,
+    clearIntervalFn: timers.clearIntervalFn,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+    ...extra,
+  })
+  const DEFAULT_IDLE = 10 * 60_000
+  const DEFAULT_HARD = 360 * 60_000
 
-    // 注入检查：真实 seam 在 timeoutMs 未显式给时，应把 45 分钟换算成 ms 交给 AbortSignal.timeout
+  await check('看门狗参数：idle 默认 10 / hard 默认 360 / 页面优先 / 旧的 memberTimeoutMinutes 只读不生效', async () => {
+    setState({ ...structuredClone(fixture), config: {} })
+    assert.equal(mod.DEFAULT_MEMBER_IDLE_MINUTES, 10, 'idle 默认必须是 10 分钟')
+    assert.equal(mod.DEFAULT_MEMBER_HARD_LIMIT_MINUTES, 360, '硬上限默认必须是 360 分钟')
+    assert.equal(mod.memberIdleMinutes({}), 10)
+    assert.equal(mod.memberIdleMs({}), DEFAULT_IDLE)
+    assert.equal(mod.memberHardLimitMinutes({}), 360)
+    assert.equal(mod.memberHardLimitMs({}), DEFAULT_HARD)
+    // profile config 兜底
+    assert.equal(mod.memberIdleMinutes({ memberIdleMinutes: 3 }), 3)
+    assert.equal(mod.memberHardLimitMinutes({ memberHardLimitMinutes: 120 }), 120)
+    // 页面配置优先
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 4, memberHardLimitMinutes: 90 } })
+    assert.equal(mod.memberIdleMinutes({ memberIdleMinutes: 3 }), 4, 'state.config 应优先')
+    assert.equal(mod.memberHardLimitMinutes({ memberHardLimitMinutes: 120 }), 90, 'state.config 应优先')
+    // 非法值回落默认；hard=0 是合法值（= 完全不限制）
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0, memberHardLimitMinutes: -1 } })
+    assert.equal(mod.memberIdleMinutes({}), 10, 'idle 非正数必须回落默认 10')
+    assert.equal(mod.memberHardLimitMinutes({}), 360, 'hard 负数必须回落默认 360')
+    setState({ ...structuredClone(fixture), config: { memberHardLimitMinutes: 0 } })
+    assert.equal(mod.memberHardLimitMinutes({}), 0, 'hard=0 是「不限制」，不能回落默认')
+    assert.equal(mod.memberHardLimitMs({}), 0)
+    // 旧字段仍可读，但不再影响任何终止判断
     setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 45 } })
-    const seen = []
+    assert.equal(mod.memberTimeoutMinutes({}), 45, '旧字段必须还能读（兼容老配置）')
+    assert.equal(mod.memberIdleMs({}), DEFAULT_IDLE, '旧 memberTimeoutMinutes 不能再影响 idle')
+    assert.equal(mod.memberHardLimitMs({}), DEFAULT_HARD)
+    setState(structuredClone(fixture))
+    return 'idle 10 / hard 360（0=不限）· 页面优先 · 旧字段只读'
+  })
+
+  await check('看门狗①：持续有输出的进程跑过 40 分钟不被杀（没有总时长超时）', async () => {
+    setState(structuredClone(fixture))
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers)
+    for (let minute = 1; minute <= 40; minute += 1) {
+      clock.t += 60_000
+      child.data('step ' + minute) // 每分钟都有输出 = 一直活着
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, [], '持续输出 40 分钟不该被任何信号杀掉（总超时必须已取消）')
+    assert.equal(timers.count(), 1, '看门狗巡检定时器应仍在跑')
+    child.emit('close', 0)
+    const result = await pending
+    assert.equal(result.code, 0)
+    assert.equal(result.reason, undefined)
+    return '40 分钟持续输出 → 0 次 kill（默认 idle 10 / hard 360）'
+  })
+
+  await check('看门狗②：静默 11 分钟（idle=10）→ SIGTERM，reason=idle-timeout 且带中文原因', async () => {
+    setState({ ...structuredClone(fixture), config: {} }) // 全默认
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers)
+    for (let minute = 1; minute <= 11; minute += 1) {
+      clock.t += 60_000
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, ['SIGTERM'], '静默 11 分钟必须先 SIGTERM')
+    const result = await pending
+    assert.equal(result.reason, 'idle-timeout', '结果必须带 reason=idle-timeout')
+    assert.equal(result.error, '成员静默超过 10 分钟，已终止（看门狗）')
+    return '静默 11min → SIGTERM · reason=idle-timeout · error=「' + result.error + '」'
+  })
+
+  await check('看门狗③：memberIdleMinutes=2 时静默 3 分钟就被杀', async () => {
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 2 } })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers)
+    for (let minute = 1; minute <= 3; minute += 1) {
+      clock.t += 60_000
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, ['SIGTERM'], 'idle=2 → 静默 3 分钟必须被杀')
+    const result = await pending
+    assert.equal(result.reason, 'idle-timeout')
+    assert.equal(result.error, '成员静默超过 2 分钟，已终止（看门狗）')
+    return 'idle=2 → 静默 3min 被杀 · error=「' + result.error + '」'
+  })
+
+  await check('看门狗④：memberHardLimitMinutes=0 时 6 小时也不硬杀（只按静默）', async () => {
+    setState({ ...structuredClone(fixture), config: { memberHardLimitMinutes: 0 } })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers)
+    // 370 分钟：每 10 分钟都有输出，静默永远不触发；硬上限 0 = 不限制
+    for (let minute = 10; minute <= 370; minute += 10) {
+      clock.t += 10 * 60_000
+      child.data('still alive at ' + minute + 'min')
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, [], 'hard=0 时 6 小时也不能被杀')
+    child.emit('close', 0)
+    const result = await pending
+    assert.equal(result.reason, undefined)
+    return 'hard=0 → 370 分钟持续输出仍 0 次 kill'
+  })
+
+  await check('显式预算仍生效：审校等有界调用传 timeoutMs 到点 → reason=timeout（不是 idle-timeout）', async () => {
+    setState(structuredClone(fixture))
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    // idle 设得很大，确保先触发的是显式预算（模拟审校 120s），而不是静默看门狗
+    const pending = fakeRun(child, clock, timers, { idleMs: 60 * 60_000, timeoutMs: 120_000 })
+    timers.tickTimeouts() // 显式预算到点
+    assert.deepEqual(child.kills, ['SIGTERM'], '显式预算到点必须先 SIGTERM')
+    const result = await pending
+    assert.equal(result.reason, 'timeout', '有界调用的原因必须是 timeout，不能混成 idle-timeout')
+    assert.equal(result.error, '成员超过本次调用的显式超时，已终止')
+    return 'timeoutMs 到点 → SIGTERM · reason=timeout'
+  })
+
+  await check('看门狗：SIGTERM 后宽限 3 秒仍不退出 → SIGKILL（默认 MEMBER_KILL_GRACE_MS=3000）', async () => {
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0.02 } }) // 1.2s
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess({ ignoreTerm: true })
+    const pending = mod.run('fake-bin', [], {
+      spawnImpl: () => child,
+      clock: () => clock.t,
+      setIntervalFn: timers.setIntervalFn,
+      clearIntervalFn: timers.clearIntervalFn,
+      killGraceMs: 5,
+    })
+    // 拨过 2 分钟：看门狗先 SIGTERM；进程不理会 → 5ms 后 SIGKILL
+    clock.t += 2 * 60_000
+    timers.tick()
+    assert.deepEqual(child.kills, ['SIGTERM'], '第一步必须只发 SIGTERM')
+    const result = await pending
+    assert.deepEqual(child.kills, ['SIGTERM', 'SIGKILL'], '宽限期后必须补 SIGKILL')
+    assert.equal(result.reason, 'idle-timeout')
+    return 'SIGTERM → (宽限) → SIGKILL · reason=idle-timeout'
+  })
+
+  await check('深寻 seam：不再设总时长 AbortSignal.timeout；静默超过 idle 才 abort 并标 idle-timeout', async () => {
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0.02 } }) // 1.2s
+    mod.__setWatchdogTickMs(10)
     const originalTimeout = AbortSignal.timeout
-    AbortSignal.timeout = function spy(ms) { seen.push(ms); return originalTimeout.call(AbortSignal, ms) }
-    try {
-      const fakeSubagents = {
-        getProvider: () => ({ id: 'spawn' }),
-        startActivation: async () => ({
-          childId: 'child-timeout', dispose: async () => {},
-          result: Promise.resolve({ output: [{ type: 'text', text: '完成' }], stopReason: 'completed' }),
+    let timeoutCalls = 0
+    AbortSignal.timeout = function spy(ms) { timeoutCalls += 1; return originalTimeout.call(AbortSignal, ms) }
+    let disposed = 0
+    const fakeSubagents = {
+      getProvider: () => ({ id: 'spawn' }),
+      startActivation: async ({ signal }) => ({
+        childId: 'child-idle-test',
+        dispose: async () => { disposed += 1 },
+        // 子代理永不产出：只有看门狗的 abort 能让它结束
+        result: new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted by watchdog')), { once: true })
         }),
-      }
-      const fakeCtx = { get: (name) => (name === 'subagents' ? fakeSubagents : undefined) }
-      const out = await mod.runDeepseekViaSeam(fakeCtx, { id: 'm_timeout', name: '计时', kind: 'deepseek' }, '任务', {}, {}, undefined, undefined, undefined, undefined)
-      assert.equal(out.ok, true)
-      assert.deepEqual(seen, [45 * 60_000], 'seam 必须用 memberTimeoutMs 的 45 分钟，实际 ' + JSON.stringify(seen))
-      return `默认 ${mod.DEFAULT_MEMBER_TIMEOUT_MINUTES} 分钟 · 页面 45 → ${seen[0]}ms · 注入生效`
+      }),
+    }
+    const fakeCtx = {
+      get: (name) => (name === 'subagents' ? fakeSubagents
+        : name === 'agents' ? { get: () => ({ status: 'working', session: { snapshotEvents: () => [] } }) }
+          : undefined),
+    }
+    try {
+      const out = await mod.runDeepseekViaSeam(fakeCtx, { id: 'm_seam_idle', name: '静默深寻', kind: 'deepseek' }, '任务', {}, {}, undefined, undefined, undefined, undefined, undefined)
+      assert.equal(timeoutCalls, 0, '成员 seam 调用不该再设 AbortSignal.timeout（总时长）')
+      assert.equal(out.reason, 'idle-timeout', 'seam 静默必须标 reason=idle-timeout，实际 ' + JSON.stringify(out))
+      assert.equal(out.error, '成员静默超过 0.02 分钟，已终止（看门狗）')
+      assert.ok(disposed >= 1, '被看门狗终止时必须 dispose 子会话')
+      return '无 AbortSignal.timeout · 1.2s 静默 → abort · reason=idle-timeout · disposed'
     } finally {
       AbortSignal.timeout = originalTimeout
+      mod.__setWatchdogTickMs(15_000)
+      setState(structuredClone(fixture))
+    }
+  })
+
+  await check('看门狗回执：被静默终止的成员写「静默超时终止」、不重试、不进普通失败文案', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    let calls = 0
+    mod.__setRunKind(async () => {
+      calls += 1
+      return { ok: false, text: '', error: '成员静默超过 10 分钟，已终止（看门狗）', reason: 'idle-timeout' }
+    })
+    try {
+      await getState('?sessionId=session-g5')
+      const tool = registered.council_delegate
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-idle-receipt', agent: { id: 'session-g5' } },
+      )
+      assert.equal(calls, 1, '静默超时不得自动重试（再发一次大概率还是静默）')
+      assert.equal(out.members[0].reason, 'idle-timeout', '回执成员项必须带 reason=idle-timeout')
+      assert.equal(out.members[0].idleTimeout, true, '回执成员项必须带 idleTimeout=true')
+      const rendered = tool.output.render({}, out)[0].text
+      assert.match(rendered, /静默超时终止/, '回执正文必须写「静默超时终止」')
+      assert.match(rendered, /看门狗/, '回执正文明说是看门狗判定')
+      assert.doesNotMatch(rendered, /^失败：/m, '不能当成普通失败（失败：）')
+      return '1 次调用（不重试）· 回执「静默超时终止（看门狗…）」'
+    } finally {
+      mod.__setRunKind(undefined)
+      setState(structuredClone(fixture))
     }
   })
 
