@@ -24,6 +24,9 @@
  *   - 进度条收尾：POST /runs/cancel 写 finishedAt+cancelled 并返回 clearedProgress（all / callId）/
  *     GET /progress 自愈（11 分钟未完成 → stale、9 分钟不动、陈旧项留 5 分钟、完成项留 24 小时）/
  *     council_delegate 的 __stage__ 拆解中 → 派活中 → 结束删除
+ *   - 硬拦截（方案 A）：tools.guard 拒绝写类工具（中文理由）/ 只读与 bash 放行（bash 计审计）/
+ *     strictDelegate=false 放行 / 最后一条用户消息含「你自己做」本轮放行 / 回执「## 越权拦截」计数 +
+ *     /progress entry 的 selfWorkBlocked
  *   - 路由一致性：client 的 SESSIONS_PRUNE_PATH === host 的 SESSIONS_PRUNE_ROUTE
  *
  * Usage: node tests/staffing-test.mjs
@@ -42,7 +45,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -289,15 +292,20 @@ await mkdir(path.join(HOME, 'storages'), { recursive: true })
 await writeFile(path.join(HOME, 'storages', 'council.json'), JSON.stringify(fixture, null, 2))
 
 const registered = {}
+/** bindAgent 注册到 agent.ctx 的工具守卫（方案 A 硬拦截），最后一个 = 最近绑定的组。 */
+const guards = []
 const agent = {
   id: 'agent-test',
   ctx: {
     systemPrompt: { section: () => () => {} },
-    tools: { register: (tool) => { registered[tool.name] = tool; return () => {} } },
+    tools: {
+      register: (tool) => { registered[tool.name] = tool; return () => {} },
+      guard: (fn) => { guards.push(fn); return () => {} },
+    },
     effect: () => {},
   },
 }
-const agents = { get: (sid) => (['session-g5', 'session-arch-test'].includes(String(sid || '')) ? agent : undefined) }
+const agents = { get: (sid) => (['session-g5', 'session-arch-test', 'session-guard'].includes(String(sid || '')) ? agent : undefined) }
 const ctx = { get: (name) => (name === 'agents' ? agents : undefined), logger: { warn() {} }, effect: () => {} }
 const config = {
   codexBaseUrl: 'http://127.0.0.1:9', claudeBaseUrl: 'http://127.0.0.1:9', claudeApiKey: 'test-key',
@@ -347,6 +355,18 @@ try {
     const res = await post('/roles', { id: tempId, kind: 'ruby' })
     assert.equal(res.status, 400)
     return 'HTTP 400'
+  })
+
+  await check('GET/POST /config 暴露 strictDelegate（默认 true，可关可开）', async () => {
+    const before = await (await fetch(base + '/config')).json()
+    assert.equal(before.config.strictDelegate, true, 'strictDelegate 默认必须是 true')
+    const off = await (await post('/config', { strictDelegate: false })).json()
+    assert.equal(off.config.strictDelegate, false, 'POST false 没生效')
+    const readBack = await (await fetch(base + '/config')).json()
+    assert.equal(readBack.config.strictDelegate, false, 'POST 后 GET 必须读回 false')
+    const on = await (await post('/config', { strictDelegate: true })).json()
+    assert.equal(on.config.strictDelegate, true, 'POST true 没生效')
+    return 'GET true → POST false → GET false → POST true'
   })
 
   await check('GET /state?sessionId=… 绑定会话并注册 council_delegate', async () => {
@@ -1429,6 +1449,115 @@ try {
     assert.equal(capped.ok, false)
     assert.match(capped.error, /已续跑 5 次仍未完成/)
     return '首跑+2 次续跑→completed（continued=2）· 上限 5 · 超限 ok=false'
+  })
+
+  /* ── 方案 A：硬拦截父会话自己执行写操作（tools.guard） ────────────────── */
+  const guardAudit = () => mod.selfWorkAudit.get('g_guard') || { blocked: 0, tools: {}, bash: 0 }
+  /** 绑一个独立组（session-guard）并返回该组刚注册的守卫 + 假会话。 */
+  async function bindGuardGroup(events) {
+    const next = structuredClone(fixture)
+    next.groups = [{
+      id: 'g_guard', name: 'Guard', sessionId: 'session-guard', memberIds: ['m_code'],
+      requirePrelim: false, requireCommander: false,
+    }]
+    next.config = {}
+    setState(next)
+    mod.resetSelfWorkAudit()
+    mod.selfWorkPermits.clear()
+    await getState('?sessionId=session-guard')
+    const guard = guards[guards.length - 1]
+    return { guard, session: { snapshotEvents: () => events } }
+  }
+  const guardCall = (session, name, agentId = 'session-guard') =>
+    ({ name, arguments: {}, agent: { id: agentId, session }, callId: 'call-guard' })
+  const userEvent = (seq, text) => ({ type: 'user/message', seq, data: { message: { content: [{ type: 'text', text }] } } })
+
+  await check('硬拦截①：edit 被拒绝，理由是中文并指向 council_delegate', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '把页面改一下')])
+    assert.equal(typeof guard, 'function', 'bindAgent 没有注册 tools.guard')
+    const writeTools = ['edit', 'write', 'apply_patch', 'blender_python', 'blender_import', 'blender_export', 'blender_render', 'blender_render_frames']
+    assert.deepEqual([...mod.WRITE_TOOLS].sort(), [...writeTools].sort(), '写类名单必须正好这 8 个')
+    for (const name of writeTools) {
+      assert.equal(typeof guard(guardCall(session, name)), 'string', name + ' 应该被拒绝')
+    }
+    const reason = guard(guardCall(session, 'edit'))
+    assert.equal(typeof reason, 'string', 'edit 应该被拒绝（返回拒绝理由）')
+    assert.match(reason, /小组模式/)
+    assert.match(reason, /council_delegate/)
+    assert.match(reason, /strictDelegate/)
+    assert.equal(guardAudit().blocked, 9, '拒绝次数应为 8 + 1')
+    assert.equal(guardAudit().tools.edit, 2, '工具分布应记 edit×2')
+    // 只对本组会话生效：别的 agent 一律放行
+    assert.equal(guard(guardCall(session, 'edit', 'session-other')), undefined, '别的 agent 不该被拦')
+    return reason
+  })
+
+  await check('硬拦截②：只读工具与 bash 放行（bash 只计审计数、不拦）', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '看一下现在的状态')])
+    for (const name of ['read', 'read_image', 'grep', 'glob', 'blender_status', 'blender_scene_info',
+      'blender_object_info', 'blender_validate_scene', 'blender_validate_export', 'blender_helper_catalog']) {
+      assert.equal(guard(guardCall(session, name)), undefined, name + ' 不该被拦')
+    }
+    assert.equal(guard(guardCall(session, 'bash')), undefined, 'bash 不该被拦')
+    assert.equal(guardAudit().blocked, 0, '只读工具不该计入越权数')
+    assert.equal(guardAudit().bash, 1, 'bash 应只计审计数')
+    return '10 个只读工具 + bash 全部放行 · bash 审计 +1'
+  })
+
+  await check('硬拦截③：strictDelegate=false → edit 放行；改回 true 重新拦截', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '把页面改一下')])
+    mod.state.config = { strictDelegate: false }
+    assert.equal(guard(guardCall(session, 'edit')), undefined, 'strictDelegate=false 时 edit 应放行')
+    assert.equal(guard(guardCall(session, 'blender_render')), undefined, 'strictDelegate=false 时 blender_render 应放行')
+    assert.equal(guardAudit().blocked, 0)
+    mod.state.config = {}
+    assert.equal(typeof guard(guardCall(session, 'edit')), 'string', '开关拨回 true 后必须重新拦截')
+    return 'strictDelegate=false → edit/blender_render 放行 · 改回 true → 再次拦截'
+  })
+
+  await check('硬拦截④：最后一条用户消息含「你自己做」→ 本轮放行，换轮后重新拦截', async () => {
+    const events = [
+      userEvent(1, '先派活'),
+      { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'text', text: '好' }] } } },
+      userEvent(3, '这个你自己做吧，别派了'),
+    ]
+    const { guard, session } = await bindGuardGroup(events)
+    assert.equal(guard(guardCall(session, 'edit')), undefined, '用户说了「你自己做」应放行 edit')
+    assert.equal(guard(guardCall(session, 'blender_python')), undefined, '用户说了「你自己做」应放行 blender_python')
+    assert.equal(guardAudit().blocked, 0)
+    // 新一轮（最后一条用户消息不含逃生词）必须重新拦截，permit 不能跨轮残留
+    events.push(userEvent(4, '继续派活'))
+    assert.equal(typeof guard(guardCall(session, 'edit')), 'string', '换轮后必须重新拦截')
+    return '含「你自己做」放行 · 换轮后重新拦截'
+  })
+
+  await check('硬拦截⑤：5 次拒绝（edit×3 + blender_render×2）→ 回执「越权拦截」计数正确，/progress 也带数', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '做个 2.5D 场景')])
+    for (const name of ['edit', 'edit', 'edit', 'blender_render', 'blender_render']) {
+      assert.equal(typeof guard(guardCall(session, name)), 'string', name + ' 应被拒绝')
+    }
+    assert.equal(guardAudit().blocked, 5)
+    const tool = registered.council_delegate
+    const out = await tool.execute(
+      { assignments: [{ member: '代码', task: '随便做点什么' }] },
+      { callId: 'call-guard-block', agent: { id: 'session-guard', session } },
+    )
+    assert.equal(out.selfWorkBlocked, 5, '回执里的越权计数不对')
+    assert.equal(out.selfWorkBlockedDetail, 'edit×3、blender_render×2', '工具分布不对')
+    const rendered = tool.output.render({}, out)[0].text
+    assert.match(rendered, /## 越权拦截/)
+    assert.match(rendered, /父会话尝试自行执行 5 次写操作，已拦截（edit×3、blender_render×2）/)
+    const progress = await getProgress()
+    assert.equal(progress['call-guard-block'].selfWorkBlocked, 5, '/progress entry 必须带 selfWorkBlocked')
+    // N=0 不输出该段
+    mod.resetSelfWorkAudit()
+    const clean = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'call-guard-clean', agent: { id: 'session-guard', session } },
+    )
+    assert.equal(clean.selfWorkBlocked, 0)
+    assert.doesNotMatch(tool.output.render({}, clean)[0].text, /## 越权拦截/, 'N=0 时不该输出越权拦截段')
+    return '5 次拒绝 → 回执 edit×3、blender_render×2 · /progress=5 · N=0 不输出'
   })
 
 } finally {
