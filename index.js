@@ -1782,6 +1782,7 @@ export function createHandler(ctx, config = {}) {
                   hasClaudeKey: Boolean(settings.claudeKey),
                   hasImageKey: Boolean(settings.imageKey),
                   reuseChildren: Boolean((state.config || {}).reuseChildren),
+                  strictDelegate: own.strictDelegate !== false,
                   claudeBase: own.claudeBase || '',
                   codexBase: own.codexBase || '',
                   proxyUrl: own.proxyUrl || '',
@@ -1804,6 +1805,7 @@ export function createHandler(ctx, config = {}) {
                 }
               }
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
+              if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
               state.config = Object.keys(next).length ? next : undefined
               usageCache = null
               catalog = null
@@ -1816,6 +1818,7 @@ export function createHandler(ctx, config = {}) {
                   hasClaudeKey: Boolean(settings.claudeKey),
                   hasImageKey: Boolean(settings.imageKey),
                   reuseChildren: Boolean((state.config || {}).reuseChildren),
+                  strictDelegate: own.strictDelegate !== false,
                   claudeBase: own.claudeBase || '',
                   codexBase: own.codexBase || '',
                   proxyUrl: own.proxyUrl || '',
@@ -1959,6 +1962,126 @@ function mandateText(group) {
     '若你发现自己在写代码或跑构建命令，立即停下，改用 council_delegate 派给成员。',
     '违反这条 = 任务失败。',
   ].join('\n')
+}
+
+/**
+ * 硬拦截（方案 A）：小组模式下父会话自己执行「写操作」的守卫。
+ *
+ * 系统提示词拦不住（实测：一个 2.5D 会话里父会话自己跑了 bash 120 次 / edit 12 次 /
+ * blender_python 6 次 / blender_render 10 次，只派活 25 次），所以在 `agent.ctx.tools.guard()`
+ * 上加一道单调守卫：写类工具直接拒绝，只读工具与 bash 放行（bash 只计审计数）。
+ * 逃生口：state.config.strictDelegate=false，或本轮最后一条用户消息里明确让父会话自己动手。
+ */
+const WRITE_TOOLS = new Set([
+  'edit', 'write', 'apply_patch',
+  'blender_python', 'blender_import', 'blender_export',
+  'blender_render', 'blender_render_frames',
+])
+
+/** 用户明确放行父会话自己动手的说法（只看最后一条用户消息）。 */
+const SELF_WORK_ESCAPE = /你自己做|你直接改|你亲自动手|放行/
+
+/** 拒绝理由：与 mandateText 的措辞一致，并给出两条逃生路径。 */
+const SELF_WORK_DENY_REASON = '小组模式：不要自己执行写操作。用 council_delegate 派给成员；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。'
+
+/** 按组累加的越权审计：{ blocked, tools: { [name]: count }, bash, lastAt }。 */
+const selfWorkAudit = new Map()
+/** 按组缓存的本轮「用户已放行」判定（守卫里读它；delegate 开始时也会刷新一次）。 */
+const selfWorkPermits = new Map()
+
+function selfWorkAuditFor(groupId) {
+  let entry = selfWorkAudit.get(groupId)
+  if (!entry) {
+    entry = { blocked: 0, tools: {}, bash: 0, lastAt: 0 }
+    selfWorkAudit.set(groupId, entry)
+  }
+  return entry
+}
+
+/** 清空审计（不传 groupId 清全部；测试与重新开始一轮时用）。 */
+function resetSelfWorkAudit(groupId) {
+  if (groupId === undefined) selfWorkAudit.clear()
+  else selfWorkAudit.delete(groupId)
+}
+
+/** 「edit×2、blender_render×1」这种可读分布（次数降序，同次数按名字）。 */
+function selfWorkBlockedDetail(entry) {
+  return Object.entries(entry && entry.tools ? entry.tools : {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => name + '×' + count)
+    .join('、')
+}
+
+/** 本轮是否允许父会话自己动手：页面配置 > profile 配置 > 默认 true。 */
+function strictDelegateEnabled(config) {
+  const own = state.config
+  if (own && typeof own.strictDelegate === 'boolean') return own.strictDelegate
+  if (config && typeof config.strictDelegate === 'boolean') return config.strictDelegate
+  return true
+}
+
+/** 取会话里最后一条用户消息的文本（同步；sessionEvents 本身就是同步读）。 */
+function lastUserMessageText(session) {
+  try {
+    const events = sessionEvents(session)
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]
+      if (!ev || ev.type !== 'user/message') continue
+      const text = (ev.data?.message?.content || [])
+        .filter((block) => block && block.type === 'text')
+        .map((block) => block.text).join('\n').trim()
+      return { seq: ev.seq, text }
+    }
+    const last = events[events.length - 1]
+    return { seq: last && last.seq, text: '' }
+  } catch {
+    return { seq: undefined, text: '' }
+  }
+}
+
+/**
+ * 刷新「本轮用户已放行」置位变量：最后一条用户消息含逃生词 → allowed=true。
+ * delegate 开始时调用一次；守卫里在缓存失效时也会补算（会话 seq 变了才重算）。
+ */
+function noteSelfWorkPermit(group, agent) {
+  const { seq, text } = lastUserMessageText(agent && agent.session)
+  const cached = selfWorkPermits.get(group.id)
+  if (cached && seq !== undefined && cached.seq === seq) return cached
+  const permit = { seq, text: text.slice(0, 200), allowed: SELF_WORK_ESCAPE.test(text), at: Date.now() }
+  selfWorkPermits.set(group.id, permit)
+  return permit
+}
+
+/**
+ * 造一个绑定到某小组会话的守卫。只有 `execution.agent.id === 该组 sessionId` 时生效，
+ * 其他 agent 一律放行；返回字符串 = 拒绝，undefined = 放行。
+ */
+function makeSelfWorkGuard(group, config) {
+  const groupId = group.id
+  return (execution) => {
+    if (!execution || !execution.agent) return undefined
+    // 组被删 / 归档清理后，旧绑定不应再拦任何东西
+    const live = state.groups.find((g) => g.id === groupId)
+    if (!live || !live.sessionId) return undefined
+    if (normalizeSessionId(execution.agent.id) !== normalizeSessionId(live.sessionId)) return undefined
+    if (!strictDelegateEnabled(config)) return undefined
+    const name = String(execution.name || '')
+    // bash 只计入审计，不拦截（否则连只读排障都做不了）
+    if (name === 'bash') {
+      const audit = selfWorkAuditFor(groupId)
+      audit.bash += 1
+      audit.lastAt = Date.now()
+      return undefined
+    }
+    if (!WRITE_TOOLS.has(name)) return undefined
+    // 用户本轮已明确放行 → 不拦
+    if (noteSelfWorkPermit(live, execution.agent).allowed) return undefined
+    const audit = selfWorkAuditFor(groupId)
+    audit.blocked += 1
+    audit.tools[name] = (audit.tools[name] || 0) + 1
+    audit.lastAt = Date.now()
+    return SELF_WORK_DENY_REASON
+  }
 }
 
 const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
@@ -2515,6 +2638,8 @@ function bindAgent(ctx, config, group, agent) {
             staffingCreated: { type: 'array', items: { type: 'string' }, description: '本次新建（并会被回收）的临时成员 id' },
             pruned: { type: 'array', items: { type: 'string' }, description: '本次回收的临时成员（如“建模（临时）”）' },
             prunedSessions: { type: 'array', items: { type: 'string' }, description: '本次清理的子会话目录 id（pruneChildSessions:false 时不清理）' },
+            selfWorkBlocked: { type: 'integer', description: '本组累计被守卫拦下的父会话写操作次数（0 表示没有越权）' },
+            selfWorkBlockedDetail: { type: 'string', description: '被拦工具分布，如 edit×2、blender_render×1' },
             plan: { type: 'object', additionalProperties: true },
             members: {
               type: 'array',
@@ -2561,7 +2686,12 @@ function bindAgent(ctx, config, group, agent) {
           const prunedSessions = value.prunedSessions?.length
             ? '\n\n## 子会话\n已清理 ' + value.prunedSessions.length + ' 个子会话目录'
             : ''
-          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions }]
+          const selfWorkBlocked = Number(value.selfWorkBlocked) || 0
+          const blocked = selfWorkBlocked > 0
+            ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + selfWorkBlocked + ' 次写操作，已拦截'
+              + (value.selfWorkBlockedDetail ? '（' + value.selfWorkBlockedDetail + '）' : '')
+            : ''
+          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked }]
         },
       },
       async execute(args, exec) {
@@ -2581,6 +2711,13 @@ function bindAgent(ctx, config, group, agent) {
         callId = exec && exec.callId
         progressInit(callId, exec && exec.agent && exec.agent.id)
         progressStage(callId, '拆解中')
+        // 越权审计快照 + 刷新「用户本轮已放行」：进度条与回执都从这里取数
+        noteSelfWorkPermit(live, exec && exec.agent)
+        const blockedSoFar = selfWorkAuditFor(live.id)
+        const blockedProgress = progressMap.get(callId)
+        if (blockedProgress) blockedProgress.selfWorkBlocked = blockedSoFar.blocked
+        response.selfWorkBlocked = blockedSoFar.blocked
+        response.selfWorkBlockedDetail = selfWorkBlockedDetail(blockedSoFar)
         if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
         const staffing = await ensureStaffing(live, args?.staffing, ephemeral)
         let assignments = Array.isArray(args && args.assignments) ? args.assignments : []
@@ -2982,6 +3119,11 @@ async execute(args) {
         return { ok: false, error: 'unknown action' }
       },
     }))
+    // 方案 A：父会话（本组会话的 agent）不得自己执行写操作，由守卫硬拦截。
+    // 通过 agent.ctx 注册即只作用于该 agent；守卫内部再按 sessionId 校验一次，其它 agent 一律放行。
+    if (agentCtx.tools && typeof agentCtx.tools.guard === 'function') {
+      disposers.push(agentCtx.tools.guard(makeSelfWorkGuard(group, config)))
+    }
   } catch (error) {
     for (const dispose of disposers) { try { dispose() } catch { /* ignore */ } }
     throw error

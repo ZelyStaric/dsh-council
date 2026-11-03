@@ -51,9 +51,26 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
       config:
         claudeBaseUrl: https://your-relay      # claude 成员用
         defaultWorkspace: /your/workspace      # 成员的工作目录
+        strictDelegate: true                   # 小组模式硬拦截父会话自己写文件（默认 true）
 ```
 
 > 页面里的 base 留空 = 用 profile 里的；页面填了会覆盖它。
+
+### 硬拦截：小组模式下父会话不许自己动手
+
+光靠提示词拦不住（实测有会话自己跑了 120 次 bash / 12 次 edit 却不派活），所以 Host 半在
+`agent.ctx.tools.guard()` 上加了一道守卫：**写类工具直接拒绝**，理由会回到父会话。
+
+- 拒绝名单：`edit`、`write`、`apply_patch`、`blender_python`、`blender_import`、`blender_export`、
+  `blender_render`、`blender_render_frames`；
+- **不拦** `bash`（只计审计数）与只读工具（`read` / `read_image` / `grep` / `glob` / `blender_status` /
+  `blender_scene_info` / `blender_object_info` / `blender_validate_*` / `blender_helper_catalog`）；
+- 两条逃生口：本轮最后一条用户消息里说「你自己做 / 你直接改 / 你亲自动手 / 放行」；或把
+  `strictDelegate` 设为 `false`（默认 `true`，改 profile 的 `config.strictDelegate`，见上）。
+
+- 被拦次数会累加，`council_delegate` 回执末尾出现 `## 越权拦截`（如「edit×3、blender_render×2」），
+  `GET /council/api/progress` 的 entry 里也有 `selfWorkBlocked`；`GET/POST /council/api/config`
+  读写 `strictDelegate`。
 
 ### 官方 key 与中转站都能直接用
 
