@@ -45,6 +45,26 @@ const ARCHIVED_PRUNE_ROUTE = '/groups/prune-archived'
 /** 默认只清理「归档超过 7 天」的组（前端按钮文案也用这个数）。 */
 const ARCHIVED_KEEP_DAYS = 7
 
+/**
+ * 审核 prompt 里贴的成员产出：**完整传入，不再截断**。
+ * 旧实现是 `.slice(0, 4000)`——长产出只有前 4000 字能被审校/指挥看到，
+ * 后面明明写了的内容也会被判「缺项」。这里只保留 20 万字符的兜底保护，
+ * 防单次 prompt 畸形膨胀（正常产出远小于该值）。
+ */
+const REVIEW_TEXT_HARD_CAP = 200_000
+
+/** 成员单次运行的默认时间预算（分钟）：页面配置 → profile 配置 → 30 分钟。 */
+const DEFAULT_MEMBER_TIMEOUT_MINUTES = 30
+
+/**
+ * deepseek 成员被 max-tokens / max-turns 截断时，最多续跑几次（同一个子会话里接着跑）。
+ * 超时仍走 callMember 原有的「重试一次」。
+ */
+const MEMBER_CONTINUE_LIMIT = 5
+
+/** 会被当作「这轮没跑完、可以续跑」的 stopReason。 */
+const TRUNCATED_STOP_REASONS = new Set(['max-tokens', 'maxTokens', 'max-turns', 'maxTurns'])
+
 /** 命令是否存在：避免 spawn 失败时只抛 ENOENT。 */
 async function commandExists(bin) {
   if (!bin) return false
@@ -248,8 +268,37 @@ function signalFor(callId, timeoutMs) {
   return parts.length > 1 ? AbortSignal.any(parts) : parts[0]
 }
 
+/**
+ * 成员单次运行预算（分钟）。
+ * 新增的可配项：profile 配置 `config.memberTimeoutMinutes`（cordis.patch.yml 的 config 里写）；
+ * 取值顺序与 apiSettings 一致：页面已保存的 `state.config.memberTimeoutMinutes`
+ * → profile 的 `config.memberTimeoutMinutes` → 默认 30 分钟。
+ * 非正数/非数字一律当「没配」，回落到默认值（避免 0 分钟立刻 SIGTERM）。
+ */
+function memberTimeoutMinutes(config) {
+  const own = (state && state.config) || {}
+  const raw = own.memberTimeoutMinutes ?? (config && config.memberTimeoutMinutes)
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MEMBER_TIMEOUT_MINUTES
+}
+
+/** 成员单次运行预算（毫秒）：run() / signalFor() / runDeepseekViaSeam 统一用它。 */
+function memberTimeoutMs(config) {
+  return Math.round(memberTimeoutMinutes(config) * 60_000)
+}
+
+/**
+ * 审核 prompt 里贴的成员产出。
+ * 默认整段传入；只有超过 REVIEW_TEXT_HARD_CAP 才截（防畸形 prompt），
+ * 保证「前 4000 字之后的内容」审核也能看到。
+ */
+function reviewText(output) {
+  const text = String((output && output.text) || output || '')
+  return text.length > REVIEW_TEXT_HARD_CAP ? text.slice(0, REVIEW_TEXT_HARD_CAP) : text
+}
+
 /** Collect stdout+stderr of one child process; caller owns the timeout. */
-function run(bin, args, { cwd, env, input, timeoutMs = 6 * 60_000, signal } = {}) {
+function run(bin, args, { cwd, env, input, timeoutMs = memberTimeoutMs(), signal } = {}) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
       cwd,
@@ -420,6 +469,7 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
       // message of THIS turn, otherwise a long delivery gets cut to its last chunk
       let text = ''
       let truncated = false
+      let stopReason
       let marker = -1
       try {
         const events = sessionEvents(agent.session)
@@ -434,7 +484,8 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
           const ev = events[i]
           if (ev.type === 'turn/end') {
             const reason = ev.data && ev.data.reason
-            if (reason && (reason.kind === 'max-tokens' || reason.kind === 'maxTokens')) truncated = true
+            const kind = String((reason && reason.kind) || '')
+            if (TRUNCATED_STOP_REASONS.has(kind)) { truncated = true; stopReason = kind }
           }
           if (ev.type !== 'assistant/message') continue
           const chunk = (ev.data.message.content || [])
@@ -450,6 +501,7 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
         convId: member.convId,
         error: text ? undefined : '复用子 agent 没有产出文本',
         truncated,
+        ...truncated ? { stopReason: stopReason || 'max-tokens' } : {},
         usage: null,
       }
     }
@@ -458,7 +510,9 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
   return null
 }
 
-async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs = 6 * 60_000, presetId, callId, childSink) {
+async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, presetId, callId, childSink) {
+  // 成员单次预算：调用方没显式给（undefined）时走 config.memberTimeoutMinutes（默认 30 分钟）
+  const budgetMs = timeoutMs ?? memberTimeoutMs(config)
   const subagents = ctx.get('subagents')
   if (!subagents || !parent) {
     return { ok: false, text: '', error: 'DSH subagent seam unavailable (no parent agent)', usage: null }
@@ -471,12 +525,15 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   if (reviewSlot && reuseEnabled && member.__reviewConvId) {
     member.convId = member.__reviewConvId
   }
-  if (reuseEnabled && member.convId) {
-    const reused = await continueChild(ctx, parent, member, prompt, timeoutMs)
-    if (reused && reused.truncated) {
-      return { ok: false, text: reused.text, error: '成员回复被 max-tokens 截断（本轮产出不完整）', usage: null }
-    }
+  // `__continue`：截断续跑时即使没开 reuseAgents，也要接着同一个子会话跑（保住上下文）
+  if ((reuseEnabled || member.__continue) && member.convId) {
+    const reused = await continueChild(ctx, parent, member, prompt, budgetMs, callId)
+    // truncated 原样带出（ok 仍按是否有文本算），由 runDeepseekWithContinuation 决定续跑
     if (reused) return reused
+    // 续跑请求拿不到原子会话就停：不要拿「继续未完成的部分」去开一个全新的子会话（上下文已丢）
+    if (member.__continue) {
+      return { ok: false, text: '', error: '续跑失败：原子会话不可用（未产出新内容）', usage: null }
+    }
   }
   try {
     const activation = await subagents.startActivation({
@@ -494,11 +551,13 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
         },
       },
-      signal: callId ? signalFor(callId, timeoutMs) : AbortSignal.timeout(timeoutMs),
+      signal: callId ? signalFor(callId, budgetMs) : AbortSignal.timeout(budgetMs),
       delivery: 'caller',
     })
     // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录
     if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
+    // 被 max-tokens / max-turns 截断时不能 dispose：续跑要接着这个子会话。
+    let keepChild = reuseEnabled
     try {
       const result = await activation.result
       const text = (result.output || [])
@@ -506,22 +565,73 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         .map((block) => block.text)
         .join('\n')
         .trim()
+      const stopReason = String(result.stopReason || '')
+      const truncated = TRUNCATED_STOP_REASONS.has(stopReason)
+      keepChild = reuseEnabled || truncated
       return {
-        ok: Boolean(text) && result.stopReason === 'completed',
+        ok: Boolean(text) && !truncated && stopReason === 'completed',
         text,
         convId: activation.childId,
         error: text ? undefined : ('stop: ' + result.stopReason + (result.diagnostic ? ' · ' + result.diagnostic : '')),
+        ...truncated ? { truncated: true, stopReason } : {},
         usage: null,
       }
     } finally {
-      // keep the child resident when reuse is enabled, otherwise it cannot be continued
-      if (!reuseEnabled) {
+      // keep the child resident when reuse is enabled (or when it must be continued)
+      if (!keepChild) {
         try { await activation.dispose() } catch { /* already gone */ }
       }
     }
   } catch (error) {
     return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), usage: null }
   }
+}
+
+/**
+ * deepseek 成员的「继续未完成的部分」循环。
+ *
+ * 子会话被 max-tokens / max-turns 截断（`truncated: true`）时**不重开任务**，
+ * 而是把上次未完成的原因拼进提示、在同一个子会话里接着跑（`__continue` 强制走
+ * continueChild，即使没开 reuseAgents），最多续跑 MEMBER_CONTINUE_LIMIT 次。
+ * - 各段产出按顺序拼成完整 text：审核拿到的是全文，不是最后一段；
+ * - 回执里带 `continued: n`（续跑次数）；到上限仍截断则 ok:false，交给 callMember 原有的重试。
+ *
+ * 续跑本身失败（子会话没了 / 超时）时保留已有产出并停下。
+ * seam 参数只为测试注入（默认就是真实的 runDeepseekViaSeam）。
+ */
+async function runDeepseekWithContinuation(ctx, member, prompt, config, parent, timeoutMs, callId, childSink, seam = runDeepseekViaSeam) {
+  const first = await seam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId, childSink)
+  if (!first) return first
+  // 只有拿到子会话 id 才能续跑；先写回成员，后续 seam 调用靠它走 continueChild
+  if (first.convId) member.convId = first.convId
+  const parts = []
+  const remember = (value) => {
+    const text = String((value && value.text) || '').trim()
+    if (text) parts.push(text)
+  }
+  remember(first)
+  let result = first
+  let continued = 0
+  while (result.truncated && member.convId && continued < MEMBER_CONTINUE_LIMIT) {
+    continued += 1
+    const reason = String(result.stopReason || result.error || 'max-tokens')
+    const nextPrompt = [
+      `[续跑 ${continued}/${MEMBER_CONTINUE_LIMIT}] 上一轮没有跑完（原因：${reason}）。`,
+      '请继续未完成的部分：不要重复已完成的工作，直接接着做剩下的，最后给出完整结论。',
+    ].join('\n')
+    const next = await seam(ctx, Object.assign({}, member, { __continue: true }), nextPrompt, config, parent, timeoutMs, member.__preset, callId, childSink)
+    if (!next) break
+    result = next
+    if (result.convId) member.convId = result.convId
+    remember(result)
+  }
+  if (!continued) return result
+  const merged = Object.assign({}, result, { text: parts.join('\n\n'), continued })
+  if (merged.truncated) {
+    merged.ok = false
+    merged.error = `成员回复被 ${merged.stopReason || 'max-tokens'} 截断（已续跑 ${continued} 次仍未完成）`
+  }
+  return merged
 }
 
 async function runDeepseek(ctx, member, prompt, config) {
@@ -835,13 +945,16 @@ function runKind(ctx, member, prompt, config, group, styleOverride, parent, time
 async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink) {
   await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
+  // 单次运行预算：显式传了（审核等有界调用）就用传的，否则走 memberTimeoutMinutes
+  const budgetMs = timeoutMs ?? memberTimeoutMs(config)
   let result
   if (member.kind === 'image') {
     const style = String(styleOverride || (group && group.style) || '')
     const imagePrompt = style ? `[统一风格规范]\n${style}\n\n[画面]\n${prompt}` : prompt
     result = await runImage(member, imagePrompt, config)
   } else if (member.kind === 'deepseek') {
-    result = await runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId, childSink)
+    // max-tokens / max-turns 截断时在同一个子会话里续跑（最多 MEMBER_CONTINUE_LIMIT 次）
+    result = await runDeepseekWithContinuation(ctx, member, prompt, config, parent, budgetMs, callId, childSink)
   } else {
     if (member.kind === 'claude') {
       const cfgCheck = apiSettings(config)
@@ -857,7 +970,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       prompt,
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
-      signal: callId ? signalFor(callId, 6 * 60_000) : undefined,
+      signal: callId ? signalFor(callId, budgetMs) : undefined,
     })
   }
   if (result.convId) member.convId = result.convId
@@ -905,7 +1018,7 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
     ...(brief ? ['[背景]', brief, ''] : []),
     `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
     '[产出]',
-    String((output && output.text) || output || '').slice(0, 4000),
+    reviewText(output),
     '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
   ].join('\n')
   const reviewChildKey = '__reviewConvId'
@@ -965,7 +1078,7 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       ...(brief ? ['[背景]', brief, ''] : []),
       `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
       '[产出]',
-      String((output && output.text) || output || '').slice(0, 4000),
+      reviewText(output),
       '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
@@ -1130,6 +1243,8 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     text: result.text,
     error: result.error,
     ...result.image === undefined ? {} : { image: result.image },
+    // 被截断后续跑过几次（0/无 → 不带该字段，回执保持原样）
+    ...result.continued === undefined ? {} : { continued: result.continued },
     review,
     ...review.attempts > 1 ? { attempts: review.attempts } : {},
   }
@@ -2412,6 +2527,7 @@ function bindAgent(ctx, config, group, agent) {
                   text: { type: 'string' },
                   image: { type: 'string' },
                   error: { type: 'string' },
+                  continued: { type: 'integer', description: '被 max-tokens / max-turns 截断后续跑了几次（未续跑不带该字段）' },
                   review: { type: 'object', additionalProperties: true },
                 },
               },
@@ -2436,7 +2552,8 @@ function bindAgent(ctx, config, group, agent) {
               ? `\n验收：未通过（${m.acceptance === 'rework-failed' ? '返工失败：' + (m.reworkError || '未返回产出') : m.acceptance === 'unverified' ? '审核未判定' : '审核拒绝'}）`
               : ''
             const noReview = m.acceptance === 'none' ? '\n验收：无审核位（本组没有审校/指挥），本轮未做验收' : ''
-            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}`
+            const cont = m.continued ? `\n续跑：${m.continued} 次（上一轮被截断，已在同一子会话里接着跑）` : ''
+            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}${cont}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
