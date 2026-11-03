@@ -119,13 +119,18 @@ try {
   console.log(((error && error.stack) || '').split('\n').slice(0, 6).join('\n'))
 }
 
-// 进度条三态（无真成员时）：有指挥占位阶段 → 显示阶段；等超过 90s → 「等待成员…（Ns）」；
-// 刚开工 → 「准备中…」。三种情况都必须有「停止」按钮（点了要能发 /runs/cancel）。
+// 进度条四态（无真成员时）：有指挥占位阶段 → 显示阶段；等超过 90s → 「等待成员…（Ns）」；
+// 刚开工 → 「准备中…」；无成员且超过 5 分钟 → 追加「（长任务，成员仅在结束时回报）」。
+// 四种情况都必须有「停止」按钮（点了要能发 /runs/cancel）。
 const NOW = Date.now()
 const PROGRESS_CASES = [
-  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中', '停止'], ['准备中…']],
-  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）', '停止'], ['准备中…']],
-  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…', '停止'], ['等待成员…']],
+  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中', '停止'], ['准备中…', '长任务']],
+  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）', '停止'], ['准备中…', '长任务']],
+  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…', '停止'], ['等待成员…', '长任务']],
+  ['long-task-400s', { startedAt: NOW - 400_000, members: {} }, ['等待成员…（400s）', '（长任务，成员仅在结束时回报）', '停止'], ['准备中…']],
+  // 看门狗：静默 > 3 分钟要在成员条目上显示「静默 Ns」（silentMs 由服务端 /progress 计算）
+  ['silent-4min', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 240_000, silentMs: 240_000 } } }, ['代码 · 执行中', '静默 240s', '停止'], ['准备中…']],
+  ['active-fresh', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 5_000, silentMs: 5_000 } } }, ['代码 · 执行中', '停止'], ['静默 ']],
 ]
 for (const [label, entry, need, forbid] of PROGRESS_CASES) {
   try {

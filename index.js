@@ -53,8 +53,30 @@ const ARCHIVED_KEEP_DAYS = 7
  */
 const REVIEW_TEXT_HARD_CAP = 200_000
 
-/** 成员单次运行的默认时间预算（分钟）：页面配置 → profile 配置 → 30 分钟。 */
+/**
+ * 成员的看门狗参数（2026-11-03 起取消「总时长超时」）。
+ *
+ * 旧实现给每个成员一个总预算（默认 30 分钟）到点就 SIGTERM——长任务只要超过预算
+ * 就会被杀，跟「是不是还在干活」无关。现在改成：
+ *  - **静默看门狗**：只要 stdout/stderr（或 deepseek seam 的子代理状态/消息）还有变化
+ *    就算活着；连续 `memberIdleMinutes`（默认 10 分钟）没有任何变化才终止；
+ *  - **极大兵底**：另留一个 `memberHardLimitMinutes`（默认 360 分钟 = 6 小时）的硬上限，
+ *    防止「一直有输出但永不结束」的进程把机器拖住；设 0 = 完全不限制。
+ *
+ * 旧的 `memberTimeoutMinutes` 仍然会被读取（兼容老配置），但**不再生效**。
+ */
+const DEFAULT_MEMBER_IDLE_MINUTES = 10
+const DEFAULT_MEMBER_HARD_LIMIT_MINUTES = 360
+/** 已废弃：旧的总超时默认值，只用于兼容读取，不参与任何终止判断。 */
 const DEFAULT_MEMBER_TIMEOUT_MINUTES = 30
+/** 看门狗巡检间隔：每 15 秒看一次「静默多久了」。 */
+const MEMBER_WATCHDOG_TICK_MS = 15_000
+/** 运行时巡检间隔（测试可调小；生产恒为 15 秒）。 */
+let WATCHDOG_TICK_MS = MEMBER_WATCHDOG_TICK_MS
+/** 看门狗判定静默后：先 SIGTERM，3 秒后再 SIGKILL。 */
+const MEMBER_KILL_GRACE_MS = 3_000
+/** 出图（HTTP，无流式输出）默认请求超时：240 秒实测够用。 */
+const DEFAULT_IMAGE_TIMEOUT_SECONDS = 240
 
 /**
  * deepseek 成员被 max-tokens / max-turns 截断时，最多续跑几次（同一个子会话里接着跑）。
@@ -261,19 +283,61 @@ function callCancelled(callId) {
   const entry = callId && activeCalls.get(callId)
   return Boolean(entry && entry.cancelled)
 }
-function signalFor(callId, timeoutMs) {
-  const parts = [AbortSignal.timeout(timeoutMs)]
+/**
+ * 取消信号：只接 `/runs/cancel`（activeCalls 里的 controller），**不设任何总时长**。
+ * 显式超时（审校 120s 等）由调用方自己传 `timeoutMs` 给 run()/seam，UI 才能区分
+ * 「用户停止」和「到点超时」。
+ */
+function signalFor(callId) {
   const entry = callId && activeCalls.get(callId)
-  if (entry && entry.controller) parts.push(entry.controller.signal)
-  return parts.length > 1 ? AbortSignal.any(parts) : parts[0]
+  return entry && entry.controller ? entry.controller.signal : undefined
 }
 
 /**
- * 成员单次运行预算（分钟）。
- * 新增的可配项：profile 配置 `config.memberTimeoutMinutes`（cordis.patch.yml 的 config 里写）；
- * 取值顺序与 apiSettings 一致：页面已保存的 `state.config.memberTimeoutMinutes`
- * → profile 的 `config.memberTimeoutMinutes` → 默认 30 分钟。
- * 非正数/非数字一律当「没配」，回落到默认值（避免 0 分钟立刻 SIGTERM）。
+ * 成员「静默」阈值（分钟）：页面配置 → profile 配置 → 默认 10。
+ * 只要有输出/活动就刷新计时，不再按总时长杀。
+ */
+function memberIdleMinutes(config) {
+  const own = (state && state.config) || {}
+  const raw = own.memberIdleMinutes ?? (config && config.memberIdleMinutes)
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MEMBER_IDLE_MINUTES
+}
+
+/** 成员静默阈值（毫秒）：run() / seam 看门狗统一用它。 */
+function memberIdleMs(config) {
+  return Math.round(memberIdleMinutes(config) * 60_000)
+}
+
+/**
+ * 成员硬上限（分钟）：默认 360（6 小时）的兜底，**0 = 完全不限制**。
+ * 非数字/负数一律回落默认值（别让一个拼错的配置变成「立刻杀」）。
+ */
+function memberHardLimitMinutes(config) {
+  const own = (state && state.config) || {}
+  const raw = own.memberHardLimitMinutes ?? (config && config.memberHardLimitMinutes)
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_MEMBER_HARD_LIMIT_MINUTES
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_MEMBER_HARD_LIMIT_MINUTES
+}
+
+/** 成员硬上限（毫秒）；0 表示不设硬上限。 */
+function memberHardLimitMs(config) {
+  const minutes = memberHardLimitMinutes(config)
+  return minutes > 0 ? Math.round(minutes * 60_000) : 0
+}
+
+/** 出图请求超时（秒）：页面配置 → profile 配置 → 240。 */
+function imageTimeoutSeconds(config) {
+  const own = (state && state.config) || {}
+  const raw = own.imageTimeoutSeconds ?? (config && config.imageTimeoutSeconds)
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_IMAGE_TIMEOUT_SECONDS
+}
+
+/**
+ * 已废弃（2026-11-03）：旧的成员总超时读取。**保留读取，但不再生效**。
+ * 只为了让老配置/老测试不炸，调用方不要再依赖它的返回值做终止判断。
  */
 function memberTimeoutMinutes(config) {
   const own = (state && state.config) || {}
@@ -282,9 +346,46 @@ function memberTimeoutMinutes(config) {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_MEMBER_TIMEOUT_MINUTES
 }
 
-/** 成员单次运行预算（毫秒）：run() / signalFor() / runDeepseekViaSeam 统一用它。 */
+/** 已废弃：旧的总超时毫秒值，仅兼容保留。 */
 function memberTimeoutMs(config) {
   return Math.round(memberTimeoutMinutes(config) * 60_000)
+}
+
+/**
+ * 未完成进度多久算「静默」：跟着静默阈值走，外加 5 分钟宽限。
+ * `max(10 分钟下限, memberIdleMinutes(config) * 60_000 + 5 分钟)` → 默认 15 分钟。
+ * 不再跟旧的 30 分钟总超时联动（总超时已经取消）。
+ */
+function progressStaleMs(config) {
+  const idleMs = memberIdleMs(config)
+  return Math.max(PROGRESS_STALE_MIN_MS, Math.round(idleMs) + PROGRESS_STALE_GRACE_MS)
+}
+
+/**
+ * `/config` 的公开视图（GET / POST 共用）。密钥只报「有没有」，不回报明文。
+ * 新增看门狗参数：memberIdleMinutes（默认 10）、memberHardLimitMinutes（默认 360，0=不限）。
+ * 旧的 memberTimeoutMinutes 不再返回（已废弃、不再生效）。
+ */
+function configView(config, source) {
+  const own = state.config || {}
+  const settings = apiSettings(config)
+  return {
+    hasCodexToken: Boolean(settings.codexToken),
+    hasClaudeKey: Boolean(settings.claudeKey),
+    hasImageKey: Boolean(settings.imageKey),
+    reuseChildren: Boolean((state.config || {}).reuseChildren),
+    strictDelegate: own.strictDelegate !== false,
+    claudeBase: own.claudeBase || '',
+    codexBase: own.codexBase || '',
+    proxyUrl: own.proxyUrl || '',
+    hasProxy: Boolean(own.proxyUrl),
+    claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
+    codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
+    memberIdleMinutes: memberIdleMinutes(config),
+    memberHardLimitMinutes: memberHardLimitMinutes(config),
+    imageTimeoutSeconds: imageTimeoutSeconds(config),
+    source,
+  }
 }
 
 /**
@@ -297,27 +398,164 @@ function reviewText(output) {
   return text.length > REVIEW_TEXT_HARD_CAP ? text.slice(0, REVIEW_TEXT_HARD_CAP) : text
 }
 
-/** Collect stdout+stderr of one child process; caller owns the timeout. */
-function run(bin, args, { cwd, env, input, timeoutMs = memberTimeoutMs(), signal } = {}) {
+/**
+ * 可注入时钟的静默看门狗。
+ *
+ * 判定规则（`tick()` 由调用方按 interval 驱动）：
+ *  - 静默（`now - lastActivity > idleTimeoutMs`）→ 返回 'idle-timeout' 并回调 onIdle；
+ *  - 总时长达到 `hardLimitMs`（>0 才生效）→ 返回 'hard-limit' 并回调 onHardLimit；
+ *  - 否则返回 null。
+ *
+ * `touch()` 在**任何活动**（stdout/stderr 数据、seam 子代理状态/消息变化）时调用。
+ * 测试可传假 `now` 直接拨时钟，不需要真等 40 分钟。
+ */
+function createIdleWatchdog({
+  idleTimeoutMs,
+  hardLimitMs = 0,
+  now = () => Date.now(),
+  startedAt = undefined,
+  onIdle,
+  onHardLimit,
+} = {}) {
+  const start = startedAt ?? now()
+  let lastActivity = start
+  let idleFired = false
+  let hardFired = false
+  return {
+    touch(at = now()) { lastActivity = at },
+    tick(at = now()) {
+      // 严格大于：正好 idle 分钟时还不算超（11 分钟 > idle=10 才杀）
+      if (!idleFired && idleTimeoutMs > 0 && at - lastActivity > idleTimeoutMs) {
+        idleFired = true
+        if (onIdle) onIdle()
+        return 'idle-timeout'
+      }
+      if (!hardFired && hardLimitMs > 0 && at - start > hardLimitMs) {
+        hardFired = true
+        if (onHardLimit) onHardLimit()
+        return 'hard-limit'
+      }
+      return null
+    },
+    silentMs(at = now()) { return Math.max(0, at - lastActivity) },
+    get startedAt() { return start },
+    get lastActivity() { return lastActivity },
+    get idledOut() { return idleFired },
+    get hardLimited() { return hardFired },
+  }
+}
+
+/** 毫秒 → 分钟文案：整数就写整数（10 / 2），小数保留两位（0.02）。 */
+function formatMinutes(ms) {
+  const minutes = Number(ms) / 60_000
+  return Number.isInteger(minutes) ? String(minutes) : String(Math.round(minutes * 100) / 100)
+}
+
+/** 看门狗终止原因 → 面向用户的中文错误（回执/日志共用）。 */
+function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes } = {}) {
+  if (reason === 'idle-timeout') return `成员静默超过 ${idleMinutes} 分钟，已终止（看门狗）`
+  if (reason === 'hard-limit') return `成员超过硬上限 ${hardLimitMinutes} 分钟，已终止（看门狗）`
+  if (reason === 'cancelled') return '已被用户停止'
+  if (reason === 'timeout') return '成员超过本次调用的显式超时，已终止'
+  return undefined
+}
+
+/**
+ * Collect stdout+stderr of one child process.
+ *
+ * **没有总时长超时**（2026-11-03 起）：只要还有 stdout/stderr 输出就算活着；
+ * 连续 `idleMs` 没有输出 → 先 SIGTERM、`killGraceMs` 后 SIGKILL，结果带
+ * `reason:'idle-timeout'` 与中文 error。`hardLimitMs` 默认 6 小时，0 = 不限制。
+ * 显式传 `timeoutMs`（审校等有界调用）时仍按总时长终止（reason:'timeout'）。
+ *
+ * `spawnImpl` / `clock` / `setIntervalFn` / `setTimeoutFn` 只供测试注入。
+ */
+function run(bin, args, options = {}) {
+  const {
+    cwd,
+    env,
+    input,
+    signal,
+    timeoutMs,
+    idleMs = memberIdleMs(),
+    hardLimitMs = memberHardLimitMs(),
+    killGraceMs = MEMBER_KILL_GRACE_MS,
+    tickMs = WATCHDOG_TICK_MS,
+    onActivity,
+    spawnImpl = spawn,
+    clock = () => Date.now(),
+    setIntervalFn = setInterval,
+    clearIntervalFn = clearInterval,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = options
   return new Promise((resolve) => {
-    const child = spawn(bin, args, {
+    const child = spawnImpl(bin, args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let out = ''
     let err = ''
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs)
-    const hardKill = () => { try { child.kill('SIGKILL') } catch { /* ignore */ } }
-    const onAbort = () => { try { child.kill('SIGTERM') } catch { /* ignore */ } setTimeout(hardKill, 3000) }
+    let settled = false
+    let endedBy = null
+    let checkTimer
+    let timeoutTimer
+    let graceTimer
+    let abortHandler
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      try { clearIntervalFn(checkTimer) } catch { /* ignore */ }
+      try { if (timeoutTimer !== undefined) clearTimeoutFn(timeoutTimer) } catch { /* ignore */ }
+      try { if (graceTimer !== undefined) clearTimeoutFn(graceTimer) } catch { /* ignore */ }
+      try { if (signal && abortHandler) signal.removeEventListener('abort', abortHandler) } catch { /* ignore */ }
+      resolve(value)
+    }
+    const hardKill = () => {
+      if (settled) return
+      try { child.kill('SIGKILL') } catch { /* ignore */ }
+    }
+    const terminate = (reason) => {
+      if (settled || endedBy) return
+      endedBy = reason
+      try { child.kill('SIGTERM') } catch { /* ignore */ }
+      graceTimer = setTimeoutFn(hardKill, killGraceMs)
+    }
+    const watchdog = createIdleWatchdog({
+      idleTimeoutMs: idleMs,
+      hardLimitMs,
+      now: clock,
+      onIdle: () => terminate('idle-timeout'),
+      onHardLimit: () => terminate('hard-limit'),
+    })
+    const noteActivity = () => {
+      watchdog.touch()
+      if (onActivity) { try { onActivity() } catch { /* ignore */ } }
+    }
+    checkTimer = setIntervalFn(() => watchdog.tick(), tickMs)
+    // 显式预算（审校 120s 等）仍然按总时长终止；成员调用不传 → 只有看门狗。
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timeoutTimer = setTimeoutFn(() => terminate('timeout'), timeoutMs)
+    }
+    const onAbort = () => terminate('cancelled')
+    abortHandler = onAbort
     if (signal) {
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
     }
-    child.stdout.on('data', (b) => { out += b })
-    child.stderr.on('data', (b) => { err += b })
-    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out, err: `${err}${e.message}` }) })
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }) })
+    child.stdout.on('data', (b) => { out += b; noteActivity() })
+    child.stderr.on('data', (b) => { err += b; noteActivity() })
+    child.on('error', (e) => {
+      finish({ code: -1, out, err: `${err}${e.message}`, reason: endedBy ?? undefined })
+    })
+    child.on('close', (code) => {
+      const error = watchdogErrorText(endedBy, {
+        idleMinutes: formatMinutes(idleMs),
+        hardLimitMinutes: formatMinutes(hardLimitMs),
+      })
+      finish({ code, out, err, ...endedBy ? { reason: endedBy } : {}, ...error ? { error } : {} })
+    })
     if (input !== undefined) { child.stdin.write(input); child.stdin.end() }
     else child.stdin.end()
   })
@@ -334,12 +572,12 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env, noTools, signal }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
-  const { code, out, err } = await run(CODEX_BIN, args, { cwd, env, signal })
+  const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity })
   const events = jsonLines(out)
   const started = events.find((e) => e.type === 'thread.started')
   const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
@@ -347,21 +585,21 @@ async function runCodex({ cwd, model, resume, prompt, env, noTools, signal }) {
   const text = messages.map((e) => e.item.text).join('\n').trim()
   const usage = done?.usage ?? {}
   return {
-    ok: code === 0 && text.length > 0,
+    ok: code === 0 && text.length > 0 && !reason,
     text,
-    error: text.length ? undefined : 'codex 没有返回任何消息（检查 base/key 或网络）',
+    error: killedError ?? (code === 0 ? (text.length ? undefined : 'codex 没有返回任何消息（检查 base/key 或网络）') : (err.trim().slice(-600) || `codex exited ${code}`)),
     convId: resume ?? started?.thread_id,
     usage: {
       input: usage.input_tokens ?? 0,
       output: usage.output_tokens ?? 0,
       costUsd: 0,
     },
-    error: code === 0 ? undefined : (err.trim().slice(-600) || `codex exited ${code}`),
+    ...reason ? { reason } : {},
   }
 }
 
 /** One Claude Code turn. Resumes the stored session when present. */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -371,7 +609,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal }) {
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   if (resume) args.push('--resume', resume)
-  const { code, out, err } = await run(claudeBin, args, { cwd, env, signal })
+  const { code, out, err, reason, error: killedError } = await run(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity })
   const events = jsonLines(out)
   const texts = []
   for (const event of events) {
@@ -385,7 +623,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal }) {
   const text = (result?.result ?? texts.join('\n')).trim()
   const usage = result?.usage ?? {}
   return {
-    ok: code === 0 && Boolean(result) && result.is_error !== true,
+    ok: code === 0 && Boolean(result) && result.is_error !== true && !reason,
     text,
     convId: resume ?? sessionId,
     usage: {
@@ -393,7 +631,8 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal }) {
       output: usage.output_tokens ?? 0,
       costUsd: result?.total_cost_usd ?? 0,
     },
-    error: code === 0 ? undefined : (err.trim().slice(-600) || `claude exited ${code}`),
+    error: killedError ?? (code === 0 ? undefined : (err.trim().slice(-600) || `claude exited ${code}`)),
+    ...reason ? { reason } : {},
   }
 }
 
@@ -402,12 +641,15 @@ async function runImage(member, prompt, config) {
   const token = apiSettings(config).imageKey
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.5-flare'
+  // 出图是普通 HTTP 请求、没有流式输出，没法用「静默看门狗」；
+  // 保留一个宽松的请求超时（默认 240s，config.imageTimeoutSeconds 可改）。
+  const imageTimeoutMs = imageTimeoutSeconds(config) * 1000
   try {
     const response = await fetch(rootUrl(apiSettings(config).codexBase || defaultBase('openai', apiSettings(config).imageKey)) + '/v1/images/generations', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' }),
-      signal: AbortSignal.timeout(240_000),
+      signal: AbortSignal.timeout(imageTimeoutMs),
     })
     const data = await response.json()
     const b64 = data?.data?.[0]?.b64_json
@@ -449,70 +691,112 @@ async function agentComposition(ctx) {
 /** One turn on a real DSH agent session (DeepSeek family). */
 /** Run one DeepSeek member through the subagent seam (concurrency + cancellation owned by it). */
 
+/**
+ * 子代理活动指纹：状态 + 已提交事件数。
+ * 只要这几项有变化就说明「链上还在动」，看门狗据此刷新 lastActivity。
+ */
+function agentActivityStamp(agent) {
+  if (!agent) return ''
+  const status = String(agent.status || '')
+  let count = 0
+  try {
+    count = agent.session ? sessionEvents(agent.session).length : 0
+  } catch { /* ignore */ }
+  return status + ':' + count
+}
+
 /** Continue an already-created child agent instead of spawning a new one. */
-async function continueChild(ctx, parent, member, prompt, timeoutMs, callId) {
+async function continueChild(ctx, parent, member, prompt, timeoutMs, callId, config, onActivity) {
   const subagents = ctx.get('subagents')
   const agents = ctx.get('agents')
   if (!subagents || !agents || typeof subagents.sendMessage !== 'function') return null
   try {
-    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal: callId ? signalFor(callId, timeoutMs) : AbortSignal.timeout(timeoutMs) })
+    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal: signalFor(callId) })
   } catch (error) {
     console.error('[council] reuse sendMessage failed:', String((error && error.stack) || error))
     return null
   }
-  const deadline = Date.now() + timeoutMs
+  // 显式预算（有界调用）仍按 deadline；成员调用（timeoutMs 未给）改用静默看门狗。
+  const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Date.now() + timeoutMs : 0
+  const idleMs = memberIdleMs(config)
+  const watch = createIdleWatchdog({ idleTimeoutMs: idleMs })
   await new Promise((resolve) => setTimeout(resolve, 800))
-  while (Date.now() < deadline) {
+  let lastStamp = ''
+  while (true) {
+    const now = Date.now()
+    if (deadline && now >= deadline) return null
     const agent = agents.get(member.convId)
+    const stamp = agentActivityStamp(agent)
+    if (stamp !== lastStamp) {
+      lastStamp = stamp
+      watch.touch(now)
+      if (onActivity) { try { onActivity() } catch { /* ignore */ } }
+    }
     if (agent && agent.status === 'idle') {
-      // a continued child can answer across several steps: keep every assistant
-      // message of THIS turn, otherwise a long delivery gets cut to its last chunk
-      let text = ''
-      let truncated = false
-      let stopReason
-      let marker = -1
-      try {
-        const events = sessionEvents(agent.session)
-        // walk back to the message we sent, then forward to the end
-        for (let i = events.length - 1; i >= 0; i -= 1) {
-          const ev = events[i]
-          if (ev.type === 'user/message') { marker = i; break }
-        }
-        const sliceStart = marker >= 0 ? marker + 1 : 0
-        const parts = []
-        for (let i = sliceStart; i < events.length; i += 1) {
-          const ev = events[i]
-          if (ev.type === 'turn/end') {
-            const reason = ev.data && ev.data.reason
-            const kind = String((reason && reason.kind) || '')
-            if (TRUNCATED_STOP_REASONS.has(kind)) { truncated = true; stopReason = kind }
-          }
-          if (ev.type !== 'assistant/message') continue
-          const chunk = (ev.data.message.content || [])
-            .filter((b) => b && b.type === 'text')
-            .map((b) => b.text).join('\n').trim()
-          if (chunk) parts.push(chunk)
-        }
-        text = parts.join('\n\n').trim()
-      } catch { /* ignore */ }
+      // 子代理已经交回结果：这不是「静默」，优先按完成处理。
+      return readContinuedText(agent, member)
+    }
+    if (watch.tick(now) === 'idle-timeout') {
       return {
-        ok: Boolean(text),
-        text,
+        ok: false,
+        text: '',
         convId: member.convId,
-        error: text ? undefined : '复用子 agent 没有产出文本',
-        truncated,
-        ...truncated ? { stopReason: stopReason || 'max-tokens' } : {},
+        error: watchdogErrorText('idle-timeout', { idleMinutes: formatMinutes(idleMs) }),
+        reason: 'idle-timeout',
         usage: null,
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 1000))
   }
-  return null
 }
 
-async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, presetId, callId, childSink) {
-  // 成员单次预算：调用方没显式给（undefined）时走 config.memberTimeoutMinutes（默认 30 分钟）
-  const budgetMs = timeoutMs ?? memberTimeoutMs(config)
+/** 取「续跑这一轮」的全部 assistant 文本（跨多个 step 也不能只剩最后一段）。 */
+function readContinuedText(agent, member) {
+  // a continued child can answer across several steps: keep every assistant
+  // message of THIS turn, otherwise a long delivery gets cut to its last chunk
+  let text = ''
+  let truncated = false
+  let stopReason
+  let marker = -1
+  try {
+    const events = sessionEvents(agent.session)
+    // walk back to the message we sent, then forward to the end
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]
+      if (ev.type === 'user/message') { marker = i; break }
+    }
+    const sliceStart = marker >= 0 ? marker + 1 : 0
+    const parts = []
+    for (let i = sliceStart; i < events.length; i += 1) {
+      const ev = events[i]
+      if (ev.type === 'turn/end') {
+        const reason = ev.data && ev.data.reason
+        const kind = String((reason && reason.kind) || '')
+        if (TRUNCATED_STOP_REASONS.has(kind)) { truncated = true; stopReason = kind }
+      }
+      if (ev.type !== 'assistant/message') continue
+      const chunk = (ev.data.message.content || [])
+        .filter((b) => b && b.type === 'text')
+        .map((b) => b.text).join('\n').trim()
+      if (chunk) parts.push(chunk)
+    }
+    text = parts.join('\n\n').trim()
+  } catch { /* ignore */ }
+  return {
+    ok: Boolean(text),
+    text,
+    convId: member.convId,
+    error: text ? undefined : '复用子 agent 没有产出文本',
+    truncated,
+    ...truncated ? { stopReason: stopReason || 'max-tokens' } : {},
+    usage: null,
+  }
+}
+
+async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, presetId, callId, childSink, onActivity) {
+  // 显式预算（有界调用）照旧；成员调用不再有总时长，靠下面的静默看门狗。
+  const budgetMs = timeoutMs
+  const idleMs = memberIdleMs(config)
   const subagents = ctx.get('subagents')
   if (!subagents || !parent) {
     return { ok: false, text: '', error: 'DSH subagent seam unavailable (no parent agent)', usage: null }
@@ -527,7 +811,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   }
   // `__continue`：截断续跑时即使没开 reuseAgents，也要接着同一个子会话跑（保住上下文）
   if ((reuseEnabled || member.__continue) && member.convId) {
-    const reused = await continueChild(ctx, parent, member, prompt, budgetMs, callId)
+    const reused = await continueChild(ctx, parent, member, prompt, budgetMs, callId, config, onActivity)
     // truncated 原样带出（ok 仍按是否有文本算），由 runDeepseekWithContinuation 决定续跑
     if (reused) return reused
     // 续跑请求拿不到原子会话就停：不要拿「继续未完成的部分」去开一个全新的子会话（上下文已丢）
@@ -535,6 +819,58 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       return { ok: false, text: '', error: '续跑失败：原子会话不可用（未产出新内容）', usage: null }
     }
   }
+  // 深寻 seam 的看门狗：把「子代理状态 / 已提交消息数变化」当活动信号；
+  // 只按静默判死（不再有总时长 kill）。取消仍走 activeCalls 的 controller。
+  let childId = null
+  let idleFired = false
+  let timedOut = false
+  let lastSeamStamp = ''
+  const controller = new AbortController()
+  const cancelSignal = signalFor(callId)
+  const activationSignal = cancelSignal ? AbortSignal.any([controller.signal, cancelSignal]) : controller.signal
+  // 显式预算（审校等有界调用）才设总计时；成员调用没有总时长，只有静默看门狗。
+  const budgetTimer = Number.isFinite(budgetMs) && budgetMs > 0
+    ? setTimeout(() => { timedOut = true; try { controller.abort() } catch { /* ignore */ } }, budgetMs)
+    : undefined
+  const seamAgents = ctx.get('agents')
+  // 只有能观察到子代理（agents.get）时才做静默判定；观察不到就退化成只等结果，
+  // 宁可少杀一次，也不要把正在干活的长任务误杀。
+  const canObserve = Boolean(seamAgents && typeof seamAgents.get === 'function')
+  const watchdog = createIdleWatchdog({ idleTimeoutMs: idleMs })
+  const watchTimer = setInterval(() => {
+    if (!canObserve) return
+    const now = Date.now()
+    let agent
+    try {
+      agent = childId ? seamAgents.get(childId) : undefined
+    } catch { /* ignore */ }
+    const stamp = agentActivityStamp(agent)
+    if (stamp !== lastSeamStamp) {
+      lastSeamStamp = stamp
+      watchdog.touch(now)
+      if (onActivity) { try { onActivity() } catch { /* ignore */ } }
+    }
+    if (watchdog.tick(now) === 'idle-timeout') {
+      idleFired = true
+      try { controller.abort() } catch { /* ignore */ }
+    }
+  }, WATCHDOG_TICK_MS)
+  const idleResult = () => ({
+    ok: false,
+    text: '',
+    convId: childId ?? member.convId,
+    error: watchdogErrorText('idle-timeout', { idleMinutes: formatMinutes(idleMs) }),
+    reason: 'idle-timeout',
+    usage: null,
+  })
+  const timeoutResult = () => ({
+    ok: false,
+    text: '',
+    convId: childId ?? member.convId,
+    error: watchdogErrorText('timeout'),
+    reason: 'timeout',
+    usage: null,
+  })
   try {
     const activation = await subagents.startActivation({
       provider: 'spawn',
@@ -551,15 +887,18 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
         },
       },
-      signal: callId ? signalFor(callId, budgetMs) : AbortSignal.timeout(budgetMs),
+      signal: activationSignal,
       delivery: 'caller',
     })
+    childId = activation.childId ?? null
     // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录
     if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
     // 被 max-tokens / max-turns 截断时不能 dispose：续跑要接着这个子会话。
     let keepChild = reuseEnabled
     try {
       const result = await activation.result
+      if (idleFired) { keepChild = false; return idleResult() }
+      if (timedOut) { keepChild = false; return timeoutResult() }
       const text = (result.output || [])
         .filter((block) => block && block.type === 'text')
         .map((block) => block.text)
@@ -576,6 +915,10 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         ...truncated ? { truncated: true, stopReason } : {},
         usage: null,
       }
+    } catch (error) {
+      if (idleFired) { keepChild = false; return idleResult() }
+      if (timedOut) { keepChild = false; return timeoutResult() }
+      throw error
     } finally {
       // keep the child resident when reuse is enabled (or when it must be continued)
       if (!keepChild) {
@@ -583,7 +926,12 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       }
     }
   } catch (error) {
+    if (idleFired) return idleResult()
+    if (timedOut) return timeoutResult()
     return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), usage: null }
+  } finally {
+    clearInterval(watchTimer)
+    if (budgetTimer !== undefined) clearTimeout(budgetTimer)
   }
 }
 
@@ -599,8 +947,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
  * 续跑本身失败（子会话没了 / 超时）时保留已有产出并停下。
  * seam 参数只为测试注入（默认就是真实的 runDeepseekViaSeam）。
  */
-async function runDeepseekWithContinuation(ctx, member, prompt, config, parent, timeoutMs, callId, childSink, seam = runDeepseekViaSeam) {
-  const first = await seam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId, childSink)
+async function runDeepseekWithContinuation(ctx, member, prompt, config, parent, timeoutMs, callId, childSink, seam = runDeepseekViaSeam, onActivity) {
+  const first = await seam(ctx, member, prompt, config, parent, timeoutMs, member.__preset, callId, childSink, onActivity)
   if (!first) return first
   // 只有拿到子会话 id 才能续跑；先写回成员，后续 seam 调用靠它走 continueChild
   if (first.convId) member.convId = first.convId
@@ -619,7 +967,7 @@ async function runDeepseekWithContinuation(ctx, member, prompt, config, parent, 
       `[续跑 ${continued}/${MEMBER_CONTINUE_LIMIT}] 上一轮没有跑完（原因：${reason}）。`,
       '请继续未完成的部分：不要重复已完成的工作，直接接着做剩下的，最后给出完整结论。',
     ].join('\n')
-    const next = await seam(ctx, Object.assign({}, member, { __continue: true }), nextPrompt, config, parent, timeoutMs, member.__preset, callId, childSink)
+    const next = await seam(ctx, Object.assign({}, member, { __continue: true }), nextPrompt, config, parent, timeoutMs, member.__preset, callId, childSink, onActivity)
     if (!next) break
     result = next
     if (result.convId) member.convId = result.convId
@@ -938,15 +1286,18 @@ function verdictOf(text) {
 let runKindOverride = null
 
 /** 测试可替换的成员执行器入口；生产环境恒走 runKindImpl。 */
-function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink) {
-  return (runKindOverride || runKindImpl)(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink)
+function runKind(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink, onActivity) {
+  return (runKindOverride || runKindImpl)(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink, onActivity)
 }
 
-async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink) {
+async function runKindImpl(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, childSink, onActivity) {
   await applyProxy(config)
   const cwd = member.cwd || config.defaultWorkspace || process.cwd()
-  // 单次运行预算：显式传了（审核等有界调用）就用传的，否则走 memberTimeoutMinutes
-  const budgetMs = timeoutMs ?? memberTimeoutMs(config)
+  // 成员调用不再有总时长预算（timeoutMs 只在审校等有界调用里显式给）；
+  // 终止交给 run() / seam 的静默看门狗。
+  const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined
+  const idleMs = memberIdleMs(config)
+  const hardLimitMs = memberHardLimitMs(config)
   let result
   if (member.kind === 'image') {
     const style = String(styleOverride || (group && group.style) || '')
@@ -954,7 +1305,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
     result = await runImage(member, imagePrompt, config)
   } else if (member.kind === 'deepseek') {
     // max-tokens / max-turns 截断时在同一个子会话里续跑（最多 MEMBER_CONTINUE_LIMIT 次）
-    result = await runDeepseekWithContinuation(ctx, member, prompt, config, parent, budgetMs, callId, childSink)
+    result = await runDeepseekWithContinuation(ctx, member, prompt, config, parent, budgetMs, callId, childSink, undefined, onActivity)
   } else {
     if (member.kind === 'claude') {
       const cfgCheck = apiSettings(config)
@@ -970,7 +1321,11 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       prompt,
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
-      signal: callId ? signalFor(callId, budgetMs) : undefined,
+      signal: signalFor(callId),
+      timeoutMs: budgetMs,
+      idleMs,
+      hardLimitMs,
+      onActivity,
     })
   }
   if (result.convId) member.convId = result.convId
@@ -1138,16 +1493,19 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   const standardBlock = group.standard ? '\n\n[验收标准]\n' + group.standard : ''
   const prompt = memberPrompt(member, task) + standardBlock + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
   if (onStage) onStage('执行中（' + member.kind + '）')
-  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId, childSink)
+  // 任何输出/子代理消息变化都刷新进度条的 lastActivity（前端据此显示「静默 Ns」）
+  const onActivity = callId ? () => progressTouch(callId, member.id) : undefined
+  let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId, childSink, onActivity)
   // watchdog retry: a timeout / dead agent gets one more attempt on the same member
   const maxAttempts = 2
   let attempt = 1
-  while (!result.ok && attempt < maxAttempts) {
+  // 静默超时（看门狗）不重试：再发一次大概率还是静默，先把「静默超时终止」如实回报。
+  while (!result.ok && attempt < maxAttempts && result.reason !== 'idle-timeout' && result.reason !== 'cancelled') {
     attempt += 1
     const why = String(result.error || '无输出')
     if (onStage) onStage('重试中（第 ' + attempt + ' 次，上次：' + why.slice(0, 40) + '）')
     const retryPrompt = prompt + '\n\n[上次失败] ' + why + '\n请重新完成任务，直接给出结果。'
-    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent, undefined, callId, childSink)
+    result = await runKind(ctx, member, retryPrompt, config, group, styleOverride, parent, undefined, callId, childSink, onActivity)
     await save().catch(() => {})
   }
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
@@ -1245,6 +1603,9 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     ...result.image === undefined ? {} : { image: result.image },
     // 被截断后续跑过几次（0/无 → 不带该字段，回执保持原样）
     ...result.continued === undefined ? {} : { continued: result.continued },
+    // 看门狗终止原因（idle-timeout / hard-limit / cancelled）：回执据此写「静默超时终止」
+    ...result.reason === undefined ? {} : { reason: result.reason },
+    ...result.reason === 'idle-timeout' ? { idleTimeout: true } : {},
     review,
     ...review.attempts > 1 ? { attempts: review.attempts } : {},
   }
@@ -1752,10 +2113,26 @@ export function createHandler(ctx, config = {}) {
             }
           }
           if (req.method === 'GET' && route === '/progress') {
-            // 读取时自愈：陈旧的未完成项在这里收尾，不指望派活自己回来写 finishedAt
-            healProgress()
+            // 读取时自愈：陈旧的未完成项在这里收尾，不指望派活自己回来写 finishedAt。
+            // 阈值跟着静默阈值走（见 progressStaleMs），activeCalls 里的条目不会被误收。
+            const now = Date.now()
+            healProgress(now, config)
             const out = {}
-            for (const [id, entry] of progressMap) out[id] = entry
+            for (const [id, entry] of progressMap) {
+              // 既有字段名一律保留；只追加只读派生字段：
+              //  - runningMs：跑了多久
+              //  - silentMs（每个成员条目）：距最后一次活动过了多久，前端 >3 分钟显示「静默 Ns」
+              const members = {}
+              for (const [memberId, slot] of Object.entries(entry.members || {})) {
+                // 最后活动时间：成员条目 → 整条 entry → 开工时间（老条目没有 lastActivity）
+                const last = (slot && (slot.lastActivity ?? slot.at)) ?? entry.lastActivity ?? entry.startedAt ?? 0
+                members[memberId] = Object.assign({}, slot, { silentMs: Math.max(0, now - last) })
+              }
+              out[id] = Object.assign({}, entry, {
+                members,
+                runningMs: Math.max(0, now - (entry.startedAt || 0)),
+              })
+            }
             return send(res, 200, { progress: out })
           }
           if (req.method === 'GET' && route === '/agents') {
@@ -1775,25 +2152,8 @@ export function createHandler(ctx, config = {}) {
           if (route === '/config') {
             if (req.method === 'GET') {
               const own = state.config || {}
-              const settings = apiSettings(config)
-              return send(res, 200, {
-                config: {
-                  hasCodexToken: Boolean(settings.codexToken),
-                  hasClaudeKey: Boolean(settings.claudeKey),
-                  hasImageKey: Boolean(settings.imageKey),
-                  reuseChildren: Boolean((state.config || {}).reuseChildren),
-                  strictDelegate: own.strictDelegate !== false,
-                  claudeBase: own.claudeBase || '',
-                  codexBase: own.codexBase || '',
-                  proxyUrl: own.proxyUrl || '',
-                  hasProxy: Boolean(own.proxyUrl),
-                  claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
-                  codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
-                  proxyUrl: own.proxyUrl || '',
-                  hasProxy: Boolean(own.proxyUrl),
-                  source: own.claudeKey || own.imageKey || own.codexToken ? 'page' : 'profile',
-                },
-              })
+              const source = own.claudeKey || own.imageKey || own.codexToken ? 'page' : 'profile'
+              return send(res, 200, { config: configView(config, source) })
             }
             if (req.method === 'POST') {
               const body = await readBody(req)
@@ -1806,30 +2166,21 @@ export function createHandler(ctx, config = {}) {
               }
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
               if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
+              // 看门狗参数可写：memberIdleMinutes > 0；memberHardLimitMinutes >= 0（0 = 不限制）
+              if (body.memberIdleMinutes !== undefined && Number.isFinite(Number(body.memberIdleMinutes)) && Number(body.memberIdleMinutes) > 0) {
+                next.memberIdleMinutes = Number(body.memberIdleMinutes)
+              }
+              if (body.memberHardLimitMinutes !== undefined && Number.isFinite(Number(body.memberHardLimitMinutes)) && Number(body.memberHardLimitMinutes) >= 0) {
+                next.memberHardLimitMinutes = Number(body.memberHardLimitMinutes)
+              }
+              if (body.imageTimeoutSeconds !== undefined && Number.isFinite(Number(body.imageTimeoutSeconds)) && Number(body.imageTimeoutSeconds) > 0) {
+                next.imageTimeoutSeconds = Number(body.imageTimeoutSeconds)
+              }
               state.config = Object.keys(next).length ? next : undefined
               usageCache = null
               catalog = null
               await save()
-              const settings = apiSettings(config)
-              const own = state.config || {}
-              return send(res, 200, {
-                config: {
-                  hasCodexToken: Boolean(settings.codexToken),
-                  hasClaudeKey: Boolean(settings.claudeKey),
-                  hasImageKey: Boolean(settings.imageKey),
-                  reuseChildren: Boolean((state.config || {}).reuseChildren),
-                  strictDelegate: own.strictDelegate !== false,
-                  claudeBase: own.claudeBase || '',
-                  codexBase: own.codexBase || '',
-                  proxyUrl: own.proxyUrl || '',
-                  hasProxy: Boolean(own.proxyUrl),
-                  claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
-                  codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
-                  proxyUrl: own.proxyUrl || '',
-                  hasProxy: Boolean(own.proxyUrl),
-                  source: 'page',
-                },
-              })
+              return send(res, 200, { config: configView(config, 'page') })
             }
           }
           if (req.method === 'GET' && route === '/usage') {
@@ -1877,6 +2228,9 @@ async function executeRun(ctx, config, run) {
     slot.acceptance = result.acceptance
     slot.text = result.text ?? ''
     slot.error = result.error ?? result.reworkError
+    // 看门狗终止要能跟普通失败区分开（前端/回执都靠这个字段）
+    if (result.reason) slot.reason = result.reason
+    if (result.reason === 'idle-timeout') slot.silentTimeout = true
     if (result.image) slot.image = result.image
     if (result.review) slot.review = result.review
     if (result.attempts) slot.attempts = result.attempts
@@ -1892,8 +2246,12 @@ const boundAgents = new Map()
 /** Live delegation progress keyed by tool call id, so the card can show stages. */
 const progressMap = new Map()
 
-/** 未完成且启动超过 10 分钟 → 当陈旧项自动收尾（派活卡在选成员/拆解/子代理启动时不会永远「准备中」）。 */
-const PROGRESS_STALE_MS = 10 * 60_000
+/** 陈旧阈值下限：任何配置下都不会比 10 分钟更早把未完成项收尾。 */
+const PROGRESS_STALE_MIN_MS = 10 * 60_000
+/** 成员超时之上再宽限 5 分钟：成员可能正在收尾/续跑，别把活的当死的。 */
+const PROGRESS_STALE_GRACE_MS = 5 * 60_000
+/** 旧名保留（= 10 分钟下限），测试/外部引用仍可继续用。 */
+const PROGRESS_STALE_MS = PROGRESS_STALE_MIN_MS
 /** 陈旧项标完后最多再留 5 分钟，够前端看到一次就删。 */
 const PROGRESS_STALE_KEEP_MS = 5 * 60_000
 /** 已完成项最多留 24 小时。 */
@@ -1914,6 +2272,21 @@ function progressSet(callId, memberId, patch) {
   entry.members[memberId] = Object.assign({ at: Date.now() }, entry.members[memberId] || {}, patch)
 }
 
+/**
+ * 记录「这个成员还在动」：刷新它的 lastActivity（以及整条 entry 的 lastActivity）。
+ * 由 run() 的 stdout/stderr 数据回调、seam 的子代理状态/消息变化回调触发。
+ * 只有 entry 已存在时才写——不凭空造进度条。
+ */
+function progressTouch(callId, memberId) {
+  if (!callId) return
+  const entry = progressMap.get(callId)
+  if (!entry) return
+  const now = Date.now()
+  entry.lastActivity = now
+  const slot = entry.members && entry.members[memberId]
+  if (slot) slot.lastActivity = now
+}
+
 /** 写「指挥」占位阶段：成员还没拆出来时进度条也有东西可显示。 */
 function progressStage(callId, stage, name = '指挥') {
   progressSet(callId, PROGRESS_STAGE_ID, { name, stage, stageOnly: true })
@@ -1929,15 +2302,21 @@ function finishProgressEntry(entry, now, patch) {
 
 /**
  * `/progress` 读取时自愈，返回本次新标成陈旧的条数：
- *  - 未完成且 startedAt 超过 10 分钟 → 写 finishedAt + stale:true（staleAt 记标记时间）
+ *  - 仍在本进程 activeCalls 里的 callId 一律不动（正在跑就是活着，哪怕跑了 40 分钟）
+ *  - 未完成且「静默」超过 progressStaleMs(config) → 写 finishedAt + stale:true（staleAt 记标记时间）
+ *    （静默 = now - lastActivity；lastActivity 由 progressTouch 在每次输出/子代理活动时刷新，
+ *      没有 lastActivity 的老条目回落到 startedAt）
  *  - 已标 stale 的 entry 超过 5 分钟 → 从 Map 删除（前端最多看到一次）
  *  - 已完成的 entry 超过 24 小时 → 删除
  */
-function healProgress(now = Date.now()) {
+function healProgress(now = Date.now(), config) {
   let markedStale = 0
+  const staleAfterMs = progressStaleMs(config)
   for (const [id, entry] of progressMap) {
     if (!entry) { progressMap.delete(id); continue }
-    if (!entry.finishedAt && now - (entry.startedAt || 0) > PROGRESS_STALE_MS) {
+    // 正在执行：既不标 stale，也不删（activeCalls 由 finally 收尾）
+    if (activeCalls.has(id)) continue
+    if (!entry.finishedAt && now - (entry.lastActivity || entry.startedAt || 0) > staleAfterMs) {
       entry.finishedAt = now
       entry.stale = true
       entry.staleAt = now
@@ -2668,7 +3047,9 @@ function bindAgent(ctx, config, group, agent) {
               : '## 指挥拆分（commander）\n未能拆解：' + (value.plan.reason || value.plan.raw || '未知原因'))
             : ''
           const rows = (value.members || []).map((m) => {
-            const body = m.ok ? (m.text || '') : '失败：' + (m.error || '')
+            // 被看门狗静默终止 ≠ 普通失败：写明原因，别让回执看起来像代码/网络错误
+            const idleTimeout = m.reason === 'idle-timeout'
+            const body = m.ok ? (m.text || '') : ((idleTimeout ? '静默超时终止：' : '失败：') + (m.error || ''))
             const image = m.image ? `\n[image] ${m.image}` : ''
             const review = m.review
               ? `\n${m.review.prelim ? '审校：' : '自审：'}${verdict(m.review.self)} · 指挥审核：${verdict(m.review.commander)}`
@@ -2678,7 +3059,8 @@ function bindAgent(ctx, config, group, agent) {
               : ''
             const noReview = m.acceptance === 'none' ? '\n验收：无审核位（本组没有审校/指挥），本轮未做验收' : ''
             const cont = m.continued ? `\n续跑：${m.continued} 次（上一轮被截断，已在同一子会话里接着跑）` : ''
-            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}${cont}`
+            const watchdog = idleTimeout ? '\n状态：静默超时终止（看门狗判定成员长时间没有任何输出，不是普通失败）' : ''
+            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}${cont}${watchdog}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
@@ -2801,7 +3183,9 @@ function bindAgent(ctx, config, group, agent) {
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
-              const body = work.ok ? (work.text || '') : '失败：' + (work.error || '')
+              const body = work.ok
+                ? (work.text || '')
+                : ((work.reason === 'idle-timeout' ? '静默超时终止：' : '失败：') + (work.error || ''))
               append('## ' + member.name + '（' + member.kind + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
             }, callId, childSessions)
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
@@ -2837,6 +3221,8 @@ function bindAgent(ctx, config, group, agent) {
             ...result.accepted === undefined ? {} : { accepted: result.accepted },
             ...result.acceptance === undefined ? {} : { acceptance: result.acceptance },
             ...result.reworkError === undefined ? {} : { reworkError: String(result.reworkError) },
+            ...result.reason === undefined ? {} : { reason: result.reason },
+            ...result.reason === 'idle-timeout' ? { idleTimeout: true } : {},
           }
         }))
         for (const item of assignments) {

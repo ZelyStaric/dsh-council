@@ -157,6 +157,16 @@ window.__ModuleLoader__.load({
       composer: { display: 'flex', gap: 8, alignItems: 'flex-end', padding: '8px 10px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
     }
 
+    /**
+     * 进度条成员条目的「静默」提示：服务端 /progress 每个成员条目带 `silentMs`
+     * （now - 最后一次活动）。超过 3 分钟才显示，免得正常思考的几秒也在闪。
+     */
+    function silenceSuffix(member) {
+      const silentMs = Number(member && member.silentMs)
+      if (!Number.isFinite(silentMs) || silentMs <= 180_000) return ''
+      return ' · 静默 ' + Math.round(silentMs / 1000) + 's'
+    }
+
     function Button(props) {
       const style = props.primary ? styles.primary : styles.button
       const dimmed = props.disabled ? Object.assign({}, style, { opacity: 0.55, cursor: 'default' }) : style
@@ -1023,7 +1033,7 @@ window.__ModuleLoader__.load({
             ? members.map((m, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 } },
               h(Avatar, { kind: m.kind, name: m.name }),
               h('span', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
-                + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))))
+                + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '') + silenceSuffix(m))))
             : h('div', { style: styles.muted }, stageEntry
               ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中')
               : (planned.length ? planned.join('、') + '（等待开始）' : '准备中')))
@@ -1313,9 +1323,10 @@ window.__ModuleLoader__.load({
           call('/progress').then((data) => {
             if (!alive) return
             const all = (data && data.progress) || {}
-            const now = Date.now()
+            // 不在客户端再按总时长硬截：服务端 /progress 已按「静默 idle + 5 分钟」自愈，
+            // 且 activeCalls 里的 callId 永不标 stale。这里再截一刀只会让长任务凭空消失。
             const list = Object.keys(all).map((id) => all[id])
-              .filter((e) => !e.finishedAt && now - (e.startedAt || 0) < 30 * 60_000)
+              .filter((e) => !e.finishedAt && !e.stale)
               .filter((e) => !sessionId || e.sessionId === sessionId)
             setEntry(list.length ? list[list.length - 1] : null)
             setNow(Date.now())
@@ -1365,9 +1376,13 @@ window.__ModuleLoader__.load({
       // 说明卡在选成员或子代理启动，别再只说「准备中」。
       const waited = total === null ? 0 : total
       const waiting = total !== null && waited > 90
-      const idleText = stageEntry
+      // 无成员且已经跑了 5 分钟以上：外部腿（codex/claude）只在结束时回报，
+      // 成员槽还没出现不等于卡住，补一句说明，别让人以为进度条没了。
+      const longTask = members.length === 0 && total !== null && total > 300
+      const idleText = (stageEntry
         ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中') + (waiting ? '（等待成员…）' : '')
-        : (waiting ? '等待成员…（' + waited + 's）' : '准备中…')
+        : (waiting ? '等待成员…（' + waited + 's）' : '准备中…'))
+        + (longTask ? '（长任务，成员仅在结束时回报）' : '')
       return h('div', {
         style: {
           display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 8px 6px',
@@ -1379,7 +1394,7 @@ window.__ModuleLoader__.load({
       h('span', { style: styles.muted }, total === null ? '' : total + 's'),
       members.length
         ? members.map((m, i) => h('span', { key: i, style: styles.chip },
-          (m.name || '成员') + ' · ' + (m.stage || '…') + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')))
+          (m.name || '成员') + ' · ' + (m.stage || '…') + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '') + silenceSuffix(m)))
         : h('span', { style: styles.muted }, idleText),
       h('span', { style: { flex: 1 } }),
       h('span', {

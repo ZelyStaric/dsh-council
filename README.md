@@ -52,9 +52,14 @@ plugin_manager install_bundle --target @zelystaric/dsh-council
         claudeBaseUrl: https://your-relay      # claude 成员用
         defaultWorkspace: /your/workspace      # 成员的工作目录
         strictDelegate: true                   # 小组模式硬拦截父会话自己写文件（默认 true）
+        memberIdleMinutes: 10                  # 成员连续多久没有任何输出才算死（看门狗，默认 10 分钟）
+        memberHardLimitMinutes: 360            # 极大兵底（默认 6 小时；0 = 完全不限制总时长）
+        imageTimeoutSeconds: 240               # 出图 HTTP 请求超时（无流式输出，默认 240s）
 ```
 
 > 页面里的 base 留空 = 用 profile 里的；页面填了会覆盖它。
+> 成员**没有总时长超时**：只要还在输出就一直跑，静默超过 `memberIdleMinutes` 才终止；
+> 旧的 `memberTimeoutMinutes` 仍可读但已废弃、不再生效。
 
 ### 硬拦截：小组模式下父会话不许自己动手
 
