@@ -42,7 +42,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -1319,6 +1319,116 @@ try {
     } finally {
       mod.__setRunKind(undefined)
     }
+  })
+
+  /* ── 成员输出不设上限：审核拿全文 / 超时可配 / 截断续跑 ───────────────── */
+
+  await check('审核 prompt 传完整产出（不再截到 4000 字，全文含结尾标记）', async () => {
+    const reviewState = structuredClone(fixture)
+    reviewState.roles.push({ id: 'r_cmd', name: '指挥', prompt: '验收', kind: 'deepseek', model: 'deepseek-flash' })
+    reviewState.members.push({ id: 'm_cmd', name: '司令', kind: 'deepseek', model: 'deepseek-flash', roleId: 'r_cmd' })
+    reviewState.groups = [{ id: 'g_review', name: 'Review', memberIds: ['m_code', 'm_review', 'm_cmd'] }]
+    setState(reviewState)
+    const group = mod.state.groups[0]
+    const worker = findMember('m_code')
+    // 6000 字正文 + 结尾标记：旧实现 slice(0,4000) 会把结尾整段切掉
+    const longText = '第一段产出。\n' + '甲'.repeat(6000) + '\n尾段结论：全部完成，验证通过 [TAIL-MARKER]'
+    assert.ok(longText.length > 6000)
+    const seen = []
+    mod.__setRunKind(async (ctxArg, member, prompt) => {
+      seen.push(String(prompt || ''))
+      return { ok: true, text: '{"ok":true,"reason":"mock"}' }
+    })
+    try {
+      const fakeCtx = { get: () => undefined }
+      const prelim = await mod.prelimReview(fakeCtx, group, worker, '写点东西', { text: longText }, config, undefined, null, undefined, undefined)
+      assert.equal(prelim.ok, true)
+      const commander = await mod.commanderReview(fakeCtx, group, worker, '写点东西', { text: longText }, config, null, undefined, undefined, undefined)
+      assert.equal(commander.ok, true)
+      assert.equal(seen.length >= 2, true, '审校 + 指挥各应发一次审核 prompt，实际 ' + seen.length)
+      for (const prompt of seen) {
+        assert.ok(prompt.includes('[TAIL-MARKER]'), '审核 prompt 必须包含产出最后一段（说明没被截断）')
+        assert.ok(prompt.includes(longText), '审核 prompt 必须包含完整产出（' + longText.length + ' 字符）')
+      }
+      // 兜底常量必须只是 20 万字符的保护，而不是 4000
+      assert.equal(mod.REVIEW_TEXT_HARD_CAP, 200_000)
+      return `${seen.length} 条审核 prompt 均含 ${longText.length} 字符全文 + 结尾标记`
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('memberTimeoutMinutes：默认 30 / 页面配置优先 / profile 兜底 / 注入检查 AbortSignal 预算', async () => {
+    const defaultState = structuredClone(fixture)
+    defaultState.config = {}
+    setState(defaultState)
+    assert.equal(mod.memberTimeoutMinutes({}), 30)
+    assert.equal(mod.memberTimeoutMinutes({ memberTimeoutMinutes: 12 }), 12)
+    assert.equal(mod.memberTimeoutMs({}), 30 * 60_000, '默认必须是 30 分钟（不再 6 分钟）')
+    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 12 }), 12 * 60_000)
+    // 页面配置优先于 profile 配置；非法值回落默认
+    setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 45 } })
+    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 5 }), 45 * 60_000, 'state.config 应优先')
+    setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 0 } })
+    assert.equal(mod.memberTimeoutMs({ memberTimeoutMinutes: 0 }), 30 * 60_000, '非法值必须回落默认 30')
+
+    // 注入检查：真实 seam 在 timeoutMs 未显式给时，应把 45 分钟换算成 ms 交给 AbortSignal.timeout
+    setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 45 } })
+    const seen = []
+    const originalTimeout = AbortSignal.timeout
+    AbortSignal.timeout = function spy(ms) { seen.push(ms); return originalTimeout.call(AbortSignal, ms) }
+    try {
+      const fakeSubagents = {
+        getProvider: () => ({ id: 'spawn' }),
+        startActivation: async () => ({
+          childId: 'child-timeout', dispose: async () => {},
+          result: Promise.resolve({ output: [{ type: 'text', text: '完成' }], stopReason: 'completed' }),
+        }),
+      }
+      const fakeCtx = { get: (name) => (name === 'subagents' ? fakeSubagents : undefined) }
+      const out = await mod.runDeepseekViaSeam(fakeCtx, { id: 'm_timeout', name: '计时', kind: 'deepseek' }, '任务', {}, {}, undefined, undefined, undefined, undefined)
+      assert.equal(out.ok, true)
+      assert.deepEqual(seen, [45 * 60_000], 'seam 必须用 memberTimeoutMs 的 45 分钟，实际 ' + JSON.stringify(seen))
+      return `默认 ${mod.DEFAULT_MEMBER_TIMEOUT_MINUTES} 分钟 · 页面 45 → ${seen[0]}ms · 注入生效`
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  await check('truncated 续跑：同一子会话连续续跑直到完成（continued=2 且最终 ok）；上限 5 次', async () => {
+    const calls = []
+    const fakeSeam = async (ctxArg, member, prompt) => {
+      calls.push({ prompt: String(prompt || ''), member })
+      if (calls.length <= 2) {
+        return { ok: true, text: '分段' + calls.length, convId: 'child-cont', truncated: true, stopReason: 'max-tokens' }
+      }
+      return { ok: true, text: '最终完成', convId: 'child-cont' }
+    }
+    const member = { id: 'm_cont', name: '续跑', kind: 'deepseek' }
+    const out = await mod.runDeepseekWithContinuation({}, member, '原任务', {}, {}, 60_000, undefined, undefined, fakeSeam)
+    assert.equal(calls.length, 3, '应是首跑 + 2 次续跑')
+    assert.equal(out.continued, 2)
+    assert.equal(out.ok, true)
+    assert.equal(out.truncated, undefined)
+    assert.equal(member.convId, 'child-cont')
+    assert.match(out.text, /分段1[\s\S]*分段2[\s\S]*最终完成/, '续跑各段要按顺序拼成完整产出')
+    assert.match(calls[1].prompt, /继续未完成的部分/, '续跑提示必须要求继续未完成的部分')
+    assert.match(calls[1].prompt, /max-tokens/, '续跑提示必须带上上次未完成的原因')
+    assert.equal(calls[1].member.__continue, true, '续跑必须走同一子会话（__continue）')
+
+    // 到上限仍截断：续跑 5 次后停下，ok=false 交给 callMember 重试
+    let rounds = 0
+    const alwaysTruncated = async (ctxArg, m, prompt) => {
+      rounds += 1
+      return { ok: true, text: '片段' + rounds, convId: 'child-cap', truncated: true, stopReason: 'max-turns' }
+    }
+    const capped = await mod.runDeepseekWithContinuation({}, { id: 'm_cap', name: '上限', kind: 'deepseek' }, '任务', {}, {}, 60_000, undefined, undefined, alwaysTruncated)
+    assert.equal(mod.MEMBER_CONTINUE_LIMIT, 5)
+    assert.equal(capped.continued, 5, '续跑次数必须封顶在 5')
+    assert.equal(rounds, 6, '1 次首跑 + 5 次续跑')
+    assert.equal(capped.ok, false)
+    assert.match(capped.error, /已续跑 5 次仍未完成/)
+    return '首跑+2 次续跑→completed（continued=2）· 上限 5 · 超限 ok=false'
   })
 
 } finally {
