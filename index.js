@@ -426,6 +426,8 @@ function configView(config, source) {
     memberIdleMinutes: memberIdleMinutes(config),
     memberHardLimitMinutes: memberHardLimitMinutes(config),
     imageTimeoutSeconds: imageTimeoutSeconds(config),
+    // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
+    authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
     source,
   }
 }
@@ -1624,6 +1626,92 @@ function shortStageText(value, max = 48) {
   return text.length > max ? text.slice(0, max) + '…' : text
 }
 
+/* ── 验收结论（结构化字段 + 回执硬标记） ─────────────────────────────────────
+ * 一次 council_delegate 只有一个回执，所以验收结论是「整次调用」级别的；
+ * 成员级的原始 acceptance 仍留在 members[].acceptance
+ * （none / passed / rejected / rework-failed / unverified / skipped / cancelled）。
+ *
+ * 现场事故：2.5D 会话的回执末尾明明写着「## 验收（小组）验收未通过」，父会话却继续往下跑，
+ * 把它当成果报给了用户。所以「验收没通过」必须同时出现在
+ * ①回执第一行（模型最先读到的字）和 ②结构化字段 acceptanceStatus（程序/父会话都能判断），
+ * 两处同源（都由 summarizeAcceptance 得出）。
+ */
+
+/** 回执里允许出现的验收状态（与 output schema 的 enum 一致）。 */
+const ACCEPTANCE_STATUSES = ['passed', 'rejected', 'rework-failed', 'unverified', 'none']
+/** 只有这三种算「未通过验收」——回执顶部必须打 ⛔ 硬标记。 */
+const ACCEPTANCE_BLOCKED = new Set(['rejected', 'rework-failed', 'unverified'])
+
+/**
+ * 成员 acceptance → 回执状态。
+ * skipped（成员根本没产出）/ cancelled（被用户停止）都不能算通过：一律按未通过上报，
+ * 否则父会话又能把「什么都没交付」当成果。返回 'none' 只表示本组没有审核位。
+ */
+function acceptanceStatusOf(acceptance) {
+  if (acceptance === 'passed') return 'passed'
+  if (acceptance === 'rejected') return 'rejected'
+  if (acceptance === 'rework-failed') return 'rework-failed'
+  if (acceptance === 'unverified') return 'unverified'
+  if (acceptance === 'skipped' || acceptance === 'cancelled') return 'rejected'
+  return 'none'
+}
+
+/** 返工轮次：review.attempts = 1 + 返工次数（callMemberImpl 里先记次数再跑返工）。 */
+function reworkRoundsOf(member) {
+  const attempts = Number((member && member.review && member.review.attempts) || (member && member.attempts) || 1)
+  return Number.isFinite(attempts) && attempts > 1 ? Math.floor(attempts) - 1 : 0
+}
+
+/** 成员名单（最多三个 + 等）。 */
+function memberNamesOf(list) {
+  const names = [...new Set((list || []).map((m) => String((m && m.name) || '成员')))]
+  return names.length > 3 ? names.slice(0, 3).join('、') + ' 等' : names.join('、')
+}
+
+/** 成员条目的验收状态：连跑都没跑起来的（member not found 等）也绝不算通过。 */
+function acceptanceStatusOfMember(member) {
+  const status = acceptanceStatusOf(member && member.acceptance)
+  return status === 'none' && member && member.ok === false ? 'rejected' : status
+}
+
+/**
+ * 汇总整次调用的验收结论：rework-failed > rejected > unverified > passed > none。
+ * 返回 { acceptanceStatus, acceptanceNote, acceptanceRounds }；note 是一句中文，
+ * 与回执顶部 ⛔ 提示、结尾「## 验收（本次调用）」是同一个结论。
+ */
+function summarizeAcceptance(members) {
+  const list = (Array.isArray(members) ? members : []).filter(Boolean)
+  const statuses = list.map((m) => acceptanceStatusOfMember(m))
+  const failed = list.filter((m) => ACCEPTANCE_BLOCKED.has(acceptanceStatusOfMember(m)))
+  const rounds = failed.reduce((max, m) => Math.max(max, reworkRoundsOf(m)), 0)
+  const status = statuses.includes('rework-failed') ? 'rework-failed'
+    : statuses.includes('rejected') ? 'rejected'
+      : statuses.includes('unverified') ? 'unverified'
+        : statuses.includes('passed') ? 'passed'
+          : 'none'
+  const allCancelled = list.length > 0 && list.every((m) => m.acceptance === 'cancelled')
+  const note = !list.length
+    ? '本次没有成员回执（没派活或指挥没拆解出任务），未做验收'
+    : allCancelled
+      ? '本轮被用户停止，成员没有产出，不是交付物'
+      : status === 'rework-failed'
+        ? memberNamesOf(failed) + '返工后没有返回产出（已返工 ' + rounds + ' 次），保留的上一轮产出不算交付'
+        : status === 'rejected'
+          ? memberNamesOf(failed) + '未通过验收（返工 ' + rounds + ' 次后仍不通过）'
+          : status === 'unverified'
+            ? memberNamesOf(failed) + '的审核没有给出结论，按未通过处理'
+            : status === 'passed'
+              ? '本次调用通过验收'
+              : '本组没有审校/指挥审核位，本轮未做验收'
+  return { acceptanceStatus: status, acceptanceNote: note, acceptanceRounds: rounds }
+}
+
+/** 回执最开头的硬标记：验收没过就不是交付物（防父会话把它当成果汇报给用户）。 */
+function acceptanceBlockedLine(rounds) {
+  return '⛔ 本次未通过验收（返工 ' + Math.max(0, Math.floor(Number(rounds) || 0)) + ' 次后仍不通过）。'
+    + '这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
+}
+
 /**
  * 成员执行入口：只做异常兜底。
  * **终态（完成 / 失败（原因）/ 已停止 / 静默超时）由 callMemberImpl 的每条 return 路径写**，
@@ -1685,8 +1773,16 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   const hasPrelimReviewer = Boolean(memberWithRole(group, '审校'))
   const hasCommanderReviewer = Boolean(memberWithRole(group, '指挥'))
   const expectReviews = (requirePrelim && hasPrelimReviewer) || (requireCommander && hasCommanderReviewer)
+  // 验收冲突策略（state.config.authoritativeReviewer，页面 /config 可改）：
+  //   any（默认）= 任一不通过即不通过；commander = 以指挥终审为准（审校与指挥冲突时不再判失败）。
+  const commanderAuthoritative = (state.config && state.config.authoritativeReviewer) === 'commander'
+    && requireCommander && hasCommanderReviewer
   const acceptanceOf = () => {
-    const list = [review.self, review.commander].map(verdictOf).filter(Boolean)
+    const prelim = verdictOf(review.self)
+    const commander = verdictOf(review.commander)
+    // commander 模式：指挥有结论时它就是唯一权威（审校的拒绝/未判定不再拖失败）
+    if (commanderAuthoritative && commander) return commander
+    const list = [prelim, commander].filter(Boolean)
     // 本组根本没有审核位 → 不做验收；配了审核却一粒结论都没拿到 → 未判定（必须返工）
     if (!list.length) return expectReviews ? 'unverified' : 'none'
     if (list.includes('rejected')) return 'rejected'
@@ -1714,8 +1810,12 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework) {
       round += 1
       const blocks = []
-      if (verdictOf(review.self) === 'rejected') blocks.push(`[自审未通过] ${review.self.reason}`)
-      if (verdictOf(review.self) === 'unverified') blocks.push(`[自审未判定] ${review.self.reason}`)
+      // commander 模式（且指挥给了结论）：只把指挥不通过的理由写进返工单，审校的否决不再算数
+      const skipSelfBlocks = commanderAuthoritative && Boolean(verdictOf(review.commander))
+      if (!skipSelfBlocks) {
+        if (verdictOf(review.self) === 'rejected') blocks.push(`[自审未通过] ${review.self.reason}`)
+        if (verdictOf(review.self) === 'unverified') blocks.push(`[自审未判定] ${review.self.reason}`)
+      }
       if (verdictOf(review.commander) === 'rejected') blocks.push(`[指挥验收未通过] ${review.commander.reason}`)
       if (verdictOf(review.commander) === 'unverified') blocks.push(`[指挥验收未判定] ${review.commander.reason}`)
       if (onStage) onStage('返工（第 ' + round + ' 次）')
@@ -2382,6 +2482,11 @@ export function createHandler(ctx, config = {}) {
                 if (Number(body.memberMaxMemoryMb) === 0) next.memberMaxMemoryMb = 0
                 else next.memberMaxMemoryMb = Math.floor(Number(body.memberMaxMemoryMb))
               }
+              // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
+              if (body.authoritativeReviewer === 'any' || body.authoritativeReviewer === 'commander') {
+                if (body.authoritativeReviewer === 'any') delete next.authoritativeReviewer
+                else next.authoritativeReviewer = 'commander'
+              }
               state.config = Object.keys(next).length ? next : undefined
               usageCache = null
               catalog = null
@@ -2545,6 +2650,7 @@ function mandateText(group) {
     '你自己不得编写实现代码、不得直接修改文件或执行构建命令来完成任务（只能读取、检查、验收）。',
     '例外只有三种：① 用户明确说"你自己做"或"你直接改"；② 只是回答关于小组本身的问题（怎么用、成员有谁、为什么失败）；③ 需要检查文件/日志/状态来验收或排障（只读操作）。',
     '若你发现自己在写代码或跑构建命令，立即停下，改用 council_delegate 派给成员。',
+    '『验收未通过』≠ 交付：若 council_delegate 回执标了未通过验收，禁止把它当成果汇报给用户；要么继续派返工（最多 maxRework 次），要么明确告诉用户哪里没过。',
     '违反这条 = 任务失败。',
   ].join('\n')
 }
@@ -3226,6 +3332,12 @@ function bindAgent(ctx, config, group, agent) {
             selfWorkBlocked: { type: 'integer', description: '本组累计被守卫拦下的父会话写操作次数（0 表示没有越权）' },
             selfWorkBlockedDetail: { type: 'string', description: '被拦工具分布，如 edit×2、blender_render×1' },
             plan: { type: 'object', additionalProperties: true },
+            acceptanceStatus: {
+              type: 'string',
+              enum: ACCEPTANCE_STATUSES.slice(),
+              description: '本次调用整体的验收结论：passed=通过；rejected=被否；rework-failed=返工没产出；unverified=审核没结论；none=本组没有审核位。非 passed 一律不是交付物。',
+            },
+            acceptanceNote: { type: 'string', description: '一句中文说明（与回执顶部的 ⛔ 提示同源）' },
             members: {
               type: 'array',
               items: {
@@ -3237,6 +3349,8 @@ function bindAgent(ctx, config, group, agent) {
                   text: { type: 'string' },
                   image: { type: 'string' },
                   error: { type: 'string' },
+                  acceptance: { type: 'string', description: '成员原始验收结论：none/passed/rejected/rework-failed/unverified/skipped/cancelled' },
+                  acceptanceStatus: { type: 'string', enum: ACCEPTANCE_STATUSES.slice(), description: '归一后的验收状态（skipped/cancelled 归为 rejected）' },
                   continued: { type: 'integer', description: '被 max-tokens / max-turns 截断后续跑了几次（未续跑不带该字段）' },
                   review: { type: 'object', additionalProperties: true },
                 },
@@ -3247,6 +3361,12 @@ function bindAgent(ctx, config, group, agent) {
         },
         render(_args, value) {
           const verdict = (v) => (v ? (v.ok === true ? '通过' : v.ok === false ? '不通过' : '未判定') + (v.reason ? '（' + v.reason + '）' : '') : '无')
+          // 整次调用的验收结论：顶部 ⛔ 硬标记 + 结尾「## 验收（本次调用）」+ 结构化字段 acceptanceStatus
+          // 全部由这一个 summary 得出，保证「回执文本」与「字段」永远一致。
+          const summary = summarizeAcceptance(value.members || [])
+          const acceptanceStatus = ACCEPTANCE_STATUSES.includes(value.acceptanceStatus) ? value.acceptanceStatus : summary.acceptanceStatus
+          const acceptanceNote = String(value.acceptanceNote || summary.acceptanceNote || '')
+          const notAccepted = ACCEPTANCE_BLOCKED.has(acceptanceStatus)
           const planLine = value.plan
             ? (value.plan.assignments && value.plan.assignments.length
               ? '## 指挥拆分（commander）\n' + value.plan.assignments.map((a, i) => `${i + 1}. ${a.member}：${a.task}`).join('\n')
@@ -3279,7 +3399,14 @@ function bindAgent(ctx, config, group, agent) {
             ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + selfWorkBlocked + ' 次写操作，已拦截'
               + (value.selfWorkBlockedDetail ? '（' + value.selfWorkBlockedDetail + '）' : '')
             : ''
-          return [{ type: 'text', text: (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked }]
+          // 验收没通过：结尾再落一处结构化结论（与顶部 ⛔ 同一结论），父会话/程序都能对上
+          const acceptanceSection = notAccepted
+            ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
+              + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
+            : ''
+          // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
+          const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
+          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection }]
         },
       },
       async execute(args, exec) {
@@ -3426,6 +3553,7 @@ function bindAgent(ctx, config, group, agent) {
             ...result.review === undefined ? {} : { review: result.review },
             ...result.accepted === undefined ? {} : { accepted: result.accepted },
             ...result.acceptance === undefined ? {} : { acceptance: result.acceptance },
+            ...result.acceptance === undefined ? {} : { acceptanceStatus: acceptanceStatusOf(result.acceptance) },
             ...result.reworkError === undefined ? {} : { reworkError: String(result.reworkError) },
             ...result.reason === undefined ? {} : { reason: result.reason },
             ...SILENT_KILL_REASONS.has(result.reason) ? { idleTimeout: true } : {},
@@ -3480,6 +3608,11 @@ function bindAgent(ctx, config, group, agent) {
         }
         // created 改成普通字段；pruned 保持字符串数组。出口再做一次 JSON 往返自检。
         response.staffingCreated = ephemeral.filter((id) => typeof id === 'string')
+        // 验收结论（结构化）：与回执顶部 ⛔ 标记、结尾「## 验收（本次调用）」同源。
+        // 放在出口统一算，保证每条 return 路径（提前 break / 抛错进了 finally）也带这两个字段。
+        const acceptanceSummary = summarizeAcceptance(response.members)
+        response.acceptanceStatus = acceptanceSummary.acceptanceStatus
+        response.acceptanceNote = acceptanceSummary.acceptanceNote
         return losslessToolResult(response)
       },
     }))

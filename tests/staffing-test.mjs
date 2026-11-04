@@ -46,7 +46,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -388,6 +388,19 @@ try {
     assert.equal(restored.config.memberIdleMinutes, 10)
     assert.equal(restored.config.memberHardLimitMinutes, 360)
     return 'GET 10/360 → POST 6/0 → GET 6/0 → 恢复 10/360'
+  })
+
+  await check('GET/POST /config 暴露 authoritativeReviewer（默认 any，可切 commander）', async () => {
+    const before = await (await fetch(base + '/config')).json()
+    assert.equal(before.config.authoritativeReviewer, 'any', 'authoritativeReviewer 默认必须是 any')
+    const on = await (await post('/config', { authoritativeReviewer: 'commander' })).json()
+    assert.equal(on.config.authoritativeReviewer, 'commander', 'POST commander 没生效')
+    const readBack = await (await fetch(base + '/config')).json()
+    assert.equal(readBack.config.authoritativeReviewer, 'commander', 'POST 后 GET 必须读回 commander')
+    await post('/config', { authoritativeReviewer: 'any' })
+    const restored = await (await fetch(base + '/config')).json()
+    assert.equal(restored.config.authoritativeReviewer, 'any', '切回 any 没生效')
+    return 'GET any → POST commander → GET commander → 恢复 any'
   })
 
   await check('GET /state?sessionId=… 绑定会话并注册 council_delegate', async () => {
@@ -1509,6 +1522,146 @@ try {
     } finally {
       mod.__setRunKind(undefined)
     }
+  })
+
+  /* ── 验收未通过 ≠ 交付：回执顶部 ⛔ + acceptanceStatus 结构化字段 + 冲突策略 ── */
+
+  /**
+   * 绑一个「代码 + 审校 + 指挥」的小组。
+   * sessionId 必须是 session-g5：只有它能在假 agents 服务里拿到 agent，bindAgent 才会真的
+   * 把 council_delegate 重新注册到这个小组（否则拿到的是上一个组的闭包）。
+   */
+  async function bindAcceptanceGroup(groupId, { maxRework = 0 } = {}) {
+    const next = structuredClone(fixture)
+    next.roles.push({ id: 'r_cmd', name: '指挥', prompt: '验收', kind: 'deepseek', model: 'deepseek-flash' })
+    next.members.push({ id: 'm_cmd', name: '司令', kind: 'deepseek', model: 'deepseek-flash', roleId: 'r_cmd' })
+    next.groups = [{
+      id: groupId, name: 'Acc', sessionId: 'session-g5',
+      memberIds: ['m_code', 'm_review', 'm_cmd'],
+      requirePrelim: true, requireCommander: true, maxRework,
+    }]
+    setState(next)
+    mod.__resetProgress()
+    await getState('?sessionId=session-g5')
+    return registered.council_delegate
+  }
+
+  /** 审校 / 指挥各给一份 verdict；成员干活永远“成功”。 */
+  function mockReviewVerdicts(prelim, commander) {
+    mod.__setRunKind(async (ctxArg, member, prompt) => {
+      const text = String(prompt || '')
+      if (text.includes('你是这个小组的审校')) return { ok: true, text: JSON.stringify(prelim) }
+      if (text.includes('现在做验收')) return { ok: true, text: JSON.stringify(commander) }
+      return { ok: true, text: '做完了：/tmp/out.txt（已验证）' }
+    })
+  }
+
+  await check('验收①：rejected → 回执**首行**是 ⛔ 提示，acceptanceStatus=rejected', async () => {
+    const tool = await bindAcceptanceGroup('g_acc_rej')
+    mockReviewVerdicts({ ok: false, reason: '缺验证步骤' }, { ok: true, reason: '可以' })
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-acc-rej', agent: { id: 'agent-test' } },
+      )
+      assert.equal(out.acceptanceStatus, 'rejected', '审校否决 + 指挥通过（any 策略）→ rejected，实际 ' + out.acceptanceStatus)
+      assert.equal(out.members[0].acceptance, 'rejected')
+      assert.equal(out.members[0].acceptanceStatus, 'rejected', '成员条目也要带归一后的 acceptanceStatus')
+      assert.equal(out.members[0].accepted, false)
+      assert.ok(String(out.acceptanceNote || '').includes('未通过验收'), 'acceptanceNote 必须说明未通过，实际：' + out.acceptanceNote)
+      const rendered = tool.output.render({}, out)[0].text
+      const first = rendered.split('\n')[0]
+      assert.equal(
+        first,
+        '⛔ 本次未通过验收（返工 0 次后仍不通过）。这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。',
+        '回执第一行必须是 ⛔ 硬标记，实际：' + first,
+      )
+      assert.ok(rendered.includes('验收：未通过（审核拒绝）'), '正文原有的成员级「验收：未通过」行不能丢')
+      // 回执与字段必须同源：结尾结论就是结构化字段的值
+      assert.match(rendered, /## 验收（本次调用）\n结论：rejected —— /)
+      return '首行 ⛔ + status=rejected + note=' + out.acceptanceNote
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('验收②：passed → 回执没有 ⛔ 提示，acceptanceStatus=passed', async () => {
+    const tool = await bindAcceptanceGroup('g_acc_pass')
+    mockReviewVerdicts({ ok: true, reason: '没问题' }, { ok: true, reason: '可以交付' })
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-acc-pass', agent: { id: 'agent-test' } },
+      )
+      assert.equal(out.acceptanceStatus, 'passed', '双审都通过 → passed，实际 ' + out.acceptanceStatus)
+      assert.equal(out.members[0].acceptanceStatus, 'passed')
+      assert.equal(out.members[0].accepted, true)
+      const rendered = tool.output.render({}, out)[0].text
+      assert.doesNotMatch(rendered, /⛔/, '验收通过时不许出现 ⛔')
+      assert.doesNotMatch(rendered, /## 验收（本次调用）/, '验收通过时不加「## 验收（本次调用）」段')
+      assert.match(rendered.split('\n')[0], /^## 代码/, '首行应直接是成员回执，实际：' + rendered.split('\n')[0])
+      return '无 ⛔ · status=passed · 首行=' + rendered.split('\n')[0]
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('验收③：authoritativeReviewer=commander（审校 reject + 指挥 pass）判 passed；any 判 rejected', async () => {
+    const tool = await bindAcceptanceGroup('g_acc_cmd')
+    mockReviewVerdicts({ ok: false, reason: '审校不同意' }, { ok: true, reason: '指挥认为可以' })
+    const saved = mod.state.config
+    try {
+      // commander：指挥终审是唯一权威，审校与它冲突不再判失败
+      mod.state.config = Object.assign({}, saved, { authoritativeReviewer: 'commander' })
+      const cm = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-acc-cmd', agent: { id: 'agent-test' } },
+      )
+      assert.equal(cm.acceptanceStatus, 'passed', 'commander 模式应按指挥终审判通过，实际 ' + cm.acceptanceStatus)
+      assert.equal(cm.members[0].acceptance, 'passed')
+      assert.doesNotMatch(tool.output.render({}, cm)[0].text, /⛔/)
+      // 切回 any（默认）：任一不通过即不通过
+      mod.state.config = Object.assign({}, saved, { authoritativeReviewer: 'any' })
+      const anyOut = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-acc-any', agent: { id: 'agent-test' } },
+      )
+      assert.equal(anyOut.acceptanceStatus, 'rejected', 'any 模式必须判 rejected，实际 ' + anyOut.acceptanceStatus)
+      assert.match(tool.output.render({}, anyOut)[0].text, /^⛔ 本次未通过验收/, 'any 模式的回执首行必须是 ⛔')
+      return 'commander→passed / any→rejected'
+    } finally {
+      mod.state.config = saved
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('验收④：mandate 提示词含「验收未通过 ≠ 交付」硬规则句', () => {
+    const text = mod.mandateText(mod.state.groups[0])
+    assert.ok(
+      text.includes('『验收未通过』≠ 交付：若 council_delegate 回执标了未通过验收，禁止把它当成果汇报给用户；要么继续派返工（最多 maxRework 次），要么明确告诉用户哪里没过。'),
+      'mandate 里缺验收硬规则句',
+    )
+    assert.ok(text.indexOf('验收未通过') > text.indexOf('小组模式约束'), '规则句要排在小节内，不是别处')
+    return 'mandate 含验收硬规则'
+  })
+
+  await check('验收⑤：三种未通过状态（rejected/rework-failed/unverified）回执都带 ⛔，passed/none 不带', async () => {
+    const tool = registered.council_delegate
+    const render = (status, acceptance) => tool.output.render({}, {
+      acceptanceStatus: status,
+      members: [{ name: '代码', kind: 'deepseek', ok: true, text: '做完了', acceptance, review: { attempts: 2 } }],
+    })[0].text
+    for (const status of ['rejected', 'rework-failed', 'unverified']) {
+      const text = render(status, status)
+      assert.match(text.split('\n')[0], /^⛔ 本次未通过验收（返工 1 次后仍不通过）/, status + ' 的首行必须是 ⛔，实际：' + text.split('\n')[0])
+      assert.match(text, new RegExp('## 验收（本次调用）\\n结论：' + status + ' —— '), status + ' 的结尾结论必须与字段一致')
+    }
+    for (const status of ['passed', 'none']) {
+      const text = render(status, status)
+      assert.doesNotMatch(text, /⛔/, status + ' 不该出现 ⛔')
+      assert.doesNotMatch(text, /## 验收（本次调用）/, status + ' 不该出现验收结论段')
+    }
+    return 'rejected/rework-failed/unverified → ⛔ · passed/none → 无'
   })
 
   /* ── 成员输出不设上限：审核拿全文 / 超时可配 / 截断续跑 ───────────────── */

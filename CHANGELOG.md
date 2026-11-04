@@ -2,6 +2,21 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]（2026-11-05，未提交、未改版本号）
+
+### 修复
+- **验收未通过的回执被当成「已完成」交付**：`council_delegate` 回执在整次调用结论为
+  `rejected` / `rework-failed` / `unverified` 时，**第一行**插入
+  `⛔ 本次未通过验收（返工 N 次后仍不通过）。这不是交付物：…`，正文下移，末尾追加
+  `## 验收（本次调用）`（结论 + 中文说明）；验收通过时不加。
+
+### 新增
+- `council_delegate` 的 output schema 增加 `acceptanceStatus`
+  （`passed|rejected|rework-failed|unverified|none`）与 `acceptanceNote`；`members[]` 也带归一后的 `acceptanceStatus`。
+- `mandateText()` 增加硬规则：『验收未通过』≠ 交付 —— 不得把未通过验收的回执当成果汇报。
+- `config.authoritativeReviewer`（`any` 默认 / `commander`）：`commander` 下以指挥终审为准，
+  审校与指挥冲突时不再判失败；`GET/POST /council/api/config` 读写。
+
 ## [0.2.4] — 2026-10-29
 
 在**另一台全新 Ubuntu 24.04**（Node 22 + 全新 profile + 从 tarball 安装）上实测部署后发现并修复。
