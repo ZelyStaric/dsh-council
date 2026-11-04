@@ -27,6 +27,9 @@
  *   - 硬拦截（方案 A）：tools.guard 拒绝写类工具（中文理由）/ 只读与 bash 放行（bash 计审计）/
  *     strictDelegate=false 放行 / 最后一条用户消息含「你自己做」本轮放行 / 回执「## 越权拦截」计数 +
  *     /progress entry 的 selfWorkBlocked
+ *   - 越权审计（方案 B）：放行的 bash / read_image / grep+glob+read+read_file 也计数（不拦）/
+ *     council_delegate 回执按「水位线」只报上次回执之后的 Δ：先跑后派也会报；有则输出
+ *     「## 越权审计」+ selfRan 三个数字，无则不出该节且全 0
  *   - 路由一致性：client 的 SESSIONS_PRUNE_PATH === host 的 SESSIONS_PRUNE_ROUTE
  *
  * Usage: node tests/staffing-test.mjs
@@ -2093,7 +2096,7 @@ try {
   })
 
   /* ── 方案 A：硬拦截父会话自己执行写操作（tools.guard） ────────────────── */
-  const guardAudit = () => mod.selfWorkAudit.get('g_guard') || { blocked: 0, tools: {}, bash: 0 }
+  const guardAudit = () => mod.selfWorkAudit.get('g_guard') || { blocked: 0, tools: {}, bash: 0, readImage: 0, read: 0 }
   /** 绑一个独立组（session-guard）并返回该组刚注册的守卫 + 假会话。 */
   async function bindGuardGroup(events) {
     const next = structuredClone(fixture)
@@ -2142,7 +2145,9 @@ try {
     assert.equal(guard(guardCall(session, 'bash')), undefined, 'bash 不该被拦')
     assert.equal(guardAudit().blocked, 0, '只读工具不该计入越权数')
     assert.equal(guardAudit().bash, 1, 'bash 应只计审计数')
-    return '10 个只读工具 + bash 全部放行 · bash 审计 +1'
+    assert.equal(guardAudit().readImage, 1, 'read_image 单独计 readImage（不混进 read）')
+    assert.equal(guardAudit().read, 3, 'read/grep/glob 各计 1 次 read（read_image 不算这组）')
+    return '10 个只读工具 + bash 全部放行 · bash/readImage/read 分别计数'
   })
 
   await check('硬拦截③：strictDelegate=false → edit 放行；改回 true 重新拦截', async () => {
@@ -2199,6 +2204,99 @@ try {
     assert.equal(clean.selfWorkBlocked, 0)
     assert.doesNotMatch(tool.output.render({}, clean)[0].text, /## 越权拦截/, 'N=0 时不该输出越权拦截段')
     return '5 次拒绝 → 回执 edit×3、blender_render×2 · /progress=5 · N=0 不输出'
+  })
+
+  /* ── 方案 B：放行的 bash / read_image / 只读工具也计入回执审计（只审计、不拦截） ── */
+  // 口径（水位线）：Δ = 当前累计计数 − 本组已报水位，execute 收尾时报出并立刻把水位推到当前计数。
+  // 所以「先跑 bash 再派活」必须进下一次回执；紧接着再派（无新调用）Δ 必为 0、不重复报。
+  await check('越权审计①（水位线）：先守卫放行 3×bash + 2×read_image + 4×只读，再调 delegate → 回执「## 越权审计」3/2/4', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '做个 2.5D 场景')])
+    const tool = registered.council_delegate
+    // 关键顺序：先自己跑，再派活（上一版把基线放在 execute 开头，这个最常见的顺序 Δ 恒为 0）
+    for (let i = 0; i < 3; i += 1) assert.equal(guard(guardCall(session, 'bash')), undefined, 'bash 必须放行')
+    for (let i = 0; i < 2; i += 1) assert.equal(guard(guardCall(session, 'read_image')), undefined, 'read_image 必须放行')
+    for (const name of ['read', 'grep', 'glob', 'read_file']) {
+      assert.equal(guard(guardCall(session, name)), undefined, name + ' 必须放行')
+    }
+    // 累计计数（组内从 0 起：bindGuardGroup 已 reset）
+    const audit = guardAudit()
+    assert.equal(audit.blocked, 0, '放行工具绝不能被算成越权拦截')
+    assert.equal(audit.bash, 3, 'bash 计 selfRan.bash')
+    assert.equal(audit.readImage, 2, 'read_image 单独计 readImage（不混进 read）')
+    assert.equal(audit.read, 4, 'read/grep/glob/read_file 各计 1 次 read（read_image 不算这组）')
+    const out = await tool.execute(
+      { assignments: [{ member: '代码', task: '随便做点什么' }] },
+      { callId: 'call-guard-selfran', agent: { id: 'session-guard', session } },
+    )
+    assert.deepEqual(out.selfRan, { bash: 3, readImage: 2, read: 4 }, '先跑后派：selfRan 必须报全量增量')
+    const rendered = tool.output.render({}, out)[0].text
+    assert.match(rendered, /## 越权审计/, '有自行调用时必须输出越权审计节')
+    assert.match(rendered, /父会话本次自行执行：bash×3、read_image×2、read×4/)
+    assert.match(rendered, /提示：这些应在小组内派给成员；如必要请说明理由/)
+    return '先跑后派：3×bash + 2×read_image + 4×只读 → 回执审计节 3/2/4'
+  })
+
+  await check('越权审计②（水位线）：报过之后紧接着再派一次（期间无新调用）→ 不再出现该节，selfRan 全 0', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '派个活')])
+    const tool = registered.council_delegate
+    assert.equal(guard(guardCall(session, 'bash')), undefined)
+    assert.equal(guard(guardCall(session, 'read_image')), undefined)
+    const first = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'call-selfran-w1', agent: { id: 'session-guard', session } },
+    )
+    assert.deepEqual(first.selfRan, { bash: 1, readImage: 1, read: 0 }, '第一次必须报出先跑的调用')
+    assert.match(tool.output.render({}, first)[0].text, /## 越权审计/)
+    // 期间没有任何新调用 → 水位已推进，第二次 Δ 必须全 0
+    const second = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'call-selfran-w2', agent: { id: 'session-guard', session } },
+    )
+    assert.equal(guardAudit().bash, 1, '累计计数照记（审计不丢）')
+    assert.deepEqual(second.selfRan, { bash: 0, readImage: 0, read: 0 }, '水位已推进，没有新调用 → Δ 必须为 0')
+    assert.doesNotMatch(tool.output.render({}, second)[0].text, /## 越权审计/, 'Δ=0 时不该再报')
+    return '先跑 1×bash + 1×read_image → 第一次报 1/1；紧接着再派 → 全 0、不出该节'
+  })
+
+  await check('越权审计③（水位线）：报过之后再跑 1×bash → 下一次只报 bash×1（旧账不重复报）', async () => {
+    const { guard, session } = await bindGuardGroup([userEvent(1, '做个 2.5D 场景')])
+    const tool = registered.council_delegate
+    for (let i = 0; i < 2; i += 1) assert.equal(guard(guardCall(session, 'bash')), undefined, 'bash 必须放行')
+    const first = await tool.execute(
+      { assignments: [{ member: '代码', task: '随便做点什么' }] },
+      { callId: 'call-selfran-d1', agent: { id: 'session-guard', session } },
+    )
+    assert.deepEqual(first.selfRan, { bash: 2, readImage: 0, read: 0 }, '第一次应报 bash×2')
+    // 报过之后再自己跑一次 bash，并顺手试一次写操作（被拦，不进审计）
+    assert.equal(guard(guardCall(session, 'bash')), undefined, 'bash 仍放行')
+    assert.equal(typeof guard(guardCall(session, 'edit')), 'string', 'edit 仍应被拦')
+    const second = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'call-selfran-d2', agent: { id: 'session-guard', session } },
+    )
+    assert.equal(guardAudit().bash, 3, '累计计数仍然照记（审计不丢）')
+    assert.deepEqual(second.selfRan, { bash: 1, readImage: 0, read: 0 }, '只报新增的那 1 次 bash')
+    const rendered = tool.output.render({}, second)[0].text
+    assert.match(rendered, /父会话本次自行执行：bash×1、read_image×0、read×0/)
+    assert.equal(second.selfWorkBlocked, 1, '拦住的那次编辑照旧计数')
+    assert.match(rendered, /## 越权拦截/)
+    assert.ok(rendered.indexOf('## 越权拦截') < rendered.indexOf('## 越权审计'), '拦截段在前、审计段在末尾')
+    return '报过 bash×2 后再跑 1×bash → 只报 bash×1 · 与越权拦截并存（拦截在前）'
+  })
+
+  await check('越权审计④：没有任何自行调用 → 不出现该节，selfRan 全 0（不是 undefined）', async () => {
+    const { session } = await bindGuardGroup([userEvent(1, '派个活')])
+    const tool = registered.council_delegate
+    const out = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'call-guard-selfran-clean', agent: { id: 'session-guard', session } },
+    )
+    assert.deepEqual(out.selfRan, { bash: 0, readImage: 0, read: 0 }, '没有自行调用时必须是全 0，不能是 undefined')
+    const rendered = tool.output.render({}, out)[0].text
+    assert.doesNotMatch(rendered, /## 越权审计/, '没有自行调用时不该输出越权审计节')
+    // 渲染层兜底：老回执 / 缺 selfRan 字段时同样不崩、不出该节
+    assert.doesNotMatch(tool.output.render({}, { members: [] })[0].text, /## 越权审计/, '缺字段也不能误报')
+    return 'selfRan 全 0 · 无「## 越权审计」· 缺字段也不误报'
   })
 
 } finally {
