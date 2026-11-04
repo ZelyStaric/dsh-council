@@ -282,6 +282,66 @@ let ctx0
 
 /** 正在跑的小组派活：callId → { cancelled, reason }；供 /runs/cancel 停止。 */
 const activeCalls = new Map()
+
+/* ── 驻留子代理清扫器 ───────────────────────────────────────────────────────
+ * 背景：审核/拆解走 `__reuse`（或页面开了「复用子会话」）时，seam 会 keepChild = true
+ * 而不再 dispose；子会话若没人再引用就永久驻留 → 本会话 subagent 只增不减。
+ * 这里登记「插件有意保留」的每个 child id + 创建时间 + 用途，并在每次
+ * council_delegate 收尾时清扫：
+ *   - kind='review'：审核不需要跨轮上下文，创建超过 10 分钟就释放；
+ *   - kind='work'：成员已经不再挂着它（member.convId 指向别处）且超过 30 分钟才释放。
+ * dispose 能力来自创建它的 seam（`activation.dispose()`）；失败一律静默（子会话可能已经没了）。
+ */
+const RESIDENT_REVIEW_TTL_MS = 10 * 60_000
+const RESIDENT_WORK_TTL_MS = 30 * 60_000
+/** childId → { id, kind: 'work'|'review', at, memberId, dispose } */
+const residentChildren = new Map()
+
+/** 登记一个被有意保留（未 dispose）的子代理。 */
+function trackResidentChild(id, kind, info = {}) {
+  if (!id) return
+  residentChildren.set(String(id), {
+    id: String(id),
+    kind: kind === 'review' ? 'review' : 'work',
+    at: Number(info.at) || Date.now(),
+    memberId: info.memberId,
+    dispose: typeof info.dispose === 'function' ? info.dispose : undefined,
+  })
+}
+
+/** 子代理已经释放（正常 dispose / 清扫）→ 从登记表移除，`residentChildren` 计数才准。 */
+function untrackResidentChild(id) {
+  if (id) residentChildren.delete(String(id))
+}
+
+/**
+ * 清扫驻留子代理。返回本轮真正 dispose 掉的数量（失败不计，静默）。
+ * @param {{ now?: number }} [options] 只给测试注入时钟
+ */
+async function sweepResidentChildren(options = {}) {
+  const now = Number(options.now) || Date.now()
+  const current = new Map()
+  for (const member of state.members || []) {
+    if (member && member.convId) current.set(member.id, String(member.convId))
+  }
+  let released = 0
+  for (const entry of [...residentChildren.values()]) {
+    const age = now - entry.at
+    const staleReview = entry.kind === 'review' && age >= RESIDENT_REVIEW_TTL_MS
+    // 工作子会话只在「成员已经不指向它」时才回收：指向它 = 还要续聊
+    const staleWork = entry.kind === 'work' && age >= RESIDENT_WORK_TTL_MS
+      && current.get(entry.memberId) !== entry.id
+    if (!staleReview && !staleWork) continue
+    residentChildren.delete(entry.id)
+    try {
+      if (!entry.dispose) continue
+      await entry.dispose()
+      released += 1
+    } catch { /* 已经没了 / 释放失败：静默 */ }
+  }
+  return released
+}
+
 function callCancelled(callId) {
   const entry = callId && activeCalls.get(callId)
   return Boolean(entry && entry.cancelled)
@@ -939,6 +999,19 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   }
   // `__continue`：截断续跑时即使没开 reuseAgents，也要接着同一个子会话跑（保住上下文）
   if ((reuseEnabled || member.__continue) && member.convId) {
+    // 复用/续跑用的是既有子会话：它可能被 sendMessage 冷恢复，或清扫后又被复活，
+    // 登记表里未必有它 → 补登记（不清零已有创建时间），否则它会变成清扫器看不见的孤儿驻留。
+    if (reuseEnabled && !residentChildren.has(String(member.convId))) {
+      const reusedKind = member.__residentKind || (presetId === 'minimal' ? 'review' : 'work')
+      const reusedId = member.convId
+      trackResidentChild(reusedId, reusedKind, {
+        memberId: member.id,
+        // 复用路径没有 activation 句柄了，用 subagent 服务自己的 drainChildren 释放
+        dispose: () => (typeof subagents.drainChildren === 'function'
+          ? subagents.drainChildren(parent, [reusedId])
+          : Promise.reject(new Error('drainChildren unavailable'))),
+      })
+    }
     const reused = await continueChild(ctx, parent, member, prompt, budgetMs, callId, config, onActivity)
     // truncated 原样带出（ok 仍按是否有文本算），由 runDeepseekWithContinuation 决定续跑
     if (reused) return reused
@@ -1023,6 +1096,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
     // 被 max-tokens / max-turns 截断时不能 dispose：续跑要接着这个子会话。
     let keepChild = reuseEnabled
+    // 只有「正常拿到结果且决定保留」才登记为驻留（抛错路径不登记，清理交给调用方）
+    let keepResident = false
     try {
       const result = await activation.result
       if (idleFired) { keepChild = false; return idleResult() }
@@ -1035,6 +1110,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       const stopReason = String(result.stopReason || '')
       const truncated = TRUNCATED_STOP_REASONS.has(stopReason)
       keepChild = reuseEnabled || truncated
+      keepResident = keepChild && Boolean(childId)
       return {
         ok: Boolean(text) && !truncated && stopReason === 'completed',
         text,
@@ -1051,6 +1127,14 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       // keep the child resident when reuse is enabled (or when it must be continued)
       if (!keepChild) {
         try { await activation.dispose() } catch { /* already gone */ }
+        untrackResidentChild(childId)
+      } else if (keepResident) {
+        // 登记用途：minimal preset = 审核位（10 分钟清扫），其余 = 干活的成员（30 分钟 + 失联才清扫）；
+        // `__residentKind` 只给「指挥拆解」这种 minimal 但需要跨轮保留的线程用。
+        trackResidentChild(childId, member.__residentKind || (presetId === 'minimal' ? 'review' : 'work'), {
+          memberId: member.id,
+          dispose: () => activation.dispose(),
+        })
       }
     }
   } catch (error) {
@@ -1539,7 +1623,8 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       '',
       '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 80 字的中文理由"}',
     ].join('\n')
-    const imgReviewer = Object.assign({}, commanderMember, { convId: commanderMember.convId, __reuse: true })
+    // 审核是旁路：不强制保留子会话（只有页面开了 reuseAgents 才会按复用走后端）
+    const imgReviewer = Object.assign({}, commanderMember, { convId: commanderMember.convId })
     let seen = await runKind(ctx, imgReviewer, imagePrompt, config, group, styleOverride, parent, 120_000, callId)
     let parsed = verdictOf(seen.text)
     if (parsed === null && seen.ok) {
@@ -1566,7 +1651,8 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
-    const reviewMember = Object.assign({}, commanderMember, { convId: commanderMember.convId, __preset: 'minimal', __noTools: true, __reuse: true })
+    // 审核不强制保留子会话（`__reuse` 会让 keepChild 恒为 true，审核子会话就永久驻留）。
+    const reviewMember = Object.assign({}, commanderMember, { convId: commanderMember.convId, __preset: 'minimal', __noTools: true })
     const result = await runKind(ctx, reviewMember, prompt, config, group, undefined, parent, 120_000, callId)
     let parsed = verdictOf(result.text)
     if (parsed === null && result.ok) {
@@ -1601,9 +1687,14 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   const cdigest = cmem && cmem.digest && (state.config || {}).memoryInject !== false
     ? '\n\n[你之前为这个小组做过的事（摘要）]\n' + cmem.digest
     : ''
-  const commanderOpts = { convId: commander.convId, __preset: 'minimal', __noTools: true, __reuse: true }
+  // 拆解是「指挥自己的工作线程」（`commander.convId` 会写回、下一轮接着用），所以：
+  //   ① 不再强制 `__reuse`——页面没开「复用子会话」时，这一次性子会话用完即弃；
+  //   ② 页面开了复用才把子会话写回，避免留下指向已释放子会话的死 convId；
+  //   ③ 保留下来时按 work 登记（清扫器只在「指挥不指向它」时回收）。
+  const reuseChildren = Boolean((state.config && state.config.reuseAgents) || (config && config.reuseAgents))
+  const commanderOpts = { convId: commander.convId, __preset: 'minimal', __noTools: true, __residentKind: 'work' }
   const planned = await runKind(ctx, Object.assign({}, commander, commanderOpts), prompt + cdigest, config, group, undefined, parent, undefined, callId)
-  if (planned && planned.convId) { commander.convId = planned.convId; save().catch(() => {}) }
+  if (planned && planned.convId && reuseChildren) { commander.convId = planned.convId; save().catch(() => {}) }
   const plan = parsePlan(planned.text)
   return {
     assignments: plan ? plan.assignments : [],
@@ -2137,7 +2228,8 @@ export function createHandler(ctx, config = {}) {
                 if (group && agent) bindAgent(ctx, config, group, agent)
               }
             } catch { /* 绑定失败不影响状态读取 */ }
-            return sendTagged(req, res, { state: pollStateView(state), config: publicConfig(config) })
+            // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
+            return sendTagged(req, res, { state: pollStateView(state), config: publicConfig(config), residentChildren: residentChildren.size })
           }
           if (req.method === 'POST') {
             const body = await readBody(req)
@@ -2434,7 +2526,8 @@ export function createHandler(ctx, config = {}) {
                 runningMs: Math.max(0, now - (entry.startedAt || 0)),
               })
             }
-            return send(res, 200, { progress: out })
+            // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
+            return send(res, 200, { progress: out, residentChildren: residentChildren.size })
           }
           if (req.method === 'GET' && route === '/agents') {
             const agents = ctx.get('agents')
@@ -3491,6 +3584,11 @@ function bindAgent(ctx, config, group, agent) {
             ? '\n\n## 越权审计\n- 父会话本次自行执行：bash×' + selfRan.bash + '、read_image×' + selfRan.readImage + '、read×' + selfRan.read
               + '\n- 提示：这些应在小组内派给成员；如必要请说明理由'
             : ''
+          // 驻留子代理清扫：只有本轮真的 dispose 了东西才输出这一节（否则不挂噪音）
+          const sweptChildren = Number(value.sweptChildren) || 0
+          const sweptSection = sweptChildren > 0
+            ? '\n\n## 子进程回收\n- 已释放 ' + sweptChildren + ' 个驻留子代理'
+            : ''
           // 验收没通过：结尾再落一处结构化结论（与顶部 ⛔ 同一结论），父会话/程序都能对上
           const acceptanceSection = notAccepted
             ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
@@ -3498,7 +3596,7 @@ function bindAgent(ctx, config, group, agent) {
             : ''
           // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
           const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
-          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection }]
+          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
         },
       },
       async execute(args, exec) {
@@ -3697,6 +3795,9 @@ function bindAgent(ctx, config, group, agent) {
               response.prunedSessions = []
             }
           }
+          // 驻留子代理清扫：审核位 10 分钟、失联的工作子会话 30 分钟后释放（失败静默）。
+          // 放在 finally：成功 / 抛错 / 提前 break 都会走到；回执「## 子进程回收」只报本轮真正释放数。
+          try { response.sweptChildren = await sweepResidentChildren() } catch { response.sweptChildren = 0 }
         }
         // created 改成普通字段；pruned 保持字符串数组。出口再做一次 JSON 往返自检。
         response.staffingCreated = ephemeral.filter((id) => typeof id === 'string')
