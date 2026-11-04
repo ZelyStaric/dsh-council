@@ -46,7 +46,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -1431,6 +1431,86 @@ try {
     }
   })
 
+  /* ── 成员终态（Bug 1）：成功 / 失败 / 静默超时都要写 stage + finishedAt ── */
+
+  /** 建一个只有 m_code 的小组并绑到独立会话，返回已注册的 council_delegate。 */
+  async function bindFinishGroup(sessionId) {
+    const next = structuredClone(fixture)
+    next.roles = next.roles.filter((role) => role.id !== 'r_review')
+    next.groups = [{ id: 'g_' + sessionId, name: 'Fin', sessionId, memberIds: ['m_code'], requirePrelim: false, requireCommander: false }]
+    setState(next)
+    mod.__resetProgress()
+    await getState('?sessionId=' + sessionId)
+    return registered.council_delegate
+  }
+
+  await check('成员终态①：正常完成 → stage=完成、progress 有 finishedAt、silentMs=0（不再永远停在「终审（指挥）」）', async () => {
+    const tool = await bindFinishGroup('session-fin')
+    mod.__setRunKind(async () => ({ ok: true, text: '做完了' }))
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-fin', agent: { id: 'session-fin' } },
+      )
+      assert.equal(out.members[0].ok, true)
+      const slot = mod.progressMap.get('call-fin').members.m_code
+      assert.equal(slot.stage, '完成', '成员终态必须是「完成」，实际 ' + slot.stage)
+      assert.equal(typeof slot.finishedAt, 'number', '终态必须写 finishedAt 数字')
+      // 把最后活动时间拨到 100 分钟前：有 finishedAt 时 silentMs 仍必须是 0（前端不显示「静默 Ns」）
+      slot.lastActivity = Date.now() - 100 * 60_000
+      const cell = (await getProgress())['call-fin'].members.m_code
+      assert.equal(typeof cell.finishedAt, 'number', '/progress 成员条目必须带 finishedAt')
+      assert.equal(cell.silentMs, 0, '有 finishedAt 时 silentMs 必须为 0，实际 ' + cell.silentMs)
+      assert.equal(cell.stage, '完成')
+      return `stage=${slot.stage} · finishedAt=${typeof slot.finishedAt} · silentMs=${cell.silentMs}（lastActivity=-100min）`
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('成员终态②：成员失败（重试仍失败）→ stage=失败（原因）、finishedAt 有值', async () => {
+    const tool = await bindFinishGroup('session-fail')
+    let calls = 0
+    mod.__setRunKind(async () => { calls += 1; return { ok: false, text: '', error: '爆炸了' } })
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-fail', agent: { id: 'session-fail' } },
+      )
+      assert.equal(calls, 2, '普通失败会重试一次，实际 ' + calls)
+      assert.equal(out.members[0].ok, false)
+      const slot = mod.progressMap.get('call-fail').members.m_code
+      assert.match(slot.stage, /^失败（爆炸了）$/, '失败终态必须带原因，实际 ' + slot.stage)
+      assert.equal(typeof slot.finishedAt, 'number')
+      return `stage=${slot.stage} · 调用 ${calls} 次`
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('成员终态③：静默超时 → stage=静默超时、finishedAt 有值、不重试', async () => {
+    const tool = await bindFinishGroup('session-idle')
+    let calls = 0
+    mod.__setRunKind(async () => {
+      calls += 1
+      return { ok: false, text: '', error: '成员静默超过 10 分钟，已终止（看门狗）', reason: 'idle-timeout' }
+    })
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'call-idle-stage', agent: { id: 'session-idle' } },
+      )
+      assert.equal(calls, 1, '静默超时不该重试，实际 ' + calls)
+      assert.equal(out.members[0].idleTimeout, true)
+      const slot = mod.progressMap.get('call-idle-stage').members.m_code
+      assert.equal(slot.stage, '静默超时', '静默超时的终态必须是「静默超时」，实际 ' + slot.stage)
+      assert.equal(typeof slot.finishedAt, 'number')
+      return `stage=${slot.stage} · 调用 ${calls} 次`
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
   /* ── 成员输出不设上限：审核拿全文 / 超时可配 / 截断续跑 ───────────────── */
 
   await check('审核 prompt 传完整产出（不再截到 4000 字，全文含结尾标记）', async () => {
@@ -1477,6 +1557,7 @@ try {
     child.kills = []
     child.ignoreTerm = Boolean(options.ignoreTerm)
     child.data = (text) => { child.stdout.emit('data', Buffer.from(String(text))) }
+    child.errData = (text) => { child.stderr.emit('data', Buffer.from(String(text))) }
     child.kill = (signal) => {
       child.kills.push(signal)
       if (signal === 'SIGTERM' && child.ignoreTerm) return true
@@ -1510,6 +1591,20 @@ try {
   })
   const DEFAULT_IDLE = 10 * 60_000
   const DEFAULT_HARD = 360 * 60_000
+
+  await check('真实 /proc 读数：readProcCpuMs(本进程) 是数字、忙循环后变大、无效 pid → null', () => {
+    assert.equal(mod.readProcCpuMs(undefined), null, '断 pid 必须返回 null（退化为只看 stdout）')
+    assert.equal(mod.readProcCpuMs(999999999), null, '不存在的 pid 必须返回 null')
+    const before = mod.readProcCpuMs(process.pid)
+    assert.equal(typeof before, 'number', '本进程 CPU 时间必须是数字')
+    assert.ok(before > 0, '本进程 CPU 时间应大于 0（实际 ' + before + '）')
+    const until = Date.now() + 150
+    let acc = 0
+    while (Date.now() < until) acc += Math.sqrt(acc + 1)
+    const after = mod.readProcCpuMs(process.pid)
+    assert.ok(after > before, '忙循环后 CPU 时间应增长：' + before + ' → ' + after)
+    return before + 'ms → ' + after + 'ms（+' + (after - before) + 'ms）'
+  })
 
   await check('看门狗参数：idle 默认 10 / hard 默认 360 / 页面优先 / 旧的 memberTimeoutMinutes 只读不生效', async () => {
     setState({ ...structuredClone(fixture), config: {} })
@@ -1613,6 +1708,96 @@ try {
     const result = await pending
     assert.equal(result.reason, undefined)
     return 'hard=0 → 370 分钟持续输出仍 0 次 kill'
+  })
+
+  await check('看门狗②b（Bug 2 回归）：只往 stderr 刷日志、stdout 静默 → 11 分钟必须被杀（stderr 不续命）', async () => {
+    setState({ ...structuredClone(fixture), config: {} })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers, { memberName: '材质' })
+    // 模拟 codex 卡在 SYN-SENT 时反复往 stderr 刷重试日志：stdout 一个字都没有
+    for (let minute = 1; minute <= 11; minute += 1) {
+      clock.t += 60_000
+      child.errData('codex retry ' + minute + ': connect to 128.121.146.235:443 SYN-SENT')
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, ['SIGTERM'], 'stderr 噪音给看门狗续命了（stdout 已静默 11 分钟）')
+    const result = await pending
+    assert.ok(['idle-timeout', 'stalled-no-progress'].includes(result.reason), 'reason 必须命中 idle/stalled，实际 ' + result.reason)
+    // 假进程没有 pid → 读不到 /proc → 退化为只看 stdout
+    assert.equal(result.reason, 'idle-timeout')
+    return 'stderr 每分钟刷一行 + stdout 静默 11min → SIGTERM · reason=' + result.reason
+  })
+
+  await check('看门狗②c（Bug 2 对照）：只写 stdout 心跳的进程跑 40 分钟不被杀', async () => {
+    setState({ ...structuredClone(fixture), config: {} })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const pending = fakeRun(child, clock, timers, { memberName: '材质' })
+    for (let minute = 1; minute <= 40; minute += 1) {
+      clock.t += 60_000
+      child.data('{"type":"item.completed"} ' + minute)
+      timers.tick()
+    }
+    assert.deepEqual(child.kills, [], 'stdout 有心跳的进程不该被杀')
+    child.emit('close', 0)
+    const result = await pending
+    assert.equal(result.reason, undefined)
+    return 'stdout 每分钟心跳 40 分钟 → 0 次 kill'
+  })
+
+  await check('看门狗④b（Bug 2 保险）：CPU 时间不推进 + stdout 静默 → reason=stalled-no-progress 且打日志', async () => {
+    setState({ ...structuredClone(fixture), config: {} })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    let cpu = 5_000 // 全程不变 = 进程连 CPU 都没在烧
+    const logs = []
+    const originalError = console.error
+    console.error = (...args) => { logs.push(args.map(String).join(' ')) }
+    try {
+      const pending = fakeRun(child, clock, timers, { memberName: '材质', cpuProbe: () => cpu })
+      for (let minute = 1; minute <= 11; minute += 1) {
+        clock.t += 60_000
+        timers.tick()
+      }
+      assert.deepEqual(child.kills, ['SIGTERM'], '静默 + CPU 不推进必须先 SIGTERM')
+      const result = await pending
+      assert.equal(result.reason, 'stalled-no-progress', '实际 reason=' + result.reason)
+      assert.equal(result.error, '成员静默超过 10 分钟且 CPU 无进展，已终止（看门狗）')
+      const killLine = logs.find((line) => line.includes('[council] watchdog kill'))
+      assert.ok(killLine, '看门狗终止必须打一行日志，实际日志：' + JSON.stringify(logs))
+      assert.match(killLine, /^\[council\] watchdog kill 材质 reason=stalled-no-progress silent=\d+$/, '实际日志：' + killLine)
+      return killLine
+    } finally {
+      console.error = originalError
+    }
+  })
+
+  await check('看门狗④c：CPU 仍在推进（stdout 静默）→ 不标 stalled，按 idle-timeout 收尾', async () => {
+    setState({ ...structuredClone(fixture), config: {} })
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    let cpu = 1_000
+    const originalError = console.error
+    console.error = () => {}
+    try {
+      const pending = fakeRun(child, clock, timers, { memberName: '材质', cpuProbe: () => cpu })
+      for (let minute = 1; minute <= 11; minute += 1) {
+        clock.t += 60_000
+        cpu += 260 // 每 15s 都在烧 CPU（但 stdout 没输出）
+        timers.tick()
+      }
+      assert.deepEqual(child.kills, ['SIGTERM'], 'stdout 静默超阈值仍然要终止（CPU 推进只改 reason）')
+      const result = await pending
+      assert.equal(result.reason, 'idle-timeout', 'CPU 有推进时不该标 stalled-no-progress，实际 ' + result.reason)
+      return 'CPU 推进 + stdout 静默 → reason=idle-timeout（不误标 stalled）'
+    } finally {
+      console.error = originalError
+    }
   })
 
   await check('显式预算仍生效：审校等有界调用传 timeoutMs 到点 → reason=timeout（不是 idle-timeout）', async () => {
