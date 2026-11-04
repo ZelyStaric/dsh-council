@@ -49,7 +49,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, prelimReview, commanderReview, runDeepseekViaSeam, runDeepseekWithContinuation, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -1249,6 +1249,13 @@ try {
     try {
       await getState('?sessionId=session-g5') // g5 只有一个 deepseek 成员 → 走 seam
       const tool = registered.council_delegate
+      // 预先登记一个 11 分钟的 review 子代理：council_delegate 收尾时清扫器应把它释放
+      let sweptDisposed = 0
+      mod.residentChildren.clear()
+      mod.trackResidentChild('c4444444-4444-4444-8444-444444444444', 'review', {
+        at: Date.now() - 11 * 60_000,
+        dispose: async () => { sweptDisposed += 1 },
+      })
       const out = await tool.execute(
         { assignments: [{ member: '代码', task: '随便做点什么' }] },
         { callId: 'c-round-prune', agent: { id: 'agent-test' } },
@@ -1259,11 +1266,15 @@ try {
       assert.equal(existsSync(workOkDir), false, '重试成功那条（convId 已被自审顶替）没删掉')
       assert.ok(existsSync(selfReviewDir), '成员 convId 指向的子会话被误删了')
       assert.equal(findMember('m_code').convId, selfReviewId)
+      assert.equal(sweptDisposed, 1, 'council_delegate 收尾必须清扫 10 分钟以上的 review 子代理')
+      assert.equal(out.sweptChildren, 1, '回执必须带本轮释放数')
       const rendered = tool.output.render({}, out)[0].text
       assert.match(rendered, /## 子会话\n已清理 2 个子会话目录/)
-      return `prunedSessions=[${out.prunedSessions.join(',')}] · convId 指向的保留`
+      assert.match(rendered, /## 子进程回收\n- 已释放 1 个驻留子代理/)
+      return `prunedSessions=[${out.prunedSessions.join(',')}] · convId 指向的保留 · 清扫 1 个 review`
     } finally {
       ctx.get = prevGet
+      mod.residentChildren.clear()
       mod.__setRunKind(undefined)
     }
   })
@@ -2029,6 +2040,165 @@ try {
       setState(structuredClone(fixture))
     }
   })
+
+  /* ── 驻留子代理：审核不再带 __reuse + 清扫器 + /state|/progress 观测 ───── */
+
+  await check('审核/拆解调用不再带 __reuse：selfReview / prelimReview / commanderReview / planWithCommander 传给 seam 的 member 都没有 __reuse', async () => {
+    setState({
+      ...structuredClone(fixture),
+      config: { reuseAgents: false },
+      roles: [...fixture.roles, { id: 'r_cmd', name: '指挥', prompt: '指挥', kind: 'deepseek' }],
+      members: [...fixture.members, { id: 'm_cmd', name: '指挥', kind: 'deepseek', roleId: 'r_cmd', convId: 'conv-cmd' }],
+      groups: [{ id: 'g1', name: 'G1', memberIds: ['m_code', 'm_review', 'm_cmd'] }],
+    })
+    mod.__setCatalog({ codex: ['gpt-6.1-sol'], claude: ['claude-opus-5-5'], deepseek: ['deepseek-flash'], image: ['gpt-image-2.5-flare'] })
+    const seen = []
+    mod.__setRunKind(async (ctxArg, member) => {
+      seen.push({ id: member.id, reuse: member.__reuse, preset: member.__preset, residentKind: member.__residentKind })
+      return { ok: true, text: '{"ok":true,"reason":"通过"}', convId: 'child-review-' + member.id }
+    })
+    try {
+      const group = mod.state.groups[0]
+      const producer = mod.state.members.find((m) => m.id === 'm_code')
+      const parent = { id: 'parent-review' }
+      await mod.selfReview({}, producer, '任务', { text: '产出' }, {}, group, undefined, parent, 'call-rev-1')
+      await mod.prelimReview({}, group, producer, '任务', { text: '产出' }, {}, undefined, parent, undefined, 'call-rev-2')
+      await mod.commanderReview({}, group, producer, '任务', { text: '产出' }, {}, parent, undefined, undefined, 'call-rev-3')
+      await mod.planWithCommander({}, group, '做个东西', {}, parent, 'call-rev-4')
+      assert.ok(seen.length >= 4, '四类审核/拆解调用都应走到 seam，实际 ' + seen.length)
+      for (const entry of seen) {
+        assert.equal(entry.reuse, undefined, '审核/拆解调用不得再带 __reuse：' + JSON.stringify(entry))
+      }
+      assert.ok(seen.some((e) => e.id === 'm_cmd' && e.preset === 'minimal'), '指挥审核应走 minimal preset')
+      assert.ok(seen.some((e) => e.id === 'm_cmd' && e.residentKind === 'work'), '指挥拆解应标 __residentKind=work（清扫器按 work 保护）')
+      return `${seen.length} 次调用全部无 __reuse`
+    } finally {
+      mod.__setRunKind(undefined)
+      mod.__setCatalog(null)
+    }
+  })
+
+  await check('审核结束：reuseAgents=false → 子代理立即 dispose；reuseAgents=true → 保留并登记为驻留', async () => {
+    let disposeCount = 0
+    let childId = ''
+    const fakeSubagents = {
+      getProvider: () => ({ id: 'spawn' }),
+      startActivation: async () => ({
+        childId,
+        dispose: async () => { disposeCount += 1 },
+        result: Promise.resolve({ output: [{ type: 'text', text: '{"ok":true,"reason":"好"}' }], stopReason: 'completed' }),
+      }),
+    }
+    const fakeCtx = { get: (name) => (name === 'subagents' ? fakeSubagents : undefined) }
+    const run = () => mod.runDeepseekViaSeam(
+      fakeCtx,
+      { id: 'm_rev_seam', name: '审校', kind: 'deepseek' },
+      '审一下',
+      {},
+      { id: 'parent-seam' },
+      120_000,
+      'minimal',
+      undefined, undefined, undefined,
+    )
+    try {
+      setState({ ...structuredClone(fixture), config: { reuseAgents: false } })
+      mod.residentChildren.clear()
+      childId = 'child-review-dispose'
+      const off = await run()
+      assert.equal(off.ok, true, '假 seam 必须返回 ok：' + JSON.stringify(off))
+      assert.equal(disposeCount, 1, 'reuseAgents=false 时审核子代理必须 dispose 一次')
+      assert.equal(mod.residentChildren.has(childId), false, '被 dispose 的子代理不该登记为驻留')
+
+      setState({ ...structuredClone(fixture), config: { reuseAgents: true } })
+      mod.residentChildren.clear()
+      childId = 'child-work-keep'
+      const on = await mod.runDeepseekViaSeam(
+        fakeCtx,
+        { id: 'm_work_seam', name: '代码', kind: 'deepseek' },
+        '干活',
+        {},
+        { id: 'parent-seam' },
+        undefined,
+        undefined,
+        undefined, undefined, undefined,
+      )
+      assert.equal(on.ok, true)
+      assert.equal(mod.residentChildren.has(childId), true, 'reuseAgents=true 时保留的子代理必须登记（清扫器才看得到）')
+      assert.equal(mod.residentChildren.get(childId).kind, 'work')
+
+      // 复用路径补登记：既有 convId（例如重启前创建、登记表里没有）也要被清扫器看到
+      mod.residentChildren.clear()
+      let drained = []
+      const reuseCtx = {
+        get: (name) => (name === 'subagents'
+          ? { getProvider: () => ({ id: 'spawn' }), sendMessage: async () => {}, drainChildren: async (parent, ids) => { drained = ids } }
+          : name === 'agents'
+            ? { get: () => ({ status: 'idle', session: { snapshotEvents: () => [] } }) }
+            : undefined),
+      }
+      const revived = await mod.runDeepseekViaSeam(
+        reuseCtx,
+        { id: 'm_revive', name: '审校', kind: 'deepseek', convId: 'child-revive' },
+        '再审一次',
+        {},
+        { id: 'parent-seam' },
+        120_000,
+        'minimal',
+        undefined, undefined, undefined,
+      )
+      assert.ok(revived, '复用路径必须返回结果（假 agents 立刻 idle）')
+      assert.equal(mod.residentChildren.has('child-revive'), true, '复用到的既有子会话必须补登记')
+      assert.equal(mod.residentChildren.get('child-revive').kind, 'review')
+      await mod.residentChildren.get('child-revive').dispose()
+      assert.deepEqual(drained, ['child-revive'], '复用路径的释放走 subagents.drainChildren')
+      return 'false → dispose·不登记；true → 保留·登记 kind=work；复用路径补登记 + drainChildren 释放'
+    } finally {
+      mod.residentChildren.clear()
+      setState(structuredClone(fixture))
+    }
+  })
+
+  await check('清扫器：11 分钟 review 释放 / 9 分钟不动 / 成员 convId 指向的 work 不动 / 失联 work 释放 / dispose 抛错静默', async () => {
+    setState(structuredClone(fixture))
+    mod.residentChildren.clear()
+    const now = Date.now()
+    const disposed = []
+    findMember('m_code').convId = 'work-now'
+    const add = (id, kind, minutes, memberId, fail) => mod.trackResidentChild(id, kind, {
+      at: now - minutes * 60_000,
+      memberId,
+      dispose: async () => { if (fail) throw new Error('already gone'); disposed.push(id) },
+    })
+    add('rev-11', 'review', 11)
+    add('rev-9', 'review', 9)
+    add('work-now', 'work', 31, 'm_code')     // 成员 convId 仍指向它 → 保留
+    add('work-gone', 'work', 31, 'm_code')    // 成员已指向别处 → 释放
+    add('work-young', 'work', 20, 'm_code')   // 不到 30 分钟 → 保留
+    add('rev-throw', 'review', 12, undefined, true) // dispose 抛错 → 静默、不计入
+    try {
+      const released = await mod.sweepResidentChildren({ now })
+      assert.equal(released, 2, '只有 rev-11 与 work-gone 该真正释放，实际 ' + released)
+      assert.deepEqual(disposed.sort(), ['rev-11', 'work-gone'])
+      assert.equal(mod.residentChildren.has('rev-9'), true, '9 分钟的 review 不该动')
+      assert.equal(mod.residentChildren.has('work-now'), true, '成员 convId 还指向的 work 不该动')
+      assert.equal(mod.residentChildren.has('work-young'), true, '20 分钟的 work 不到 30 分钟不该动')
+      assert.equal(mod.residentChildren.has('rev-throw'), false, '释放失败的也要从登记表移除')
+      // 观测：/state 与 /progress 都暴露 residentChildren 数量
+      const stateRes = await (await fetch(base + '/state')).json()
+      assert.equal(stateRes.residentChildren, mod.residentChildren.size, '/state 的 residentChildren 必须是登记表大小')
+      const progressRes = await (await fetch(base + '/progress')).json()
+      assert.equal(progressRes.residentChildren, mod.residentChildren.size, '/progress 的 residentChildren 必须是登记表大小')
+      // 回执：只有本轮 dispose 过才出现「## 子进程回收」
+      const render = (value) => registered.council_delegate.output.render({}, value)[0].text
+      assert.match(render({ members: [], sweptChildren: 2 }), /## 子进程回收\n- 已释放 2 个驻留子代理/)
+      assert.doesNotMatch(render({ members: [], sweptChildren: 0 }), /子进程回收/, '没释放任何东西时不该出这一节')
+      return `released=${released} · 留下 ${mod.residentChildren.size} 个 · /state+/progress 均暴露 · 回执节按需出现`
+    } finally {
+      mod.residentChildren.clear()
+      setState(structuredClone(fixture))
+    }
+  })
+
 
   await check('看门狗回执：被静默终止的成员写「静默超时终止」、不重试、不进普通失败文案', async () => {
     setState(structuredClone(fixture))
