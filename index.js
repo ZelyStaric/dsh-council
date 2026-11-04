@@ -5,9 +5,9 @@
  * dispatch pipeline. Public surface is a small JSON HTTP API under
  * /council/api that the Client half calls with same-origin fetch.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'
@@ -58,8 +58,10 @@ const REVIEW_TEXT_HARD_CAP = 200_000
  *
  * 旧实现给每个成员一个总预算（默认 30 分钟）到点就 SIGTERM——长任务只要超过预算
  * 就会被杀，跟「是不是还在干活」无关。现在改成：
- *  - **静默看门狗**：只要 stdout/stderr（或 deepseek seam 的子代理状态/消息）还有变化
- *    就算活着；连续 `memberIdleMinutes`（默认 10 分钟）没有任何变化才终止；
+ *  - **静默看门狗**：只要 **stdout**（或 deepseek seam 的子代理状态/消息）还有变化
+ *    就算活着；连续 `memberIdleMinutes`（默认 10 分钟）没有任何变化才终止。
+ *    **stderr 不算活动**：codex 重试网络时会往 stderr 反复刷日志，把它当活动就等于
+ *    让「网络卡死」永远续命（2026-11-04 实测漏杀）。stderr 只进 `err` 供报错使用；
  *  - **极大兵底**：另留一个 `memberHardLimitMinutes`（默认 360 分钟 = 6 小时）的硬上限，
  *    防止「一直有输出但永不结束」的进程把机器拖住；设 0 = 完全不限制。
  *
@@ -439,15 +441,43 @@ function reviewText(output) {
 }
 
 /**
+ * 本进程 CPU 时间（毫秒）：`/proc/<pid>/stat` 的 utime+stime（第 14/15 字段）。
+ * 读不到（pid 不存在 / 无权限 / 非 Linux / 已退出）返回 null → 看门狗退化为「只看 stdout」。
+ *
+ * 只作为**第二判据**给「卡死」定性（reason=stalled-no-progress），不解除 stdout 静默判定：
+ * codex 网络重试每次只烧几毫秒 CPU，若拿「CPU 推进」当续命依据，正是这次漏杀的形态。
+ */
+const PROC_CLOCK_TICKS_PER_SEC = 100
+function readProcCpuMs(pid) {
+  if (!pid) return null
+  try {
+    const raw = readFileSync('/proc/' + pid + '/stat', 'utf8')
+    // comm 字段可能含空格/括号 → 从最后一个 ')' 之后开始切，避免错位
+    const close = raw.lastIndexOf(')')
+    if (close < 0) return null
+    const fields = raw.slice(close + 2).trim().split(/\s+/)
+    // fields[0]=state, utime 是整体第 14 字段 → 这里下标 11；stime 下标 12
+    const utime = Number(fields[11])
+    const stime = Number(fields[12])
+    if (!Number.isFinite(utime) || !Number.isFinite(stime)) return null
+    return Math.round(((utime + stime) * 1000) / PROC_CLOCK_TICKS_PER_SEC)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 可注入时钟的静默看门狗。
  *
  * 判定规则（`tick()` 由调用方按 interval 驱动）：
- *  - 静默（`now - lastActivity > idleTimeoutMs`）→ 返回 'idle-timeout' 并回调 onIdle；
- *  - 总时长达到 `hardLimitMs`（>0 才生效）→ 返回 'hard-limit' 并回调 onHardLimit；
+ *  - 静默（`now - lastActivity > idleTimeoutMs`）→ 回调 onIdle(reason) 并返回 reason：
+ *    · 传入 `cpuProbe` 且「本轮 CPU 时间没有推进」→ `'stalled-no-progress'`（连 CPU 都停了）
+ *    · 其余情况（CPU 仍在推进 / 读不到 /proc）→ `'idle-timeout'`
+ *  - 总时长达到 `hardLimitMs`（>0 才生效）→ 回调 onHardLimit 并返回 `'hard-limit'`；
  *  - 否则返回 null。
  *
- * `touch()` 在**任何活动**（stdout/stderr 数据、seam 子代理状态/消息变化）时调用。
- * 测试可传假 `now` 直接拨时钟，不需要真等 40 分钟。
+ * `touch()` 只在**真正的进展**（run() 里仅 stdout 数据；seam 里子代理状态/消息变化）时调用。
+ * 测试可传假 `now` 直接拨时钟，不需要真等 40 分钟；`cpuProbe` 也可注入假值。
  */
 function createIdleWatchdog({
   idleTimeoutMs,
@@ -456,19 +486,35 @@ function createIdleWatchdog({
   startedAt = undefined,
   onIdle,
   onHardLimit,
+  cpuProbe = undefined,
 } = {}) {
   const start = startedAt ?? now()
   let lastActivity = start
   let idleFired = false
   let hardFired = false
+  let lastCpu = null
+  let cpuAdvanced = false
+  const sampleCpu = () => {
+    if (typeof cpuProbe !== 'function') return
+    let value = null
+    try { value = cpuProbe() } catch { value = null }
+    if (!Number.isFinite(value)) { lastCpu = null; cpuAdvanced = false; return }
+    cpuAdvanced = lastCpu !== null && value > lastCpu
+    lastCpu = value
+  }
+  // 先取一次基线：第一个 tick 才能算出「CPU 有没有推进」
+  sampleCpu()
   return {
     touch(at = now()) { lastActivity = at },
     tick(at = now()) {
+      sampleCpu()
       // 严格大于：正好 idle 分钟时还不算超（11 分钟 > idle=10 才杀）
       if (!idleFired && idleTimeoutMs > 0 && at - lastActivity > idleTimeoutMs) {
         idleFired = true
-        if (onIdle) onIdle()
-        return 'idle-timeout'
+        // 读不到 /proc（lastCpu=null）或读数是推进的 → 仍按 idle-timeout 处理，不误判「彻底卡死」
+        const reason = lastCpu !== null && !cpuAdvanced ? 'stalled-no-progress' : 'idle-timeout'
+        if (onIdle) onIdle(reason)
+        return reason
       }
       if (!hardFired && hardLimitMs > 0 && at - start > hardLimitMs) {
         hardFired = true
@@ -482,6 +528,7 @@ function createIdleWatchdog({
     get lastActivity() { return lastActivity },
     get idledOut() { return idleFired },
     get hardLimited() { return hardFired },
+    get cpuKnown() { return lastCpu !== null },
   }
 }
 
@@ -491,9 +538,13 @@ function formatMinutes(ms) {
   return Number.isInteger(minutes) ? String(minutes) : String(Math.round(minutes * 100) / 100)
 }
 
+/** 看门狗的「静默 / 卡死」类原因：重试、回执、进度条统一按这个集合判断。 */
+const SILENT_KILL_REASONS = new Set(['idle-timeout', 'stalled-no-progress'])
+
 /** 看门狗终止原因 → 面向用户的中文错误（回执/日志共用）。 */
 function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes } = {}) {
   if (reason === 'idle-timeout') return `成员静默超过 ${idleMinutes} 分钟，已终止（看门狗）`
+  if (reason === 'stalled-no-progress') return `成员静默超过 ${idleMinutes} 分钟且 CPU 无进展，已终止（看门狗）`
   if (reason === 'hard-limit') return `成员超过硬上限 ${hardLimitMinutes} 分钟，已终止（看门狗）`
   if (reason === 'cancelled') return '已被用户停止'
   if (reason === 'timeout') return '成员超过本次调用的显式超时，已终止'
@@ -503,12 +554,20 @@ function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes } = {}) {
 /**
  * Collect stdout+stderr of one child process.
  *
- * **没有总时长超时**（2026-11-03 起）：只要还有 stdout/stderr 输出就算活着；
- * 连续 `idleMs` 没有输出 → 先 SIGTERM、`killGraceMs` 后 SIGKILL，结果带
- * `reason:'idle-timeout'` 与中文 error。`hardLimitMs` 默认 6 小时，0 = 不限制。
- * 显式传 `timeoutMs`（审校等有界调用）时仍按总时长终止（reason:'timeout'）。
+ * **没有总时长超时**（2026-11-03 起）：只要 **stdout** 还有输出就算活着；
+ * 连续 `idleMs` 没有输出 → 先 SIGTERM、`killGraceMs` 后 SIGKILL。`hardLimitMs`
+ * 默认 6 小时，0 = 不限制。显式传 `timeoutMs`（审校等有界调用）时仍按总时长
+ * 终止（reason:'timeout'）。
  *
- * `spawnImpl` / `clock` / `setIntervalFn` / `setTimeoutFn` 只供测试注入。
+ * **stderr 不再续命**（2026-11-04）：codex 卡在 SYN-SENT 时会往 stderr 反复刷重试
+ * 日志，旧实现把它当活动 → 看门狗永远不触发。现在 stderr 只收集进 `err`。
+ *
+ * **第二判据（CPU）**：每 `tickMs`（默认 15s）读一次 `/proc/<pid>/stat` 的
+ * utime+stime；stdout 静默超阈值且 **CPU 时间也没推进** → reason='stalled-no-progress'，
+ * 否则（CPU 仍在推进 / 读不到 /proc）→ reason='idle-timeout'。读不到时退化为只看 stdout。
+ * 终止时打一行日志：`[council] watchdog kill <member> reason=<id> silent=<秒>`。
+ *
+ * `spawnImpl` / `clock` / `setIntervalFn` / `setTimeoutFn` / `cpuProbe` 只供测试注入。
  */
 function run(bin, args, options = {}) {
   const {
@@ -521,6 +580,7 @@ function run(bin, args, options = {}) {
     hardLimitMs = memberHardLimitMs(),
     killGraceMs = MEMBER_KILL_GRACE_MS,
     tickMs = WATCHDOG_TICK_MS,
+    memberName,
     onActivity,
     spawnImpl = spawn,
     clock = () => Date.now(),
@@ -528,6 +588,7 @@ function run(bin, args, options = {}) {
     clearIntervalFn = clearInterval,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
+    cpuProbe = (pid) => readProcCpuMs(pid),
   } = options
   return new Promise((resolve) => {
     const limitMb = options.maxMemoryMb !== undefined ? options.maxMemoryMb : memberMaxMemoryMb()
@@ -568,6 +629,13 @@ function run(bin, args, options = {}) {
     const terminate = (reason) => {
       if (settled || endedBy) return
       endedBy = reason
+      // 看门狗终止留一行现场：成员名 + 原因 + stdout 已经静默多少秒（方便事后对账）
+      if (reason === 'idle-timeout' || reason === 'stalled-no-progress') {
+        try {
+          console.error('[council] watchdog kill ' + (memberName || 'member')
+            + ' reason=' + reason + ' silent=' + Math.round(watchdog.silentMs(clock()) / 1000))
+        } catch { /* ignore */ }
+      }
       try { child.kill('SIGTERM') } catch { /* ignore */ }
       graceTimer = setTimeoutFn(hardKill, killGraceMs)
     }
@@ -575,9 +643,12 @@ function run(bin, args, options = {}) {
       idleTimeoutMs: idleMs,
       hardLimitMs,
       now: clock,
-      onIdle: () => terminate('idle-timeout'),
+      onIdle: (reason) => terminate(reason),
       onHardLimit: () => terminate('hard-limit'),
+      // 每 tick 采样一次本进程 CPU 时间（读不到 → null → 退化为只看 stdout）
+      cpuProbe: typeof cpuProbe === 'function' ? () => cpuProbe(child.pid) : undefined,
     })
+    // 只有 stdout 算「有进展」：stderr 只收进 err（codex 网络重试会把 stderr 刷满）
     const noteActivity = () => {
       watchdog.touch()
       if (onActivity) { try { onActivity() } catch { /* ignore */ } }
@@ -594,7 +665,7 @@ function run(bin, args, options = {}) {
       else signal.addEventListener('abort', onAbort, { once: true })
     }
     child.stdout.on('data', (b) => { out += b; noteActivity() })
-    child.stderr.on('data', (b) => { err += b; noteActivity() })
+    child.stderr.on('data', (b) => { err += b })
     child.on('error', (e) => {
       finish({ code: -1, out, err: `${err}${e.message}`, reason: endedBy ?? undefined })
     })
@@ -621,12 +692,12 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
-  const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity })
+  const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
   const events = jsonLines(out)
   const started = events.find((e) => e.type === 'thread.started')
   const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
@@ -648,7 +719,7 @@ async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, time
 }
 
 /** One Claude Code turn. Resumes the stored session when present. */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -658,7 +729,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   if (resume) args.push('--resume', resume)
-  const { code, out, err, reason, error: killedError } = await run(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity })
+  const { code, out, err, reason, error: killedError } = await run(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
   const events = jsonLines(out)
   const texts = []
   for (const event of events) {
@@ -759,8 +830,14 @@ async function continueChild(ctx, parent, member, prompt, timeoutMs, callId, con
   const subagents = ctx.get('subagents')
   const agents = ctx.get('agents')
   if (!subagents || !agents || typeof subagents.sendMessage !== 'function') return null
+  // 没有父 agent（例如页面「确认并分发」这条执行路径）时不能走 reuse：
+  // sendMessage 的第一个参数是父 agent，缺了它内部会直接抛错。
+  if (!parent) return null
+  // signal 必须是真 AbortSignal：DSH 内部会调 signal.throwIfAborted()，
+  // 传 undefined 会抛 "Cannot read properties of undefined (reading 'throwIfAborted')"。
+  const signal = signalFor(callId) || new AbortController().signal
   try {
-    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal: signalFor(callId) })
+    await subagents.sendMessage(parent, member.convId, [{ type: 'text', text: prompt }], { signal })
   } catch (error) {
     console.error('[council] reuse sendMessage failed:', String((error && error.stack) || error))
     return null
@@ -1375,6 +1452,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       idleMs,
       hardLimitMs,
       onActivity,
+      memberName: member.name,
     })
   }
   if (result.convId) member.convId = result.convId
@@ -1533,7 +1611,34 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   }
 }
 
+/** 成员终态：onStage 与进度条一起写；`finishedAt` 一落，前端就不再显示「静默 Ns」。 */
+function finishMemberStage(callId, member, onStage, stage) {
+  if (onStage) onStage(stage)
+  if (callId) progressSet(callId, member.id, { finishedAt: Date.now(), stage })
+}
+
+/** 终态文案里的原因：压成一行并截短（进度条只有一行可放）。 */
+function shortStageText(value, max = 48) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > max ? text.slice(0, max) + '…' : text
+}
+
+/**
+ * 成员执行入口：只做异常兜底。
+ * **终态（完成 / 失败（原因）/ 已停止 / 静默超时）由 callMemberImpl 的每条 return 路径写**，
+ * 这里补的是「审核 / 子会话直接抛错」那条路径——否则进度条会永远停在中途阶段。
+ */
 async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
+  try {
+    return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
+  } catch (error) {
+    finishMemberStage(callId, member, onStage, '失败（内部错误：' + (shortStageText(error?.message) || '未知错误') + '）')
+    throw error
+  }
+}
+
+async function callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   const role = roleOf(member)
   const memory = (state.memberMemory || {})[member.id]
   const memoryBlock = memory && memory.digest && (state.config || {}).memoryInject !== false
@@ -1549,7 +1654,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   const maxAttempts = 2
   let attempt = 1
   // 静默超时（看门狗）不重试：再发一次大概率还是静默，先把「静默超时终止」如实回报。
-  while (!result.ok && attempt < maxAttempts && result.reason !== 'idle-timeout' && result.reason !== 'cancelled') {
+  while (!result.ok && attempt < maxAttempts && !SILENT_KILL_REASONS.has(result.reason) && result.reason !== 'cancelled') {
     attempt += 1
     const why = String(result.error || '无输出')
     if (onStage) onStage('重试中（第 ' + attempt + ' 次，上次：' + why.slice(0, 40) + '）')
@@ -1558,7 +1663,10 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     await save().catch(() => {})
   }
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
-  if (callCancelled(callId)) return { memberId: member.id, name: member.name, role: role?.name, kind: member.kind, model: member.model, ok: false, accepted: false, acceptance: 'cancelled', text: '', error: '已被用户停止' }
+  if (callCancelled(callId)) {
+    finishMemberStage(callId, member, onStage, '已停止')
+    return { memberId: member.id, name: member.name, role: role?.name, kind: member.kind, model: member.model, ok: false, accepted: false, acceptance: 'cancelled', text: '', error: '已被用户停止' }
+  }
   if (onWork) { try { onWork(result) } catch { /* ignore */ } }
   if (result && result.ok) {
     // 用完即弃的子 agent：把这次的关键结论压成摘要，下一轮重新注入
@@ -1636,6 +1744,18 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     }
   }
 
+  // ── 终态：所有 return 路径都必须落一次（旧实现只写「终审（指挥）」，UI 会永远停在那里）──
+  const finalStage = (() => {
+    if (callCancelled(callId) || result.reason === 'cancelled') return '已停止'
+    if (SILENT_KILL_REASONS.has(result.reason)) return '静默超时'
+    if (!result.ok) return '失败（' + (shortStageText(result.error) || '成员没有产出') + '）'
+    if (reworkFailed) return '失败（返工失败：' + (shortStageText(reworkError) || '未返回产出') + '）'
+    if (acceptance === 'rejected') return '失败（验收未通过）'
+    if (acceptance === 'unverified') return '失败（审核未判定）'
+    return '完成'
+  })()
+  finishMemberStage(callId, member, onStage, finalStage)
+
   return {
     memberId: member.id,
     name: member.name,
@@ -1654,7 +1774,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     ...result.continued === undefined ? {} : { continued: result.continued },
     // 看门狗终止原因（idle-timeout / hard-limit / cancelled）：回执据此写「静默超时终止」
     ...result.reason === undefined ? {} : { reason: result.reason },
-    ...result.reason === 'idle-timeout' ? { idleTimeout: true } : {},
+    ...SILENT_KILL_REASONS.has(result.reason) ? { idleTimeout: true } : {},
     review,
     ...review.attempts > 1 ? { attempts: review.attempts } : {},
   }
@@ -1866,6 +1986,36 @@ export function apply(ctx, config = {}) {
   })
 }
 
+/** 带 ETag 的 JSON 响应：客户端带着 If-None-Match 来就回 304，正文 0 字节。
+ *  /state 有 500KB+（delegations 占大头），小组界面又是 1.5~6 秒轮询一次，
+ *  远程访问时这点流量足以把链路堵满 —— 304 之后每次轮询只要几百字节头。 */
+function sendTagged(req, res, body) {
+  const text = JSON.stringify(body)
+  const tag = '"' + createHash('sha1').update(text).digest('base64url').slice(0, 22) + '"'
+  if (req.headers['if-none-match'] === tag) {
+    res.writeHead(304, { etag: tag, 'cache-control': 'no-cache' })
+    res.end()
+    return
+  }
+  res.writeHead(200, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-cache',
+    etag: tag,
+  })
+  res.end(text)
+}
+
+/** 轮询用的精简状态：delegations 只留每个会话最近 N 条，避免正文无限膨胀。 */
+function pollStateView(state) {
+  const MAX = 40
+  const delegations = {}
+  for (const [sid, value] of Object.entries(state.delegations || {})) {
+    if (value && Array.isArray(value.entries)) delegations[sid] = { ...value, entries: value.entries.slice(-MAX) }
+    else delegations[sid] = value
+  }
+  return { ...state, delegations }
+}
+
 /** Build the JSON handler; exported so a plain Node harness can exercise it. */
 export function createHandler(ctx, config = {}) {
   return async function councilHandler(req, res) {
@@ -1887,7 +2037,7 @@ export function createHandler(ctx, config = {}) {
                 if (group && agent) bindAgent(ctx, config, group, agent)
               }
             } catch { /* 绑定失败不影响状态读取 */ }
-            return send(res, 200, { state, config: publicConfig(config) })
+            return sendTagged(req, res, { state: pollStateView(state), config: publicConfig(config) })
           }
           if (req.method === 'POST') {
             const body = await readBody(req)
@@ -2171,11 +2321,13 @@ export function createHandler(ctx, config = {}) {
               // 既有字段名一律保留；只追加只读派生字段：
               //  - runningMs：跑了多久
               //  - silentMs（每个成员条目）：距最后一次活动过了多久，前端 >3 分钟显示「静默 Ns」
+              //  - 成员已有 finishedAt（终态已写）→ silentMs 固定 0：它不是在等，只是记录还在
               const members = {}
               for (const [memberId, slot] of Object.entries(entry.members || {})) {
                 // 最后活动时间：成员条目 → 整条 entry → 开工时间（老条目没有 lastActivity）
                 const last = (slot && (slot.lastActivity ?? slot.at)) ?? entry.lastActivity ?? entry.startedAt ?? 0
-                members[memberId] = Object.assign({}, slot, { silentMs: Math.max(0, now - last) })
+                const silentMs = slot && slot.finishedAt ? 0 : Math.max(0, now - last)
+                members[memberId] = Object.assign({}, slot, { silentMs })
               }
               out[id] = Object.assign({}, entry, {
                 members,
@@ -2284,7 +2436,7 @@ async function executeRun(ctx, config, run) {
     slot.error = result.error ?? result.reworkError
     // 看门狗终止要能跟普通失败区分开（前端/回执都靠这个字段）
     if (result.reason) slot.reason = result.reason
-    if (result.reason === 'idle-timeout') slot.silentTimeout = true
+    if (SILENT_KILL_REASONS.has(result.reason)) slot.silentTimeout = true
     if (result.image) slot.image = result.image
     if (result.review) slot.review = result.review
     if (result.attempts) slot.attempts = result.attempts
@@ -3102,7 +3254,7 @@ function bindAgent(ctx, config, group, agent) {
             : ''
           const rows = (value.members || []).map((m) => {
             // 被看门狗静默终止 ≠ 普通失败：写明原因，别让回执看起来像代码/网络错误
-            const idleTimeout = m.reason === 'idle-timeout'
+            const idleTimeout = SILENT_KILL_REASONS.has(m.reason)
             const body = m.ok ? (m.text || '') : ((idleTimeout ? '静默超时终止：' : '失败：') + (m.error || ''))
             const image = m.image ? `\n[image] ${m.image}` : ''
             const review = m.review
@@ -3239,7 +3391,7 @@ function bindAgent(ctx, config, group, agent) {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
               const body = work.ok
                 ? (work.text || '')
-                : ((work.reason === 'idle-timeout' ? '静默超时终止：' : '失败：') + (work.error || ''))
+                : ((SILENT_KILL_REASONS.has(work.reason) ? '静默超时终止：' : '失败：') + (work.error || ''))
               append('## ' + member.name + '（' + member.kind + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
             }, callId, childSessions)
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
@@ -3276,12 +3428,17 @@ function bindAgent(ctx, config, group, agent) {
             ...result.acceptance === undefined ? {} : { acceptance: result.acceptance },
             ...result.reworkError === undefined ? {} : { reworkError: String(result.reworkError) },
             ...result.reason === undefined ? {} : { reason: result.reason },
-            ...result.reason === 'idle-timeout' ? { idleTimeout: true } : {},
+            ...SILENT_KILL_REASONS.has(result.reason) ? { idleTimeout: true } : {},
           }
         }))
+        // 终态（含失败原因）已由 callMember 写；这里只给「没走到 callMember」的条目兜底补
+        // finishedAt，绝不覆盖已有终态（旧实现无条件写「完成」，会把「终审（指挥）」洗成假完成）。
         for (const item of assignments) {
           const done = state.members.find((m) => m.id === item.member || m.name === item.member)
-          if (done) progressSet(callId, done.id, { stage: '完成' })
+          if (!done) continue
+          const slot = progressMap.get(callId)?.members?.[done.id]
+          if (slot && slot.finishedAt) continue
+          progressSet(callId, done.id, { finishedAt: Date.now(), stage: slot?.stage && slot.stage !== '排队中' ? slot.stage : '完成' })
         }
         entry.endSeq = currentSeq()
         entry.running = false
@@ -3298,7 +3455,14 @@ function bindAgent(ctx, config, group, agent) {
             const progressEntry = progressMap.get(callId)
             if (progressEntry) {
               if (progressEntry.members) delete progressEntry.members[PROGRESS_STAGE_ID]
-              finishProgressEntry(progressEntry, Date.now())
+              // 成员槽兜底：异常/崩溃路径没走到终态时也别留一个永远「静默 Ns」的成员条
+              const nowMs = Date.now()
+              for (const slot of Object.values(progressEntry.members || {})) {
+                if (!slot || slot.finishedAt) continue
+                slot.finishedAt = nowMs
+                if (!slot.stage || slot.stage === '排队中') slot.stage = '已结束'
+              }
+              finishProgressEntry(progressEntry, nowMs)
             }
             activeCalls.delete(callId)
           }

@@ -160,8 +160,10 @@ window.__ModuleLoader__.load({
     /**
      * 进度条成员条目的「静默」提示：服务端 /progress 每个成员条目带 `silentMs`
      * （now - 最后一次活动）。超过 3 分钟才显示，免得正常思考的几秒也在闪。
+     * 已有 `finishedAt`（终态）的成员一律不显示：它不在等，只是记录还在。
      */
     function silenceSuffix(member) {
+      if (member && member.finishedAt) return ''
       const silentMs = Number(member && member.silentMs)
       if (!Number.isFinite(silentMs) || silentMs <= 180_000) return ''
       return ' · 静默 ' + Math.round(silentMs / 1000) + 's'
@@ -1017,7 +1019,7 @@ window.__ModuleLoader__.load({
           }).catch(() => {})
         }
         load()
-        const timer = setInterval(load, 2000)
+        const timer = setInterval(() => { if (!document.hidden) load() }, 5000)
         return () => { alive = false; clearInterval(timer) }
       }, [phase, props && props.callId])
 
@@ -1033,7 +1035,7 @@ window.__ModuleLoader__.load({
             ? members.map((m, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 } },
               h(Avatar, { kind: m.kind, name: m.name }),
               h('span', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
-                + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '') + silenceSuffix(m))))
+                + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')) + silenceSuffix(m))))
             : h('div', { style: styles.muted }, stageEntry
               ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中')
               : (planned.length ? planned.join('、') + '（等待开始）' : '准备中')))
@@ -1168,7 +1170,7 @@ window.__ModuleLoader__.load({
         }
         reload()
         councilListeners.add(reload)
-        const timer = setInterval(reload, 5000)
+        const timer = setInterval(() => { if (!document.hidden) reload() }, 8000)
         return () => { alive = false; councilListeners.delete(reload); clearInterval(timer) }
       }, [])
 
@@ -1247,7 +1249,7 @@ window.__ModuleLoader__.load({
         let alive = true
         const load = () => call('/state').then((d) => { if (alive) setState(d.state) }).catch(() => {})
         load()
-        const timer = setInterval(load, 4000)
+        const timer = setInterval(() => { if (!document.hidden) load() }, 8000)
         return () => { alive = false; clearInterval(timer) }
       }, [])
 
@@ -1333,7 +1335,7 @@ window.__ModuleLoader__.load({
           }).catch(() => {})
         }
         load()
-        const timer = setInterval(load, 2000)
+        const timer = setInterval(() => { if (!document.hidden) load() }, 5000)
         return () => { alive = false; clearInterval(timer) }
       }, [sessionId])
       const [hasChat, setHasChat] = useState(false)
@@ -1345,7 +1347,7 @@ window.__ModuleLoader__.load({
           setHasChat(Boolean(sessionId && hist[sessionId] && (hist[sessionId].entries || []).length))
         }).catch(() => {})
         load()
-        const timer = setInterval(load, 6000)
+        const timer = setInterval(() => { if (!document.hidden) load() }, 10000)
         return () => { alive = false; clearInterval(timer) }
       }, [sessionId])
 
@@ -1394,7 +1396,9 @@ window.__ModuleLoader__.load({
       h('span', { style: styles.muted }, total === null ? '' : total + 's'),
       members.length
         ? members.map((m, i) => h('span', { key: i, style: styles.chip },
-          (m.name || '成员') + ' · ' + (m.stage || '…') + (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '') + silenceSuffix(m)))
+          (m.name || '成员') + ' · ' + (m.stage || '…')
+          + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))
+          + silenceSuffix(m)))
         : h('span', { style: styles.muted }, idleText),
       h('span', { style: { flex: 1 } }),
       h('span', {
@@ -1429,7 +1433,7 @@ window.__ModuleLoader__.load({
         let alive = true
         const load = () => call('/state').then((d) => { if (alive) { setState(d.state); setNow(Date.now()) } }).catch(() => {})
         load()
-        const timer = setInterval(load, 1500)
+        const timer = setInterval(() => { if (!document.hidden) load() }, 4000)
         return () => { alive = false; clearInterval(timer) }
       }, [])
 

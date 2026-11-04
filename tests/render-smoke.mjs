@@ -131,6 +131,8 @@ const PROGRESS_CASES = [
   // 看门狗：静默 > 3 分钟要在成员条目上显示「静默 Ns」（silentMs 由服务端 /progress 计算）
   ['silent-4min', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 240_000, silentMs: 240_000 } } }, ['代码 · 执行中', '静默 240s', '停止'], ['准备中…']],
   ['active-fresh', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 5_000, silentMs: 5_000 } } }, ['代码 · 执行中', '停止'], ['静默 ']],
+  // Bug 1 回归：已收尾（finishedAt）的成员不再显示静默，也不再显示一直涨的秒数
+  ['finished', { startedAt: NOW - 9_000_000, members: { m1: { name: '材质', kind: 'claude', stage: '完成', at: NOW - 6_400_000, lastActivity: NOW - 6_400_000, finishedAt: NOW - 6_300_000, silentMs: 6_400_000 } } }, ['材质 · 完成', '停止'], ['静默', '· 6400s']],
 ]
 for (const [label, entry, need, forbid] of PROGRESS_CASES) {
   try {
