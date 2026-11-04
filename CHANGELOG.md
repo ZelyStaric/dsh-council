@@ -16,6 +16,12 @@
 - `mandateText()` 增加硬规则：『验收未通过』≠ 交付 —— 不得把未通过验收的回执当成果汇报。
 - `config.authoritativeReviewer`（`any` 默认 / `commander`）：`commander` 下以指挥终审为准，
   审校与指挥冲突时不再判失败；`GET/POST /council/api/config` 读写。
+- **越权审计（方案 B，只审计不拦截）**：`tools.guard` 放行 `bash` / `read_image` /
+  `grep+glob+read+read_file` 时分别计入 `selfRan.bash` / `selfRan.readImage` / `selfRan.read`；
+  `council_delegate` 回执末尾在本次增量 >0 时输出 `## 越权审计`，output 新增
+  `selfRan: { bash, readImage, read }`（没有则全 0）。Δ 口径为**水位线**：`execute` 收尾时
+  Δ = 当前累计计数 − 本组已报水位，报完立刻把水位推到当前计数——**先跑 bash 再派活**也会在
+  下一次回执里报出来，已经报过的不重复报（紧接着再派一次且无新调用时 Δ=0）。
 
 ## [0.2.4] — 2026-10-29
 

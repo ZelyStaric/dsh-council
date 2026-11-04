@@ -2660,7 +2660,8 @@ function mandateText(group) {
  *
  * 系统提示词拦不住（实测：一个 2.5D 会话里父会话自己跑了 bash 120 次 / edit 12 次 /
  * blender_python 6 次 / blender_render 10 次，只派活 25 次），所以在 `agent.ctx.tools.guard()`
- * 上加一道单调守卫：写类工具直接拒绝，只读工具与 bash 放行（bash 只计审计数）。
+ * 上加一道单调守卫：写类工具直接拒绝；只读工具、read_image 与 bash 放行，但计入
+ * `selfRan`（方案 B：bash / read_image / grep+glob+read 自己跑也要审计，只是不拦）。
  * 逃生口：state.config.strictDelegate=false，或本轮最后一条用户消息里明确让父会话自己动手。
  */
 const WRITE_TOOLS = new Set([
@@ -2675,24 +2676,80 @@ const SELF_WORK_ESCAPE = /你自己做|你直接改|你亲自动手|放行/
 /** 拒绝理由：与 mandateText 的措辞一致，并给出两条逃生路径。 */
 const SELF_WORK_DENY_REASON = '小组模式：不要自己执行写操作。用 council_delegate 派给成员；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。'
 
-/** 按组累加的越权审计：{ blocked, tools: { [name]: count }, bash, lastAt }。 */
+/**
+ * 方案 B：只读工具分组 —— 放行但计数。父会话自己 grep/读代码/看图判读，
+ * 用户同样看不到，所以和 bash 一样进回执审计（只审计、不拦截）。
+ */
+const READ_TOOLS = new Set(['grep', 'glob', 'read', 'read_file'])
+
+/**
+ * 按组累加的越权审计：{ blocked, tools: { [name]: count }, bash, readImage, read, lastAt }。
+ *
+ * 累计的是「本组从会话开始到现在的全部计数」；回执只报「上次回执之后」的增量，口径固定为
+ * **水位线**：`council_delegate.execute` 收尾时 Δ = 当前累计计数 − 本组水位，报完立刻把水位
+ * 推到当前计数（已经报过的不再重复报）。
+ *
+ * 为什么基线不能放在 execute 开头：父会话最常见的顺序是「先跑 bash 排查、再派活」，那样
+ * 基线在 bash 之后才取，Δ 恒为 0 —— 用户要的是「父会话又自己干了什么」，只要发生了就该在
+ * 下一次回执里看到。
+ */
 const selfWorkAudit = new Map()
+/**
+ * 按组的「已报水位」：{ bash, readImage, read }。纯内存，随组首次使用时初始化，
+ * 只由 council_delegate 收尾推进；resetSelfWorkAudit 会一并清掉，避免复位后的旧水位把新计数吃掉。
+ */
+const selfRanWatermark = new Map()
 /** 按组缓存的本轮「用户已放行」判定（守卫里读它；delegate 开始时也会刷新一次）。 */
 const selfWorkPermits = new Map()
 
 function selfWorkAuditFor(groupId) {
   let entry = selfWorkAudit.get(groupId)
   if (!entry) {
-    entry = { blocked: 0, tools: {}, bash: 0, lastAt: 0 }
+    entry = { blocked: 0, tools: {}, bash: 0, readImage: 0, read: 0, lastAt: 0 }
     selfWorkAudit.set(groupId, entry)
   }
   return entry
 }
 
-/** 清空审计（不传 groupId 清全部；测试与重新开始一轮时用）。 */
+/** 本组的已报水位（缺就建 {0,0,0}；随组初始化，纯内存）。 */
+function selfRanWatermarkFor(groupId) {
+  let mark = selfRanWatermark.get(groupId)
+  if (!mark) {
+    mark = { bash: 0, readImage: 0, read: 0 }
+    selfRanWatermark.set(groupId, mark)
+  }
+  return mark
+}
+
+/** 只取「父会话自行执行」的三组计数（缺字段按 0：老数据、被复位、无 entry 都不出 undefined）。 */
+function selfRanOf(entry) {
+  return {
+    bash: Number(entry && entry.bash) || 0,
+    readImage: Number(entry && entry.readImage) || 0,
+    read: Number(entry && entry.read) || 0,
+  }
+}
+
+/** Δ = 当前累计计数 − 已报水位；计数被复位/倒退时按 0 兜底，绝不出负数。 */
+function selfRanDelta(now, watermark) {
+  const after = selfRanOf(now)
+  const before = selfRanOf(watermark)
+  return {
+    bash: Math.max(0, after.bash - before.bash),
+    readImage: Math.max(0, after.readImage - before.readImage),
+    read: Math.max(0, after.read - before.read),
+  }
+}
+
+/** 清空审计与水位（不传 groupId 清全部；测试与重新开始一轮时用）。 */
 function resetSelfWorkAudit(groupId) {
-  if (groupId === undefined) selfWorkAudit.clear()
-  else selfWorkAudit.delete(groupId)
+  if (groupId === undefined) {
+    selfWorkAudit.clear()
+    selfRanWatermark.clear()
+  } else {
+    selfWorkAudit.delete(groupId)
+    selfRanWatermark.delete(groupId)
+  }
 }
 
 /** 「edit×2、blender_render×1」这种可读分布（次数降序，同次数按名字）。 */
@@ -2757,10 +2814,23 @@ function makeSelfWorkGuard(group, config) {
     if (normalizeSessionId(execution.agent.id) !== normalizeSessionId(live.sessionId)) return undefined
     if (!strictDelegateEnabled(config)) return undefined
     const name = String(execution.name || '')
-    // bash 只计入审计，不拦截（否则连只读排障都做不了）
+    // 以下三类只计入审计、不拦截（否则连只读排障都做不了）：
+    //   bash → selfRan.bash；read_image → selfRan.readImage；grep/glob/read/read_file → selfRan.read
     if (name === 'bash') {
       const audit = selfWorkAuditFor(groupId)
       audit.bash += 1
+      audit.lastAt = Date.now()
+      return undefined
+    }
+    if (name === 'read_image') {
+      const audit = selfWorkAuditFor(groupId)
+      audit.readImage += 1
+      audit.lastAt = Date.now()
+      return undefined
+    }
+    if (READ_TOOLS.has(name)) {
+      const audit = selfWorkAuditFor(groupId)
+      audit.read += 1
       audit.lastAt = Date.now()
       return undefined
     }
@@ -3331,6 +3401,16 @@ function bindAgent(ctx, config, group, agent) {
             prunedSessions: { type: 'array', items: { type: 'string' }, description: '本次清理的子会话目录 id（pruneChildSessions:false 时不清理）' },
             selfWorkBlocked: { type: 'integer', description: '本组累计被守卫拦下的父会话写操作次数（0 表示没有越权）' },
             selfWorkBlockedDetail: { type: 'string', description: '被拦工具分布，如 edit×2、blender_render×1' },
+            selfRan: {
+              type: 'object',
+              description: '自上次 council_delegate 回执以来，父会话自行执行的放行工具增量（只审计、不拦截）：bash / read_image / grep+glob+read+read_file。没有则全 0。',
+              properties: {
+                bash: { type: 'integer', description: '自上次回执以来自行执行的 bash 次数' },
+                readImage: { type: 'integer', description: '自上次回执以来自行调用的 read_image 次数（自己看图判读）' },
+                read: { type: 'integer', description: '自上次回执以来自行调用的 grep/glob/read/read_file 次数' },
+              },
+              additionalProperties: true,
+            },
             plan: { type: 'object', additionalProperties: true },
             acceptanceStatus: {
               type: 'string',
@@ -3399,6 +3479,18 @@ function bindAgent(ctx, config, group, agent) {
             ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + selfWorkBlocked + ' 次写操作，已拦截'
               + (value.selfWorkBlockedDetail ? '（' + value.selfWorkBlockedDetail + '）' : '')
             : ''
+          // 方案 B：父会话本次自行执行了放行工具（bash / read_image / 只读）→ 末尾审计一节。
+          // 只审计、不拦截；三项全 0 时不输出，避免每条回执都挂一段噪音。
+          const selfRan = {
+            bash: Number(value.selfRan?.bash) || 0,
+            readImage: Number(value.selfRan?.readImage) || 0,
+            read: Number(value.selfRan?.read) || 0,
+          }
+          const selfRanTotal = selfRan.bash + selfRan.readImage + selfRan.read
+          const selfRanSection = selfRanTotal > 0
+            ? '\n\n## 越权审计\n- 父会话本次自行执行：bash×' + selfRan.bash + '、read_image×' + selfRan.readImage + '、read×' + selfRan.read
+              + '\n- 提示：这些应在小组内派给成员；如必要请说明理由'
+            : ''
           // 验收没通过：结尾再落一处结构化结论（与顶部 ⛔ 同一结论），父会话/程序都能对上
           const acceptanceSection = notAccepted
             ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
@@ -3406,7 +3498,7 @@ function bindAgent(ctx, config, group, agent) {
             : ''
           // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
           const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
-          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection }]
+          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection }]
         },
       },
       async execute(args, exec) {
@@ -3608,6 +3700,14 @@ function bindAgent(ctx, config, group, agent) {
         }
         // created 改成普通字段；pruned 保持字符串数组。出口再做一次 JSON 往返自检。
         response.staffingCreated = ephemeral.filter((id) => typeof id === 'string')
+        // 方案 B：水位线口径 —— Δ = 当前累计 − 本组已报水位（只审计、不拦截）。
+        // 放在出口统一算：提前 break / 正常返回都有值；没有就是全 0，不出 undefined。
+        // 报完立刻把水位推到当前计数，于是「先跑 bash 再派活」会进下一次回执，
+        // 而紧接着再派一次（期间无新调用）Δ 必为 0、不重复报。
+        const selfRanNow = selfRanOf(selfWorkAuditFor(live.id))
+        const selfRanMark = selfRanWatermarkFor(live.id)
+        response.selfRan = selfRanDelta(selfRanNow, selfRanMark)
+        Object.assign(selfRanMark, selfRanNow)
         // 验收结论（结构化）：与回执顶部 ⛔ 标记、结尾「## 验收（本次调用）」同源。
         // 放在出口统一算，保证每条 return 路径（提前 break / 抛错进了 finally）也带这两个字段。
         const acceptanceSummary = summarizeAcceptance(response.members)
