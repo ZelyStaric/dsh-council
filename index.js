@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
@@ -68,6 +68,7 @@ const REVIEW_TEXT_HARD_CAP = 200_000
 const DEFAULT_MEMBER_IDLE_MINUTES = 10
 const DEFAULT_MEMBER_HARD_LIMIT_MINUTES = 360
 /** 已废弃：旧的总超时默认值，只用于兼容读取，不参与任何终止判断。 */
+const DEFAULT_MEMBER_MAX_MEMORY_MB = 12 * 1024
 const DEFAULT_MEMBER_TIMEOUT_MINUTES = 30
 /** 看门狗巡检间隔：每 15 秒看一次「静默多久了」。 */
 const MEMBER_WATCHDOG_TICK_MS = 15_000
@@ -297,6 +298,44 @@ function signalFor(callId) {
  * 成员「静默」阈值（分钟）：页面配置 → profile 配置 → 默认 10。
  * 只要有输出/活动就刷新计时，不再按总时长杀。
  */
+/** 成员单进程内存上限（MB）。0 = 不限制。默认 12 GiB，超出由 cgroup OOM 只杀该成员。 */
+function memberMaxMemoryMb(config) {
+  const own = (state.config) || {}
+  const raw = own.memberMaxMemoryMb ?? (config && config.memberMaxMemoryMb)
+  const n = Number(raw)
+  if (raw === 0 || raw === '0') return 0
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MEMBER_MAX_MEMORY_MB
+}
+
+/** 用 systemd-run --scope 把子进程塞进带 MemoryMax 的 cgroup；失败则退回直接 spawn。 */
+let systemdRunAvailable
+function hasSystemdRun() {
+  if (systemdRunAvailable !== undefined) return systemdRunAvailable
+  try {
+    const bin = existsSync('/usr/bin/systemd-run') ? '/usr/bin/systemd-run' : existsSync('/bin/systemd-run') ? '/bin/systemd-run' : ''
+    if (!bin) { systemdRunAvailable = false; return false }
+    // 预检：真的能起一个带 MemoryMax 的 scope 吗（服务环境里 DBus 可能不可用）
+    const probe = spawnSync(bin, ['--user', '--scope', '--quiet', '--property=MemoryMax=128M', '--', 'true'], { timeout: 8000 })
+    systemdRunAvailable = probe.status === 0
+    if (!systemdRunAvailable) console.error('[council] systemd-run 不可用，成员内存上限未生效')
+  } catch (error) {
+    systemdRunAvailable = false
+    console.error('[council] systemd-run 预检失败:', String(error?.message ?? error))
+  }
+  return systemdRunAvailable
+}
+
+function scopedCommand(bin, args, limitMb) {
+  if (!limitMb || !hasSystemdRun()) return { bin, args, unit: '' }
+  const unit = 'council-' + randomUUID().slice(0, 8)
+  const props = ['--property=MemoryMax=' + limitMb + 'M', '--property=MemorySwapMax=0']
+  return {
+    bin: '/usr/bin/systemd-run',
+    args: ['--user', '--scope', '--quiet', '--unit=' + unit, ...props, '--', bin, ...args],
+    unit,
+  }
+}
+
 function memberIdleMinutes(config) {
   const own = (state && state.config) || {}
   const raw = own.memberIdleMinutes ?? (config && config.memberIdleMinutes)
@@ -381,6 +420,7 @@ function configView(config, source) {
     hasProxy: Boolean(own.proxyUrl),
     claudeBaseFromProfile: Boolean(!own.claudeBase && config.claudeBaseUrl),
     codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
+    memberMaxMemoryMb: memberMaxMemoryMb(config),
     memberIdleMinutes: memberIdleMinutes(config),
     memberHardLimitMinutes: memberHardLimitMinutes(config),
     imageTimeoutSeconds: imageTimeoutSeconds(config),
@@ -490,7 +530,15 @@ function run(bin, args, options = {}) {
     clearTimeoutFn = clearTimeout,
   } = options
   return new Promise((resolve) => {
-    const child = spawnImpl(bin, args, {
+    const limitMb = options.maxMemoryMb !== undefined ? options.maxMemoryMb : memberMaxMemoryMb()
+    const scoped = scopedCommand(bin, args, limitMb)
+    const stopScope = () => {
+      if (!scoped.unit) return
+      try {
+        spawn('/usr/bin/systemctl', ['--user', 'stop', scoped.unit + '.scope'], { stdio: 'ignore', detached: true }).unref()
+      } catch { /* ignore */ }
+    }
+    const child = spawnImpl(scoped.bin, scoped.args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -506,6 +554,7 @@ function run(bin, args, options = {}) {
     const finish = (value) => {
       if (settled) return
       settled = true
+      if (scoped.unit) stopScope()
       try { clearIntervalFn(checkTimer) } catch { /* ignore */ }
       try { if (timeoutTimer !== undefined) clearTimeoutFn(timeoutTimer) } catch { /* ignore */ }
       try { if (graceTimer !== undefined) clearTimeoutFn(graceTimer) } catch { /* ignore */ }
@@ -2175,6 +2224,11 @@ export function createHandler(ctx, config = {}) {
               }
               if (body.imageTimeoutSeconds !== undefined && Number.isFinite(Number(body.imageTimeoutSeconds)) && Number(body.imageTimeoutSeconds) > 0) {
                 next.imageTimeoutSeconds = Number(body.imageTimeoutSeconds)
+              }
+              // 成员内存上限：> 0 生效；0 = 不限制
+              if (body.memberMaxMemoryMb !== undefined && Number.isFinite(Number(body.memberMaxMemoryMb)) && Number(body.memberMaxMemoryMb) >= 0) {
+                if (Number(body.memberMaxMemoryMb) === 0) next.memberMaxMemoryMb = 0
+                else next.memberMaxMemoryMb = Math.floor(Number(body.memberMaxMemoryMb))
               }
               state.config = Object.keys(next).length ? next : undefined
               usageCache = null
