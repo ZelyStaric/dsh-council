@@ -54,10 +54,11 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
+export function __setClaudeExec(fn) { claudeExecOverride = fn }
 export function __setWatchdogTickMs(ms) { WATCHDOG_TICK_MS = Number(ms) > 0 ? Number(ms) : MEMBER_WATCHDOG_TICK_MS }
 export function __resetArchivedCache() { archivedIdsCache = { at: 0, ids: null } }
 export function __boundAgentsSize() { return boundAgents.size }
@@ -1423,12 +1424,13 @@ try {
     return `subagentSessions=${data.subagentSessions} childDirs=${data.childDirs}`
   })
 
-  await check('council_delegate 本轮清理（端到端，假 seam）：重试多出来的子会话被删，成员 convId 指向的保住', async () => {
+  await check('council_delegate 本轮清理（端到端，假 seam）：重试多出来的子会话被删，成员 convId 指向的保住 · 审核子会话不再顶替成员 convId', async () => {
     setState(structuredClone(fixture))
     await resetSessions()
     const workFail = 'c1111111-1111-4111-8111-111111111111'   // 第 1 次失败
     const workOk = 'c2222222-2222-4222-8222-222222222222'     // 重试成功
-    const selfReviewId = 'c3333333-3333-4333-8333-333333333333' // 自审（最后写回 member.convId）
+    // 自审用的是全新子会话：**不写回** member.convId（审核是旁路，续接审核会话只会拿到问候）
+    const selfReviewId = 'c3333333-3333-4333-8333-333333333333'
     const bucket = '--e2e--'
     const workFailDir = await makeSessionDir(workFail, { bucket, ageDays: 0 })
     const workOkDir = await makeSessionDir(workOk, { bucket, ageDays: 0 })
@@ -1474,17 +1476,21 @@ try {
         { callId: 'c-round-prune', agent: { id: 'agent-test' } },
       )
       assert.equal(workCalls, 2, '第一次失败应触发一次重试（共 2 次真实工作子会话），实际 ' + workCalls)
-      assert.deepEqual(out.prunedSessions, [workFail, workOk], '本轮只该清掉这两条无引用子会话')
+      // 成员 convId 现在停在**最后一次工作**子会话（selfReview 不再把审核子会话写回）：
+      //   workFail 无引用 → 删；workOk 被成员指向 → 保留；
+      //   审核子会话既不属于 childSink（不进本轮清理），也不再被成员 convId 顶替占用。
+      assert.equal(out.prunedSessions.length, 1, '本轮只该清掉失败的那条无引用工作子会话，实际 ' + JSON.stringify(out.prunedSessions))
+      assert.ok(out.prunedSessions.includes(workFail), '失败的那条子会话必须清掉')
       assert.equal(existsSync(workFailDir), false, '失败的那条子会话目录没删掉')
-      assert.equal(existsSync(workOkDir), false, '重试成功那条（convId 已被自审顶替）没删掉')
-      assert.ok(existsSync(selfReviewDir), '成员 convId 指向的子会话被误删了')
-      assert.equal(findMember('m_code').convId, selfReviewId)
+      assert.ok(existsSync(workOkDir), '成员 convId 指向的工作子会话被误删了')
+      assert.equal(findMember('m_code').convId, workOk, '成员 convId 必须是工作子会话，不能被审核子会话顶替')
+      assert.notEqual(findMember('m_code').convId, selfReviewId, '审核子会话绝不能写回 member.convId（那就是「续接死会话 → 只回问候」的根因）')
       assert.equal(sweptDisposed, 1, 'council_delegate 收尾必须清扫 10 分钟以上的 review 子代理')
       assert.equal(out.sweptChildren, 1, '回执必须带本轮释放数')
       const rendered = tool.output.render({}, out)[0].text
-      assert.match(rendered, /## 子会话\n已清理 2 个子会话目录/)
+      assert.match(rendered, /## 子会话\n已清理 1 个子会话目录/)
       assert.match(rendered, /## 子进程回收\n- 已释放 1 个驻留子代理/)
-      return `prunedSessions=[${out.prunedSessions.join(',')}] · convId 指向的保留 · 清扫 1 个 review`
+      return `prunedSessions=[${out.prunedSessions.join(',')}] · 成员 convId=${findMember('m_code').convId}（不是审核子会话）· 清扫 1 个 review`
     } finally {
       ctx.get = prevGet
       mod.residentChildren.clear()
@@ -2823,6 +2829,168 @@ try {
     // 渲染层兜底：老回执 / 缺 selfRan 字段时同样不崩、不出该节
     assert.doesNotMatch(tool.output.render({}, { members: [] })[0].text, /## 越权审计/, '缺字段也不能误报')
     return 'selfRan 全 0 · 无「## 越权审计」· 缺字段也不误报'
+  })
+
+  /* ── 审核「未判定」根因：审核续接死会话 → 只回问候 ──────────────────────────
+   * 实测：`claude -p ... --resume <死 sid>` 只回 'How can I help you?'；日志里 8 次
+   * `commander image review unparsed: I'm here and ready to help...` 就是这个形态。
+   * 修法：审核一律全新会话（无 --resume）+ 问候检测重试一次 + 解析失败归一为 ok:false。
+   */
+
+  // 假 exec 用：拼一段合法的 claude `--output-format stream-json` 输出
+  const streamJson = (text, sessionId = 'fresh-session') => [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }),
+    JSON.stringify({
+      type: 'result', subtype: 'success', is_error: false,
+      result: text, session_id: sessionId, usage: { input_tokens: 11, output_tokens: 7 },
+    }),
+  ].join('\n')
+
+  const reviewState = () => {
+    const next = structuredClone(fixture)
+    next.config = { claudeBase: 'https://relay.local', claudeKey: 'ck' }
+    next.roles = [
+      ...fixture.roles,
+      { id: 'r_cmd', name: '指挥', prompt: '验收', kind: 'claude', model: 'claude-opus-5-5' },
+    ]
+    next.members = [
+      { id: 'm_worker', name: '代码', kind: 'claude', model: 'claude-opus-5-5', roleId: 'r_code', convId: 'dead-conv-worker' },
+      { id: 'm_review', name: '审校', kind: 'claude', model: 'claude-opus-5-5', roleId: 'r_review', convId: 'dead-conv-review' },
+      { id: 'm_cmd', name: '指挥', kind: 'claude', model: 'claude-opus-5-5', roleId: 'r_cmd', convId: 'dead-conv-cmd' },
+      { id: 'm_art', name: '画师', kind: 'image', model: 'gpt-image-2.5-flare', roleId: 'r_art', convId: 'dead-conv-art' },
+    ]
+    next.groups = [{ id: 'g_rev', name: 'G', memberIds: ['m_worker', 'm_review', 'm_cmd', 'm_art'] }]
+    return next
+  }
+
+  await check('审核①：selfReview / prelimReview / commanderReview（文本 + 看图）传给 claude 的 argv 里没有 --resume', async () => {
+    const originalBin = process.env.COUNCIL_CLAUDE_BIN
+    process.env.COUNCIL_CLAUDE_BIN = '/bin/true' // 只要存在即可（exec 已被替换，不会真跑）
+    setState(reviewState())
+    mod.__setRunKind(undefined) // 走真实 runKindImpl → runClaude，才能检查 argv
+    const argv = []
+    mod.__setClaudeExec(async (bin, args) => {
+      argv.push({ bin, args: [...args] })
+      return { code: 0, out: streamJson('{"ok":true,"reason":"没问题"}'), err: '' }
+    })
+    try {
+      const group = mod.state.groups[0]
+      const worker = mod.state.members.find((m) => m.id === 'm_worker')
+      const fakeCtx = { get: () => undefined }
+      const cfg = { ...config, claudeApiKey: 'ck' }
+      await mod.selfReview(fakeCtx, worker, '任务', { text: '产出' }, cfg, group, undefined, null, 'call-nr-1')
+      await mod.prelimReview(fakeCtx, group, worker, '任务', { text: '产出' }, cfg, undefined, null, undefined, 'call-nr-2')
+      await mod.commanderReview(fakeCtx, group, worker, '任务', { text: '产出' }, cfg, null, undefined, undefined, 'call-nr-3')
+      await mod.commanderReview(fakeCtx, group, worker, '画图', { image: '/council/api/image/a.png', file: '/tmp/a.png' }, cfg, null, undefined, undefined, 'call-nr-4')
+      // 图片成员的「自审」走 reviewImage → runClaude 直调，同样不许 --resume
+      await mod.selfReview(fakeCtx, mod.state.members.find((m) => m.id === 'm_art'), '画图', { image: '/council/api/image/a.png', file: '/tmp/a.png' }, cfg, group, undefined, null, 'call-nr-5')
+      assert.ok(argv.length >= 5, '五个审核入口（含 reviewImage）都该真的跑到 claude，实际 ' + argv.length)
+      for (const { args } of argv) {
+        assert.equal(args.includes('--resume'), false, '审核不得追加 --resume：' + JSON.stringify(args.slice(0, 5)))
+        for (const dead of ['dead-conv-worker', 'dead-conv-review', 'dead-conv-cmd']) {
+          assert.equal(args.includes(dead), false, '审核不得把旧会话 id 传给 claude：' + dead)
+        }
+        assert.equal(args[0], '-p', 'argv 形状不变（-p <prompt> ...）')
+      }
+      return argv.length + ' 次审核调用（含看图）均无 --resume / 旧 convId'
+    } finally {
+      mod.__setClaudeExec(undefined)
+      if (originalBin === undefined) delete process.env.COUNCIL_CLAUDE_BIN
+      else process.env.COUNCIL_CLAUDE_BIN = originalBin
+      setState(structuredClone(fixture))
+    }
+  })
+
+  await check('审核②：looksLikeGreeting 对 3 种问候命中、对正常 JSON / 长文本不命中', () => {
+    const greetings = [
+      "I'm here and ready to help. What would you like me to do?",
+      'How can I help you today?',
+      '我是这个小组的审校，你希望我做什么？',
+    ]
+    for (const text of greetings) assert.equal(mod.looksLikeGreeting(text), true, '应命中问候：' + text)
+    const normals = [
+      '{"ok":true,"reason":"验收通过"}',
+      '{"ok":false,"reason":"缺少验收标准"}',
+      '{"ok":true,"reason":"全部完成，用时 3 分钟，截图见 /tmp/a.png"}',
+    ]
+    for (const text of normals) assert.equal(mod.looksLikeGreeting(text), false, '正常 JSON 不得误判：' + text)
+    // 长文本（≥200 字符）里出现同样措辞 ≠ 问候：那是正常交付文
+    assert.equal(mod.looksLikeGreeting('ready to help ' + '甲'.repeat(220)), false, '长文本不得误判为问候')
+    assert.equal(mod.looksLikeGreeting(''), false, '空输出交给「无法解析」处理，不算问候')
+    assert.equal(mod.looksLikeGreeting(undefined), false)
+    return '3 种问候命中 · 3 种 JSON + 长文本 + 空值不命中'
+  })
+
+  await check('审核③：首次回问候 → 只重试一次（无 resume）· 第二次回 JSON → 按第二次结果判', async () => {
+    setState(reviewState())
+    const calls = []
+    mod.__setRunKind(async (ctxArg, member, prompt) => {
+      calls.push({ noResume: member.__noResume, convId: member.convId, prompt: String(prompt || '') })
+      return calls.length === 1
+        ? { ok: true, text: "I'm here and ready to help. What would you like me to do?" }
+        : { ok: true, text: '{"ok":false,"reason":"缺验收标准"}', convId: 'fresh-review' }
+    })
+    try {
+      const group = mod.state.groups[0]
+      const worker = mod.state.members.find((m) => m.id === 'm_worker')
+      const verdict = await mod.commanderReview({ get: () => undefined }, group, worker, '写代码', { text: '产出' }, config, null, undefined, undefined, 'call-greet-1')
+      assert.equal(calls.length, 2, '首次问候 → 必须只重试一次（共 2 次），实际 ' + calls.length)
+      assert.equal(verdict.ok, false, '必须按第二次的 JSON 判（ok:false），实际 ' + verdict.ok)
+      assert.equal(verdict.reason, '缺验收标准', '理由必须来自第二次的输出')
+      assert.notEqual(verdict.ok, null, '不得是「未判定」')
+      for (const call of calls) {
+        assert.equal(call.convId, undefined, '审核调用不得带 convId（不续接历史）')
+        assert.equal(call.noResume, true, '审核调用必须带 __noResume（runClaude 不追加 --resume）')
+      }
+      assert.ok(calls[1].prompt.includes('只输出 JSON'), '重试 prompt 必须明确要求只输出 JSON')
+      return '问候 → 1 次重试 → 按第二次 JSON 判（' + verdict.reason + '）'
+    } finally {
+      mod.__setRunKind(undefined)
+      setState(structuredClone(fixture))
+    }
+  })
+
+  await check('审核④：两次都乱码 → verdict ok:false 且 reason 含「已重试」，绝不是 unverified/未判定', async () => {
+    setState(reviewState())
+    const calls = []
+    mod.__setRunKind(async () => {
+      calls.push(1)
+      return { ok: true, text: '完全无关的胡言乱语（第 ' + calls.length + ' 次），没有任何 JSON 结论' }
+    })
+    try {
+      const group = mod.state.groups[0]
+      const worker = mod.state.members.find((m) => m.id === 'm_worker')
+      const verdict = await mod.selfReview({ get: () => undefined }, worker, '写代码', { text: '产出' }, config, group, undefined, null, 'call-garbage-1')
+      assert.equal(calls.length, 2, '两次都乱码 → 首次 + 1 次重试 = 2 次调用，实际 ' + calls.length)
+      assert.equal(verdict.ok, false, '解析失败必须归一为 ok:false（=不通过），实际 ' + verdict.ok)
+      assert.notEqual(verdict.ok, null, '绝不能再产出 ok:null（那会被当成「未判定」）')
+      assert.ok(String(verdict.reason).includes('已重试'), 'reason 必须含「已重试」，实际：' + verdict.reason)
+      assert.equal(verdict.reason, mod.REVIEW_UNPARSED_REASON, 'reason 必须是统一兜底文案')
+      return '两次乱码 → ' + JSON.stringify(verdict)
+    } finally {
+      mod.__setRunKind(undefined)
+      setState(structuredClone(fixture))
+    }
+  })
+
+  await check('审核⑤：调用本身失败（ok:false）→ reason 带真实错误，且同样不是「未判定」', async () => {
+    setState(reviewState())
+    let calls = 0
+    mod.__setRunKind(async () => {
+      calls += 1
+      return { ok: false, text: '', error: 'claude exited 1: no such session' }
+    })
+    try {
+      const group = mod.state.groups[0]
+      const verdict = await mod.prelimReview({ get: () => undefined }, group, mod.state.members.find((m) => m.id === 'm_worker'), '写代码', { text: '产出' }, config, undefined, null, undefined, 'call-fail-1')
+      assert.equal(calls, 1, '调用失败不该空转重试，实际 ' + calls + ' 次')
+      assert.equal(verdict.ok, false, '调用失败也必须归一为 ok:false')
+      assert.match(String(verdict.reason), /no such session/, 'reason 要保留真实错误，实际：' + verdict.reason)
+      return '调用失败 → ok:false · reason=' + verdict.reason
+    } finally {
+      mod.__setRunKind(undefined)
+      setState(structuredClone(fixture))
+    }
   })
 
 } finally {

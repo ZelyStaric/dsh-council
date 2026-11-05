@@ -5,6 +5,19 @@
 ## [Unreleased]（2026-11-05，未提交、未改版本号）
 
 ### 修复
+- **审核「未判定」的根因：审核在续接一个「已死/空上下文」的 claude 会话**。实测
+  `claude -p "…" --resume <死 sid>` 不答题、只回 `I'm here and ready to help.` /
+  `How can I help you?`（日志里 8 次 `commander image review unparsed: …`），输出里没有 JSON
+  → 旧实现记 `ok:null` → 页面「未判定」。现在：
+  1) **审核一律不续接历史会话**：`selfReview` / `prelimReview` / `commanderReview`（文本 + 看图）
+     调用前 `convId = undefined` + `__noResume`，`runClaude` 据此**不追加 `--resume`**；
+     审核也不再把自己的子会话写回 `member.convId`（这正是「下一轮拿审核会话当工作会话续接」的来源），
+     `prelimReview` 不再写 `state.reviewChildren`；
+  2) **问候/空炮检测** `looksLikeGreeting(text)`（长度 < 200 且命中 `ready to help|How can I help|
+     你希望我|请告诉我|What would you like` 等）：命中就丢掉本次结果、**换新会话重试一次**；
+  3) 重试后仍解析不出 JSON → verdict 归一为 `{ok:false, reason:'审核输出无法解析（已重试）'}`
+     （`REVIEW_UNPARSED_REASON`），**不再产出 `unverified`**；`unverified` 只保留给「本组一个审核位都没配」；
+  4) 日志把首次与重试的原文各前 200 字符都打出来（`[council] <label> … 首次原文=… / 重试原文=…`）。
 - **进度的「静默 Ns」不是真静默**：`silentMs` 原来只在阶段变化（`progressSet`）时才拿到新的
   `lastActivity`，成员一直在输出的 codex 也会显示「静默 1207s」。现在 run()/seam 的 stdout 活动回调
   经 `createProgressBeat` **≥1s 节流**写 `lastActivity`（`progressSet` 新增活动心跳分支：只刷新活动时间，
