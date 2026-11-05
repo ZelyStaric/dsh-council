@@ -54,7 +54,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -62,6 +62,7 @@ export function __setWatchdogTickMs(ms) { WATCHDOG_TICK_MS = Number(ms) > 0 ? Nu
 export function __resetArchivedCache() { archivedIdsCache = { at: 0, ids: null } }
 export function __boundAgentsSize() { return boundAgents.size }
 export function __resetProgress() { progressMap.clear(); activeCalls.clear() }
+export function __setProgressClock(fn) { progressClock = fn ? () => fn() : () => Date.now() }
 `
 const moduleFile = path.join(HOME, 'index.exposed.mjs')
 await writeFile(moduleFile, exposed)
@@ -1600,6 +1601,88 @@ try {
     return 'fresh≈0 · 4min → ' + quiet['call-silent'].members.m_code.silentMs + 'ms'
   })
 
+  /* ── 静默必须等于「多久没输出」，不是「多久没换阶段」 ──────────────────── */
+  await check('进度心跳①：stdout 每 2 秒一行 → silentMs 一直 < 3 秒（不再被「上次阶段变化」冻住）', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    const clock = { t: Date.now() }
+    mod.__setProgressClock(() => clock.t)
+    try {
+      mod.progressInit('call-beat', 'session-g5')
+      mod.progressSet('call-beat', 'm_code', { name: '代码', kind: 'deepseek', stage: '执行中' })
+      const beat = mod.createProgressBeat('call-beat', 'm_code', { now: () => clock.t })
+      const samples = []
+      for (let line = 0; line < 20; line += 1) {
+        clock.t += 2000 // 每 2 秒一行 stdout：读进度时正好「距上一行 2 秒」
+        const p = await getProgress()
+        samples.push(p['call-beat'].members.m_code.silentMs)
+        assert.equal(beat(), true, '每 2 秒一次的心跳必须真的写进进度表（节流 1s）')
+      }
+      assert.ok(samples.every((ms) => ms < 3000), '持续有输出时 silentMs 必须 < 3 秒，实际最大 ' + Math.max(...samples))
+      assert.ok(samples.some((ms) => ms >= 1500), '两行之间静默应 ≈ 2 秒（说明它真的在量「多久没输出」），实际 ' + samples.slice(0, 3))
+      // 同一段时间里阶段一次没变 → stageAgeMs 应该涨到 40 秒（与 silentMs 分离）
+      const live = (await getProgress())['call-beat'].members.m_code
+      assert.ok(live.stageAgeMs >= 38_000, '阶段 40 秒没变 → stageAgeMs 应 ≈ 40 秒，实际 ' + live.stageAgeMs)
+      return '20 行 × 2s：silentMs 最大 ' + Math.max(...samples) + 'ms · stageAgeMs=' + live.stageAgeMs + 'ms'
+    } finally {
+      mod.__setProgressClock(undefined)
+    }
+  })
+
+  await check('进度心跳②：停止输出 30 秒 → silentMs ≥ 30 秒（心跳停了就真的算静默）', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    const clock = { t: Date.now() }
+    mod.__setProgressClock(() => clock.t)
+    try {
+      mod.progressInit('call-quiet', 'session-g5')
+      mod.progressSet('call-quiet', 'm_code', { name: '代码', kind: 'deepseek', stage: '执行中' })
+      const beat = mod.createProgressBeat('call-quiet', 'm_code', { now: () => clock.t })
+      assert.equal(beat(), true, '第一次心跳必须写入')
+      clock.t += 500
+      assert.equal(beat(), false, '1 秒内重复输出必须被节流（不刷进度表）')
+      clock.t += 30_000 // 30 秒没有一行输出
+      const slot = (await getProgress())['call-quiet'].members.m_code
+      assert.ok(slot.silentMs >= 30_000, '停止输出 30 秒后 silentMs 必须 ≥ 30000，实际 ' + slot.silentMs)
+      assert.ok(slot.silentMs < 31_000, 'silentMs 不应被放大，实际 ' + slot.silentMs)
+      return '停 30s → silentMs=' + slot.silentMs + 'ms（节流：1s 内第二次输出不写）'
+    } finally {
+      mod.__setProgressClock(undefined)
+    }
+  })
+
+  await check('/progress 新增 stageChangedAt / stageAgeMs：阶段刚变≈0，只来输出（心跳）时阶段时间不动', async () => {
+    setState(structuredClone(fixture))
+    mod.__resetProgress()
+    const clock = { t: Date.now() }
+    mod.__setProgressClock(() => clock.t)
+    try {
+      mod.progressInit('call-stage-age', 'session-g5')
+      mod.progressSet('call-stage-age', 'm_code', { name: '代码', kind: 'deepseek', stage: '执行中' })
+      const fresh = (await getProgress())['call-stage-age'].members.m_code
+      assert.equal(typeof fresh.stageChangedAt, 'number', 'stageChangedAt 必须是数字')
+      assert.equal(typeof fresh.stageAgeMs, 'number', 'stageAgeMs 必须是数字')
+      assert.ok(fresh.stageAgeMs < 1000, '阶段刚变时 stageAgeMs 应≈0，实际 ' + fresh.stageAgeMs)
+      assert.equal(fresh.stageChangedAt, clock.t, 'stageChangedAt 必须等于这次阶段写入的时间')
+      // 5 分钟里只有 stdout 活动、阶段没变：silentMs≈0，但 stageAgeMs 应该 5 分钟
+      const beat = mod.createProgressBeat('call-stage-age', 'm_code', { now: () => clock.t })
+      clock.t += 5 * 60_000
+      beat()
+      const later = (await getProgress())['call-stage-age'].members.m_code
+      assert.ok(later.silentMs < 3000, '有输出时 silentMs 必须≈0，实际 ' + later.silentMs)
+      assert.ok(later.stageAgeMs >= 5 * 60_000 - 1000, '阶段 5 分钟没变 → stageAgeMs ≥ 300000，实际 ' + later.stageAgeMs)
+      assert.equal(later.stageChangedAt, fresh.stageChangedAt, '活动心跳不许改 stageChangedAt')
+      // 阶段变化 → stageChangedAt 跟着走、stageAgeMs 归零
+      mod.progressSet('call-stage-age', 'm_code', { stage: '审校中' })
+      const changed = (await getProgress())['call-stage-age'].members.m_code
+      assert.equal(changed.stageChangedAt, clock.t, '阶段变化必须刷新 stageChangedAt')
+      assert.ok(changed.stageAgeMs < 1000, '阶段刚变 → stageAgeMs 归零，实际 ' + changed.stageAgeMs)
+      return 'stageChangedAt=' + fresh.stageChangedAt + ' · 5min 心跳后 stageAgeMs=' + later.stageAgeMs + ' · 换阶段归零'
+    } finally {
+      mod.__setProgressClock(undefined)
+    }
+  })
+
   await check('POST /runs/cancel：{all} 把未完成 progress 标结束（clearedProgress=1），带 callId 只清那一条', async () => {
     mod.__resetProgress()
     mod.progressInit('call-stuck-all', 'session-g5')
@@ -2214,6 +2297,67 @@ try {
     assert.deepEqual(child.kills, ['SIGTERM', 'SIGKILL'], '宽限期后必须补 SIGKILL')
     assert.equal(result.reason, 'idle-timeout')
     return 'SIGTERM → (宽限) → SIGKILL · reason=idle-timeout'
+  })
+
+  await check('看门狗⑤：terminate / hardKill 必须停掉整个 scope（只杀 systemd-run 客户端会留孤儿进程/空 scope）', async () => {
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0.02 } }) // 1.2s
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess({ ignoreTerm: true })
+    const spawns = []
+    const spawnImpl = (bin, args) => {
+      spawns.push({ bin, args })
+      if (String(bin).includes('systemctl')) return { unref() {}, on() {} }
+      return child
+    }
+    const pending = mod.run('fake-bin', [], {
+      spawnImpl,
+      clock: () => clock.t,
+      setIntervalFn: timers.setIntervalFn,
+      clearIntervalFn: timers.clearIntervalFn,
+      killGraceMs: 5,
+      scopeUnit: 'council-testscope',
+      scopeExists: () => false, // 启动前清理不触发（本用例只看终止路径）
+    })
+    const client = spawns.find((call) => call.bin === '/usr/bin/systemd-run')
+    assert.ok(client, '成员必须经 systemd-run 起 scope，实际 ' + JSON.stringify(spawns))
+    assert.ok(client.args.includes('--unit=council-testscope'), 'unit 名必须进 systemd-run args')
+    clock.t += 2 * 60_000
+    timers.tick() // 看门狗触发 → terminate()
+    const stops = () => spawns.filter((call) => String(call.bin).endsWith('/systemctl') && call.args.join(' ') === '--user stop council-testscope.scope')
+    assert.ok(stops().length >= 1, 'terminate 必须调 systemctl --user stop council-testscope.scope，实际 ' + JSON.stringify(spawns))
+    assert.deepEqual(child.kills, ['SIGTERM'], '客户端也要 SIGTERM')
+    await pending
+    assert.deepEqual(child.kills, ['SIGTERM', 'SIGKILL'], '宽限期后客户端补 SIGKILL')
+    assert.ok(stops().length >= 2, 'finish() 收尾也要再停一次 scope，实际 ' + stops().length + ' 次')
+    return 'terminate → stop · hardKill → stop · finish → stop（共 ' + stops().length + ' 次）'
+  })
+
+  await check('scope 启动前清理：scopeUnitExists 对不存在的 unit=false；同名已存在时先 stop 再 spawn', async () => {
+    assert.equal(mod.scopeUnitExists('council-definitely-not-a-unit'), false, '不存在的 unit 必须探测为 false（不做无谓 stop）')
+    const forced = mod.scopedCommand('fake-bin', ['--x'], 0, 'council-testscope')
+    assert.equal(forced.unit, 'council-testscope', '强制 unit 必须原样使用')
+    assert.ok(forced.args.includes('--unit=council-testscope'), 'unit 名必须进 systemd-run args')
+    const clock = { t: 1_700_000_000_000 }
+    const timers = fakeTimers()
+    const child = fakeChildProcess()
+    const spawns = []
+    const pending = mod.run('fake-bin', [], {
+      spawnImpl: (bin, args) => {
+        spawns.push({ bin, args })
+        if (String(bin).includes('systemctl')) return { unref() {}, on() {} }
+        return child
+      },
+      clock: () => clock.t,
+      setIntervalFn: timers.setIntervalFn,
+      clearIntervalFn: timers.clearIntervalFn,
+      scopeUnit: 'council-testscope',
+      scopeExists: () => true, // 模拟「同名 unit 还在」
+    })
+    assert.ok(spawns.some((call) => call.bin === '/usr/bin/systemd-run'), '清理后必须照常 spawn 客户端')
+    child.emit('close', 0)
+    await pending
+    return 'exists=false → 不 stop · exists=true → 同步 stop 后仍 spawn systemd-run'
   })
 
   await check('深寻 seam：不再设总时长 AbortSignal.timeout；静默超过 idle 才 abort 并标 idle-timeout', async () => {
