@@ -5,6 +5,16 @@
 ## [Unreleased]（2026-11-05，未提交、未改版本号）
 
 ### 修复
+- **进度的「静默 Ns」不是真静默**：`silentMs` 原来只在阶段变化（`progressSet`）时才拿到新的
+  `lastActivity`，成员一直在输出的 codex 也会显示「静默 1207s」。现在 run()/seam 的 stdout 活动回调
+  经 `createProgressBeat` **≥1s 节流**写 `lastActivity`（`progressSet` 新增活动心跳分支：只刷新活动时间，
+  **不动** `at`/阶段时间），`silentMs` 才真的等于「多久没输出」。新增 `stageChangedAt`（阶段变化时间）
+  与 `stageAgeMs`（本阶段停留时长），`/progress` 每个成员条目都返回；既有字段名一律不变。
+- **看门狗杀不死 systemd scope 里的进程 → 孤儿堆积**：成员跑在 `systemd-run --scope` 里，scope 是
+  cgroup，只 `child.kill()` 不会带走 cgroup 里剩下的进程（实测杀客户端后 `sleep` 仍在、scope 仍 active；
+  现场 `council-11b3f6aa.scope` 从 00:49 挂到 11:09）。新增 `killScope()`（`systemctl --user stop
+  <unit>.scope`，不阻塞），`terminate()` / `hardKill()` / `finish()` 都会调；启动前若同名 unit 已存在
+  （极罕见）先用 `is-active --quiet` 探测再同步 stop 后 spawn（scope 没有 `MainPID`，不能用它探测）。
 - **验收未通过的回执被当成「已完成」交付**：`council_delegate` 回执在整次调用结论为
   `rejected` / `rework-failed` / `unverified` 时，**第一行**插入
   `⛔ 本次未通过验收（返工 N 次后仍不通过）。这不是交付物：…`，正文下移，末尾追加

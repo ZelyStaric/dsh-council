@@ -404,10 +404,34 @@ function hasSystemdRun() {
   return systemdRunAvailable
 }
 
-function scopedCommand(bin, args, limitMb) {
-  if (!limitMb || !hasSystemdRun()) return { bin, args, unit: '' }
-  const unit = 'council-' + randomUUID().slice(0, 8)
-  const props = ['--property=MemoryMax=' + limitMb + 'M', '--property=MemorySwapMax=0']
+/** systemctl 绝对路径（`spawn` 不走 shell，必须给绝对路径）。极少数环境只有 /bin/systemctl。 */
+function systemctlBin() {
+  return existsSync('/usr/bin/systemctl') ? '/usr/bin/systemctl' : '/bin/systemctl'
+}
+
+/**
+ * 同名 scope 是否已存在（同步探测，只用于「极罕见」的启动前清理）。
+ * 用 `is-active --quiet`：scope 单元**没有 MainPID**（那是 service 才有的），
+ * 用 `show -p MainPID` 探测会永远读到空值。active/activating → rc 0；不存在 → rc 4。
+ */
+function scopeUnitExists(unit) {
+  if (!unit) return false
+  try {
+    const probe = spawnSync(systemctlBin(), ['--user', 'is-active', '--quiet', unit + '.scope'], { timeout: 1500 })
+    return probe.status === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `forcedUnit` 只给测试：跳过「本机有没有 systemd-run」探测，强制走 scope 分支，
+ * 这样 killScope 的调用在没有 systemd 的容器里也能断言。
+ */
+function scopedCommand(bin, args, limitMb, forcedUnit = '') {
+  if (!forcedUnit && (!limitMb || !hasSystemdRun())) return { bin, args, unit: '' }
+  const unit = forcedUnit || 'council-' + randomUUID().slice(0, 8)
+  const props = limitMb ? ['--property=MemoryMax=' + limitMb + 'M', '--property=MemorySwapMax=0'] : []
   return {
     bin: '/usr/bin/systemd-run',
     args: ['--user', '--scope', '--quiet', '--unit=' + unit, ...props, '--', bin, ...args],
@@ -646,7 +670,14 @@ function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes } = {}) {
  * 否则（CPU 仍在推进 / 读不到 /proc）→ reason='idle-timeout'。读不到时退化为只看 stdout。
  * 终止时打一行日志：`[council] watchdog kill <member> reason=<id> silent=<秒>`。
  *
- * `spawnImpl` / `clock` / `setIntervalFn` / `setTimeoutFn` / `cpuProbe` 只供测试注入。
+ * **scope 必须整组停**（2026-11-05）：成员跑在 `systemd-run --scope` 里，scope 是一个 cgroup；
+ * 只杀 child（客户端）不会清掉 cgroup 里剩下的进程——实测 `systemd-run --scope -- sh -c
+ * 'sleep 987 & wait'`，杀掉客户端后 `sleep` 仍在、scope 仍是 active（现场：
+ * `council-11b3f6aa.scope` 从 00:49 挂到 11:09）。`terminate()` / `hardKill()` 会额外
+ * `systemctl --user stop <unit>.scope`；正常结束的 `finish()` 也照旧停一次（`stopScope`）。
+ *
+ * `spawnImpl` / `clock` / `setIntervalFn` / `setTimeoutFn` / `cpuProbe` / `scopeUnit` /
+ * `scopeExists` 只供测试注入；`spawnImpl` 同时用于 scope 客户端与 systemctl 调用。
  */
 function run(bin, args, options = {}) {
   const {
@@ -668,15 +699,33 @@ function run(bin, args, options = {}) {
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
     cpuProbe = (pid) => readProcCpuMs(pid),
+    // 测试注入：强制一个 unit 名 / 覆写「同名 scope 是否已存在」的探测
+    scopeUnit = '',
+    scopeExists = scopeUnitExists,
   } = options
   return new Promise((resolve) => {
     const limitMb = options.maxMemoryMb !== undefined ? options.maxMemoryMb : memberMaxMemoryMb()
-    const scoped = scopedCommand(bin, args, limitMb)
-    const stopScope = () => {
+    const scoped = scopedCommand(bin, args, limitMb, scopeUnit)
+    /**
+     * 停掉整个 scope —— **只杀 child 是不够的**：scope 是 cgroup，成员进程 fork 出的子进程
+     * 留在里面；客户端死了它们照样活着（实测：杀 systemd-run 客户端后 scope 仍 active、
+     * 里面的 sleep 还在）。2026-11-05 现场：`council-11b3f6aa.scope`（claude）
+     * 从 00:49 挂到 11:09，CPU 16s。所以 terminate() / hardKill() / finish() 都必须调这里。
+     */
+    const killScope = () => {
       if (!scoped.unit) return
       try {
-        spawn('/usr/bin/systemctl', ['--user', 'stop', scoped.unit + '.scope'], { stdio: 'ignore', detached: true }).unref()
+        const proc = spawnImpl(systemctlBin(), ['--user', 'stop', scoped.unit + '.scope'], { stdio: 'ignore', detached: true })
+        if (proc && typeof proc.unref === 'function') proc.unref()
+        if (proc && typeof proc.on === 'function') proc.on('error', () => {})
       } catch { /* ignore */ }
+    }
+    /** 旧名保留：finish()（正常结束）也要停 scope，客户端退出不等于 scope 退出。 */
+    const stopScope = killScope
+    // 启动前清理：同名 unit 已存在（随机名撞车 / 上一轮没清干净，极罕见）→ 同步 stop 再 spawn，
+    // 否则 systemd-run 会因 unit 已存在而失败，或新进程挂到旧 scope 上。
+    if (scoped.unit && scopeExists(scoped.unit)) {
+      try { spawnSync(systemctlBin(), ['--user', 'stop', scoped.unit + '.scope'], { timeout: 3000 }) } catch { /* ignore */ }
     }
     const child = spawnImpl(scoped.bin, scoped.args, {
       cwd,
@@ -703,6 +752,8 @@ function run(bin, args, options = {}) {
     }
     const hardKill = () => {
       if (settled) return
+      // 宽限到了还没退：先停 scope（systemd 给 MainPID 补 SIGTERM→SIGKILL），再杀客户端
+      killScope()
       try { child.kill('SIGKILL') } catch { /* ignore */ }
     }
     const terminate = (reason) => {
@@ -715,6 +766,8 @@ function run(bin, args, options = {}) {
             + ' reason=' + reason + ' silent=' + Math.round(watchdog.silentMs(clock()) / 1000))
         } catch { /* ignore */ }
       }
+      // 先停 scope，再杀 systemd-run 客户端（顺序反了会留下孤儿 MainPID）
+      killScope()
       try { child.kill('SIGTERM') } catch { /* ignore */ }
       graceTimer = setTimeoutFn(hardKill, killGraceMs)
     }
@@ -1856,8 +1909,9 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   const standardBlock = group.standard ? '\n\n[验收标准]\n' + group.standard : ''
   const prompt = memberPrompt(member, task) + standardBlock + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
   if (onStage) onStage('执行中（' + member.kind + '）')
-  // 任何输出/子代理消息变化都刷新进度条的 lastActivity（前端据此显示「静默 Ns」）
-  const onActivity = callId ? () => progressTouch(callId, member.id) : undefined
+  // 任何 stdout / 子代理消息变化都刷新进度条的 lastActivity（前端据此显示「静默 Ns」）。
+  // 走 createProgressBeat：≥1s 节流（stdout 每几十毫秒一块，不能每块都写进度表）。
+  const onActivity = callId ? createProgressBeat(callId, member.id) : undefined
   let result = await runKind(ctx, member, prompt, config, group, styleOverride, parent, undefined, callId, childSink, onActivity)
   // watchdog retry: a timeout / dead agent gets one more attempt on the same member
   const maxAttempts = 2
@@ -2564,20 +2618,25 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/progress') {
             // 读取时自愈：陈旧的未完成项在这里收尾，不指望派活自己回来写 finishedAt。
             // 阈值跟着静默阈值走（见 progressStaleMs），activeCalls 里的条目不会被误收。
-            const now = Date.now()
+            const now = progressNow()
             healProgress(now, config)
             const out = {}
             for (const [id, entry] of progressMap) {
               // 既有字段名一律保留；只追加只读派生字段：
               //  - runningMs：跑了多久
-              //  - silentMs（每个成员条目）：距最后一次活动过了多久，前端 >3 分钟显示「静默 Ns」
-              //  - 成员已有 finishedAt（终态已写）→ silentMs 固定 0：它不是在等，只是记录还在
+              //  - silentMs（每个成员条目）：距最后一次活动（= 最近一次 stdout/子代理活动）过了多久，
+              //    前端 >3 分钟显示「静默 Ns」（活动心跳由 createProgressBeat 节流刷新）
+              //  - stageChangedAt / stageAgeMs：阶段是什么时候变的、这个阶段停了多久（新增，前端可选）
+              //  - 成员已有 finishedAt（终态已写）→ silentMs 与 stageAgeMs 固定 0：它不是在等，只是记录还在
               const members = {}
               for (const [memberId, slot] of Object.entries(entry.members || {})) {
                 // 最后活动时间：成员条目 → 整条 entry → 开工时间（老条目没有 lastActivity）
                 const last = (slot && (slot.lastActivity ?? slot.at)) ?? entry.lastActivity ?? entry.startedAt ?? 0
                 const silentMs = slot && slot.finishedAt ? 0 : Math.max(0, now - last)
-                members[memberId] = Object.assign({}, slot, { silentMs })
+                // 阶段时间：新条目有 stageChangedAt；老条目回落 at（旧版 at 就是阶段变化时间）
+                const stageChangedAt = (slot && (slot.stageChangedAt ?? slot.at)) ?? entry.startedAt ?? now
+                const stageAgeMs = slot && slot.finishedAt ? 0 : Math.max(0, now - stageChangedAt)
+                members[memberId] = Object.assign({}, slot, { silentMs, stageChangedAt, stageAgeMs })
               }
               out[id] = Object.assign({}, entry, {
                 members,
@@ -2720,18 +2779,64 @@ const PROGRESS_STALE_KEEP_MS = 5 * 60_000
 const PROGRESS_DONE_KEEP_MS = 24 * 60 * 60_000
 /** 指挥占位阶段的成员 id：没有真正成员时用它显示「拆解中 / 派活中」。 */
 const PROGRESS_STAGE_ID = '__stage__'
+/** 活动心跳节流：stdout 每几十毫秒来一块，≥1s 才写一次 lastActivity。 */
+const PROGRESS_ACTIVITY_THROTTLE_MS = 1000
+
+/**
+ * 进度子系统时钟。默认 `Date.now()`；测试用 `__setProgressClock` 拨表，
+ * 这样「每 2 秒一行输出 / 停 30 秒」这类断言不用真的等 30 秒。
+ */
+let progressClock = () => Date.now()
+function progressNow() { return progressClock() }
 
 function progressInit(callId, sessionId) {
   if (!callId) return
-  progressMap.set(callId, { startedAt: Date.now(), sessionId: sessionId, members: {} })
+  progressMap.set(callId, { startedAt: progressNow(), sessionId: sessionId, members: {} })
   if (progressMap.size > 30) progressMap.delete(progressMap.keys().next().value)
 }
 
-function progressSet(callId, memberId, patch) {
+/**
+ * 写成员进度。
+ *  - 阶段/状态类 patch（stage / name / finishedAt …）→ 刷新 `at` 与 `stageChangedAt`
+ *  - 只带 lastActivity 的 patch = 活动心跳 → **不动阶段时间**，只刷新最后活动时间
+ * 这样 /progress 才能同时回答「多久没输出（silentMs）」和「这个阶段停了多久（stageAgeMs）」，
+ * 不会把「codex 一直在输出」误报成「静默 1207s」。
+ */
+function progressSet(callId, memberId, patch = {}, at = progressNow()) {
   if (!callId) return
   const entry = progressMap.get(callId)
   if (!entry) return
-  entry.members[memberId] = Object.assign({ at: Date.now() }, entry.members[memberId] || {}, patch)
+  const prev = entry.members[memberId] || {}
+  const activityOnly = Object.keys(patch).every((key) => key === 'lastActivity')
+  const next = Object.assign({ at: at }, prev, patch)
+  if (activityOnly) {
+    // 心跳不动 `at`（阶段变化时间）；老条目没有 stageChangedAt 时用 at 兜底
+    next.at = prev.at ?? at
+    next.stageChangedAt = prev.stageChangedAt ?? prev.at ?? at
+  } else {
+    next.stageChangedAt = at
+  }
+  entry.members[memberId] = next
+  if (patch.lastActivity !== undefined) entry.lastActivity = patch.lastActivity
+}
+
+/**
+ * 活动心跳（run() 的 stdout 数据回调 / seam 的子代理活动回调）：
+ * ≥`throttleMs` 才写一次 lastActivity，避免每一块 stdout 都改进度表。
+ * 返回的闭包返回 true 表示这次真的写了。
+ */
+function createProgressBeat(callId, memberId, { throttleMs = PROGRESS_ACTIVITY_THROTTLE_MS, now = progressNow } = {}) {
+  let lastBeat = 0
+  return function beat() {
+    if (!callId) return false
+    const at = now()
+    if (at - lastBeat < throttleMs) return false
+    lastBeat = at
+    // 成员条目：/progress 的 silentMs 读它；整条 entry：healProgress 的陈旧判定读它
+    progressSet(callId, memberId, { lastActivity: at }, at)
+    progressTouch(callId, memberId, at)
+    return true
+  }
 }
 
 /**
@@ -2739,14 +2844,13 @@ function progressSet(callId, memberId, patch) {
  * 由 run() 的 stdout/stderr 数据回调、seam 的子代理状态/消息变化回调触发。
  * 只有 entry 已存在时才写——不凭空造进度条。
  */
-function progressTouch(callId, memberId) {
+function progressTouch(callId, memberId, at = progressNow()) {
   if (!callId) return
   const entry = progressMap.get(callId)
   if (!entry) return
-  const now = Date.now()
-  entry.lastActivity = now
+  entry.lastActivity = at
   const slot = entry.members && entry.members[memberId]
-  if (slot) slot.lastActivity = now
+  if (slot) slot.lastActivity = at
 }
 
 /** 写「指挥」占位阶段：成员还没拆出来时进度条也有东西可显示。 */
