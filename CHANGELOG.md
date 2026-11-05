@@ -9,6 +9,20 @@
   `rejected` / `rework-failed` / `unverified` 时，**第一行**插入
   `⛔ 本次未通过验收（返工 N 次后仍不通过）。这不是交付物：…`，正文下移，末尾追加
   `## 验收（本次调用）`（结论 + 中文说明）；验收通过时不加。
+- **会话页「N 个子智能体」只增不减**：那个数字是会话里的 `subagent/catalog` 记录数，
+  `dispose()` 只释放内存、不删会话目录。现在：
+  1) 插件 dispose 掉**自己创建**的子会话后顺手删它的会话目录（`deleteChildSessionDir`；
+     非 reuse 模式才删，读不出 `parentSession`/对不上父会话/命中保留集合一律不删）；
+  2) 驻留清扫器释放驻留子代理后同样删目录；
+  3) 新增 `POST /council/api/sessions/prune-children`（`{ sessionId?, dryRun?, keepMinutes?=10 }`
+     → `{ removed:[{id,sizeMb,mtime}], kept, dryRun }`）：只清 `parentSession === sessionId`
+     且目录 mtime 早于 `keepMinutes` 的子会话目录；路径白名单与 `/sessions/prune` 同一套
+     （两层直接子目录、uuid 名、不跟符号链接、非 uuid 不动）；当前会话自己/成员 `convId`/
+     驻留表里的子会话一律保留；
+  4) `GET /council/api/state` 新增 `subagentSessions`（`subagent/catalog` 记录数）与
+     `childDirs`（磁盘上 `parentSession === 当前会话` 的目录数），方便对照。
+- `pruneChildSessionDirs` 把「目录已在 dispose 时删掉」也计入 `prunedSessions`，
+  否则回执里的「已清理 N 个子会话目录」会从 N 掉成 0。
 
 ### 新增
 - `council_delegate` 的 output schema 增加 `acceptanceStatus`

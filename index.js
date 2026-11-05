@@ -6,9 +6,10 @@
  * /council/api that the Client half calls with same-origin fetch.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
+import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
@@ -35,6 +36,16 @@ const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
  * `tests/staffing-test.mjs` 会解析两半源码断言一致，防「前后端路由漂移」。
  */
 const SESSIONS_PRUNE_ROUTE = '/sessions/prune'
+
+/**
+ * 按父会话清理子会话目录：HTTP 实际地址 = `POST /council/api/sessions/prune-children`。
+ * body：`{ sessionId?, dryRun?, keepMinutes? }`（sessionId 默认当前组会话，keepMinutes 默认 10）。
+ * 与 `/sessions/prune`（按 keepDays 全盘扫）不同：**只动 `parentSession === sessionId` 的目录**。
+ * 没有对应的 Client 常量：这是排障/手动可达的接口，UI 不暴露（与「清理子会话」一致）。
+ */
+const PRUNE_CHILDREN_ROUTE = '/sessions/prune-children'
+/** `/sessions/prune-children` 默认只清「目录 mtime 早于 10 分钟」的子会话。 */
+const CHILD_DIR_KEEP_MINUTES = 10
 
 /**
  * 归档组清理路由：HTTP 实际地址 = `POST /council/api/groups/prune-archived`。
@@ -316,6 +327,10 @@ function untrackResidentChild(id) {
 
 /**
  * 清扫驻留子代理。返回本轮真正 dispose 掉的数量（失败不计，静默）。
+ *
+ * dispose 之后**顺手删掉它的会话目录**（`deleteChildSessionDir`）：否则 DSH 的
+ * 「N 个子智能体」计数（= `subagent/catalog` 记录数）永远只增不减。
+ * 删除本身是保守的：读不出父会话 / 命中保留集合（含成员 convId）/ 是符号链接 → 不删。
  * @param {{ now?: number }} [options] 只给测试注入时钟
  */
 async function sweepResidentChildren(options = {}) {
@@ -337,6 +352,8 @@ async function sweepResidentChildren(options = {}) {
       if (!entry.dispose) continue
       await entry.dispose()
       released += 1
+      // 释放成功才删目录；删不掉/读不出父会话一律静默（deleteChildSessionDir 自己兜着）
+      await deleteChildSessionDir(ctx0, entry.id)
     } catch { /* 已经没了 / 释放失败：静默 */ }
   }
   return released
@@ -1128,6 +1145,19 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       if (!keepChild) {
         try { await activation.dispose() } catch { /* already gone */ }
         untrackResidentChild(childId)
+        // dispose 之后顺手删掉这个**我们自己创建**的子会话目录：
+        // DSH 的「N 个子智能体」数的是 `subagent/catalog` 记录，不删记录计数就只增不减。
+        // 两条硬性跳过：
+        //   ① reuse 模式不删 —— 这个子会话 id 马上会被调用方写回 `member.convId`，
+        //      成员下一轮要接着它续聊（删了就断上下文）；
+        //   ② `deleteChildSessionDir` 内部再挡一层：父会话对不上 / 命中任何成员 convId /
+        //      审校子会话 / 活跃 agent / 驻留表 → 一律不删。
+        if (!reuseEnabled) {
+          await deleteChildSessionDir(ctx, childId, {
+            parentSession: parentIdOf(parent),
+            extraKeep: member.convId ? [member.convId] : [],
+          })
+        }
       } else if (keepResident) {
         // 登记用途：minimal preset = 审核位（10 分钟清扫），其余 = 干活的成员（30 分钟 + 失联才清扫）；
         // `__residentKind` 只给「指挥拆解」这种 minimal 但需要跨轮保留的线程用。
@@ -2229,7 +2259,19 @@ export function createHandler(ctx, config = {}) {
               }
             } catch { /* 绑定失败不影响状态读取 */ }
             // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
-            return sendTagged(req, res, { state: pollStateView(state), config: publicConfig(config), residentChildren: residentChildren.size })
+            // subagentSessions / childDirs：同一个「子智能体」计数的两个口径，方便对照——
+            //   subagentSessions = 本会话 `subagent/catalog` 记录数（页面显示的就是它，dispose 不减）；
+            //   childDirs        = 磁盘上 parentSession === 本会话的子会话目录数。
+            // 目标会话：?sessionId=... → 当前组 → 第一个组。取不到就给 null（不骗成 0）。
+            const statsSession = normalizeSessionId(url.searchParams.get('sessionId') || (activeGroup() || {}).sessionId)
+            const childStats = await childSessionStats(ctx, statsSession)
+            return sendTagged(req, res, {
+              state: pollStateView(state),
+              config: publicConfig(config),
+              residentChildren: residentChildren.size,
+              subagentSessions: childStats.subagentSessions,
+              childDirs: childStats.childDirs,
+            })
           }
           if (req.method === 'POST') {
             const body = await readBody(req)
@@ -2314,6 +2356,22 @@ export function createHandler(ctx, config = {}) {
               const result = await pruneSessionDirs(ctx, {
                 dryRun: Boolean(body.dryRun),
                 keepDays: Number.isFinite(keepDays) && keepDays >= 0 ? keepDays : 7,
+              })
+              return send(res, 200, result)
+            }
+            if (route === PRUNE_CHILDREN_ROUTE) {
+              // 按父会话清理子会话目录（POST /council/api/sessions/prune-children）：
+              // body = { sessionId?（默认当前组会话）, dryRun?, keepMinutes?（默认 10） }。
+              // 与 /sessions/prune 的区别：只删 parentSession === sessionId 的目录；
+              // 当前会话自己、成员 convId、驻留登记表里的子会话一律保留。
+              const requested = body.sessionId ? String(body.sessionId) : ''
+              const target = normalizeSessionId(requested) || normalizeSessionId((activeGroup() || {}).sessionId)
+              if (!target) return send(res, 400, { error: 'no sessionId: pass sessionId or open a group session first' })
+              const keepMinutes = Number(body.keepMinutes)
+              const result = await pruneChildDirsByParent(ctx, {
+                sessionId: target,
+                dryRun: Boolean(body.dryRun),
+                keepMinutes: Number.isFinite(keepMinutes) && keepMinutes >= 0 ? keepMinutes : CHILD_DIR_KEEP_MINUTES,
               })
               return send(res, 200, result)
             }
@@ -3401,13 +3459,369 @@ async function pruneChildSessionDirs(ctx, ids) {
     const uuid = sessionDirUuid(value)
     if (!uuid || keep.has(uuid)) continue
     const target = await findSessionDir(uuid)
-    if (!target) continue
+    if (!target) {
+      // 目录已经不在盘上（dispose 时已顺手删掉，见 deleteChildSessionDir）——
+      // 回执里的「已清理 N 个子会话目录」仍然要算上它，否则会从 N 变成 0。
+      removed.push(uuid)
+      continue
+    }
     try {
       await rm(target.dir, { recursive: true, force: true })
       removed.push(uuid)
     } catch { /* 删不掉（占用/权限）就跳过 */ }
   }
   return removed
+}
+
+/* ── 子会话目录：按父会话「精确清除」（2026-11-05）─────────────────────────
+ *
+ * 背景：DSH 会话页那个「N 个子智能体」统计的是**本会话的 `subagent/catalog` 记录数**
+ * （每条记录对应一个 `parentSession` = 本会话的子会话目录）。`dispose()` 只释放内存、
+ * **不删会话记录**，所以计数只增不减。
+ *
+ * 三条出路（保留下面第 1 条的硬约束）：
+ *   1) 插件自己 dispose 掉**自己创建**的子会话后，顺手删它的目录（精确、即时，见
+ *      `deleteChildSessionDir`，调用点在 seam 的 finally 与驻留清扫器里）；
+ *   2) `POST /council/api/sessions/prune-children`：按父会话 + 目录 mtime 批量清历史
+ *      （`pruneChildDirsByParent`），默认只清 10 分钟以前的；
+ *   3) `GET /council/api/state` 里给 `subagentSessions`（记录数）与 `childDirs`（磁盘目录数），
+ *      方便对照「计数涨得比目录快还是慢」。
+ *
+ * 硬约束（与 `/sessions/prune` 共用同一份 `sessionKeepIds`，不另算）：
+ *   - 只删 `$DSH_HOME/sessions/<桶>/<uuid>/` 这种**两层直接子目录**，目录名必须是 uuid；
+ *   - 桶与目录**都不跟符号链接**（`resolveSessionDir` 用 realpath 反查）；非 uuid 一律不动；
+ *   - 删除前必须读出 `session.v4.jsonl.zstd` 首行的 `parentSession`，且它（归一化掉
+ *     `session-` 前缀后）必须等于期望的父会话；**读不出 / 对不上就不删**；
+ *   - 当前会话自己、任何组 `sessionId` / 成员 `convId` / 指挥 `commanderConvId` /
+ *     审校子会话 / 活跃 agent / 驻留登记表里的子会话，一律不删。
+ */
+const SESSION_LOG_NAME_RE = /^session(\.[a-z0-9]+)*\.jsonl(\.zstd)?$/
+/** 只读首帧：会话首行（header）通常压在几百字节里，避免为了一行 header 去读整个 4MB 日志。 */
+const SESSION_LOG_HEAD_BYTES = 4096
+/** `/state` 里的目录扫描缓存（桶 mtime 一变就失效），避免每次轮询都扫 300+ 目录。 */
+const CHILD_DIR_CACHE_MS = 10_000
+/** 磁盘上按 `subagent/catalog` 计数（多帧 zstd）比较贵，单独缓存 30 秒。 */
+const CATALOG_COUNT_CACHE_MS = 30_000
+let childDirCache = { stamp: null, at: 0, rows: [] }
+let catalogCountCache = { key: '', at: 0, count: null }
+
+/** 会话目录里优先读哪个日志文件：`session.v4.jsonl.zstd` > 其它 `session*.jsonl[.zstd]`。 */
+async function sessionLogFile(dir) {
+  let names = []
+  try { names = await readdir(dir) } catch { return null }
+  const logs = names.filter((name) => SESSION_LOG_NAME_RE.test(name))
+  if (!logs.length) return null
+  logs.sort((a, b) => Number(b.includes('.v4.')) - Number(a.includes('.v4.')))
+  return path.join(dir, logs[0])
+}
+
+/** 读日志文件开头 SESSION_LOG_HEAD_BYTES 字节（不整读）；失败返回 null。 */
+async function readSessionLogHead(dir, bytes = SESSION_LOG_HEAD_BYTES) {
+  const file = await sessionLogFile(dir)
+  if (!file) return null
+  let handle
+  try {
+    handle = await open(file, 'r')
+    const buffer = Buffer.alloc(bytes)
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0)
+    if (!bytesRead) return null
+    return { file, name: path.basename(file), buffer: buffer.subarray(0, bytesRead) }
+  } catch {
+    return null
+  } finally {
+    if (handle) { try { await handle.close() } catch { /* ignore */ } }
+  }
+}
+
+/** 日志首行 JSON（多帧 zstd 只解第一帧；解析失败返回 null）。 */
+function firstLogRecord(head) {
+  if (!head) return null
+  let text = null
+  if (head.name.endsWith('.zstd')) {
+    try { text = zstdDecompressSync(head.buffer).toString('utf8') } catch { return null }
+  } else {
+    text = head.buffer.toString('utf8')
+  }
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try { return JSON.parse(trimmed) } catch { return null }
+  }
+  return null
+}
+
+/** 会话目录首行里的 { id, parent }（都已归一化：去掉 `session-` 前缀；读不出为 null）。 */
+async function sessionDirHeader(dir) {
+  const record = firstLogRecord(await readSessionLogHead(dir))
+  if (!record) return { id: null, parent: null }
+  return {
+    id: normalizeSessionId(record.id) || null,
+    parent: record.parentSession ? normalizeSessionId(record.parentSession) : null,
+  }
+}
+
+/** 父 agent 的会话 id（`Agent.id` 就是 SessionId；兼容 `agent.session.id` 形态）。 */
+function parentIdOf(parent) {
+  return String(parent?.id || parent?.session?.id || '') || undefined
+}
+
+/** 本插件所有组的会话 id（归一化）——「这个子会话是不是我们派出去的」的兜底判据。 */
+function groupSessionIdSet() {  const set = new Set()
+  for (const group of state.groups || []) {
+    const uuid = sessionDirUuid(group.sessionId)
+    if (uuid) set.add(uuid)
+  }
+  return set
+}
+
+/**
+ * 扫 `$DSH_HOME/sessions/<桶>/<uuid>/`，返回每条的 `{ id, dir, mtime, parent }`。
+ * `parent` = 日志首行的 `parentSession`（归一化）；读不出 header 的目录 **不计入**——
+ * 计不出来就不该出现在「可清理」候选里。
+ */
+async function scanSessionDirRows() {
+  const rows = []
+  const rootReal = await realpath(SESSIONS_DIR).catch(() => null)
+  if (!rootReal) return rows
+  let buckets = []
+  try { buckets = await readdir(SESSIONS_DIR, { withFileTypes: true }) } catch { return rows }
+  for (const bucket of buckets) {
+    if (!bucket.isDirectory() || bucket.isSymbolicLink()) continue
+    let entries = []
+    try { entries = await readdir(path.join(SESSIONS_DIR, bucket.name), { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const uuid = sessionDirUuid(entry.name)
+      if (!uuid || !entry.isDirectory() || entry.isSymbolicLink()) continue
+      const target = await resolveSessionDir(rootReal, bucket.name, entry.name)
+      if (!target) continue
+      const header = await sessionDirHeader(target.dir)
+      if (!header.parent) continue
+      rows.push({ id: uuid, dir: target.dir, mtime: target.stat.mtimeMs, parent: header.parent })
+    }
+  }
+  return rows
+}
+
+/** 桶名 + 桶 mtime 的指纹：加/删子会话目录会改桶 mtime，据此自动失效缓存。 */
+async function sessionBucketStamp() {
+  let stamp = ''
+  let buckets = []
+  try { buckets = await readdir(SESSIONS_DIR, { withFileTypes: true }) } catch { return '' }
+  for (const bucket of buckets) {
+    if (!bucket.isDirectory() || bucket.isSymbolicLink()) continue
+    const stat = await lstat(path.join(SESSIONS_DIR, bucket.name)).catch(() => null)
+    stamp += bucket.name + ':' + (stat ? stat.mtimeMs : 0) + ';'
+  }
+  return stamp
+}
+
+/** 带缓存的全量扫描（只给 `/state` 这种高频只读路径用；清理路径必须走无缓存的 scanSessionDirRows）。 */
+async function cachedSessionDirRows() {
+  const stamp = await sessionBucketStamp()
+  const now = Date.now()
+  if (childDirCache.stamp === stamp && now - childDirCache.at < CHILD_DIR_CACHE_MS) return childDirCache.rows
+  const rows = await scanSessionDirRows()
+  childDirCache = { stamp, at: Date.now(), rows }
+  return rows
+}
+
+/** 清空两处缓存（测试夹具换了 sessions 目录时用；也由 `__resetChildDirCache` 暴露给测试）。 */
+function resetChildDirCache() {
+  childDirCache = { stamp: null, at: 0, rows: [] }
+  catalogCountCache = { key: '', at: 0, count: null }
+}
+
+/* ── 多帧 zstd：会话日志是一串独立帧，Node 的一次性 API 只解第一帧 ──────────
+ * 这里只做一个「找帧边界」的最小扫描器（读 header + block header，不解压内容，
+ * 所以很便宜）：坏帧/半截帧就停，返回已经找到的完整帧。没有引入任何依赖。
+ */
+const ZSTD_MAGIC = 0xfd2fb528
+
+/** 找出 buffer 里所有完整 zstd 帧的 [start, end)；结构异常/半截帧就停下（不抛）。 */
+function scanZstdFrames(buffer) {
+  const frames = []
+  let offset = 0
+  while (offset < buffer.length) {
+    const start = offset
+    if (buffer.length - offset < 4) return { frames, tornStart: start }
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) return { frames, corruptAt: offset }
+    offset += 4
+    if (offset === buffer.length) return { frames, tornStart: start }
+    const descriptor = buffer.readUInt8(offset)
+    offset += 1
+    if ((descriptor & 24) !== 0) return { frames, corruptAt: offset - 1 }
+    const contentSizeFlag = descriptor >>> 6
+    const singleSegment = (descriptor & 32) !== 0
+    const checksum = (descriptor & 4) !== 0
+    const dictionaryFlag = descriptor & 3
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes
+    if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start }
+    offset += remainingHeaderBytes
+    for (;;) {
+      if (buffer.length - offset < 3) return { frames, tornStart: start }
+      const blockHeader = buffer.readUIntLE(offset, 3)
+      offset += 3
+      const lastBlock = (blockHeader & 1) !== 0
+      const blockType = (blockHeader >>> 1) & 3
+      const blockSize = blockHeader >>> 3
+      if (blockType === 3) return { frames, corruptAt: offset - 3 }
+      const payloadBytes = blockType === 1 ? 1 : blockSize
+      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start }
+      offset += payloadBytes
+      if (lastBlock) break
+    }
+    if (checksum) {
+      if (buffer.length - offset < 4) return { frames, tornStart: start }
+      offset += 4
+    }
+    frames.push({ start, end: offset })
+  }
+  return { frames }
+}
+
+/** 一个会话目录的日志里有多少条 `subagent/catalog`（解不出来返回 null）。 */
+async function countCatalogRecordsInDir(dir) {
+  const file = await sessionLogFile(dir)
+  if (!file) return null
+  const stat = await lstat(file).catch(() => null)
+  if (!stat || !stat.isFile()) return null
+  const key = file + ':' + stat.size + ':' + stat.mtimeMs
+  const now = Date.now()
+  if (catalogCountCache.key === key && now - catalogCountCache.at < CATALOG_COUNT_CACHE_MS) {
+    return catalogCountCache.count
+  }
+  if (stat.size > 64 * 1024 * 1024) return null // 超大日志不扫，避免拖垮 /state
+  let buffer
+  try { buffer = await readFile(file) } catch { return null }
+  const { frames } = scanZstdFrames(buffer)
+  let count = 0
+  for (const frame of frames) {
+    let text = null
+    try { text = zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8') } catch { continue }
+    if (!text.includes('subagent/catalog')) continue
+    for (const line of text.split('\n')) {
+      if (!line.includes('subagent/catalog')) continue
+      try { if (JSON.parse(line).type === 'subagent/catalog') count += 1 } catch { /* 半截行 */ }
+    }
+  }
+  catalogCountCache = { key, at: Date.now(), count }
+  return count
+}
+
+/**
+ * 当前会话的两个对照数字：
+ *   - `subagentSessions`：会话事件里 `subagent/catalog` 的条数（= 页面那个「N 个子智能体」）。
+ *     会话在内存里就直接数事件（零 IO、口径与 UI 一致）；不在内存里才去读日志（多帧 zstd）。
+ *   - `childDirs`：磁盘上 `parentSession === 本会话` 的子会话目录数。
+ * 拿不到就给 `null`（不要骗成 0）。
+ */
+async function childSessionStats(ctx, sessionId) {
+  const normalized = normalizeSessionId(sessionId)
+  const stats = { subagentSessions: null, childDirs: null }
+  if (!normalized) return stats
+  let liveCount = null
+  try {
+    const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
+    if (sessions && typeof sessions.get === 'function') {
+      const raw = String(sessionId || '')
+      const candidates = raw.startsWith('session-') ? [raw] : ['session-' + raw, raw]
+      const session = candidates.map((id) => { try { return sessions.get(id) } catch { return undefined } }).find(Boolean)
+      if (session) liveCount = sessionEvents(session).filter((event) => event && event.type === 'subagent/catalog').length
+    }
+  } catch { liveCount = null }
+  if (liveCount !== null) {
+    stats.subagentSessions = liveCount
+  } else {
+    const dir = await findSessionDir(normalized)
+    stats.subagentSessions = dir ? await countCatalogRecordsInDir(dir.dir) : null
+  }
+  try {
+    const rows = await cachedSessionDirRows()
+    stats.childDirs = rows.filter((row) => row.parent === normalized).length
+  } catch { stats.childDirs = null }
+  return stats
+}
+
+/**
+ * dispose 掉一个**插件自己创建**的子会话之后，删掉它留在磁盘上的会话目录。
+ *
+ * 保守到「宁可不删」：读不出首行 `parentSession`、或它跟期望的父会话对不上、
+ * 或 id 命中任何保留集合 → 直接返回 null（不删）。
+ * @param {object} ctx 插件 ctx（取活跃 agent 保留集合）
+ * @param {string} childId 子会话 id（uuid，`session-` 前缀可选）
+ * @param {{ parentSession?: string, extraKeep?: Iterable<string> }} [options]
+ *        parentSession = 期望的父会话（seam 里就是 `parent.id`）；不给就只认「本插件任何组的会话」。
+ * @returns {Promise<string|null>} 删掉的 uuid，没删返回 null
+ */
+async function deleteChildSessionDir(ctx, childId, options = {}) {
+  const uuid = sessionDirUuid(childId)
+  if (!uuid) return null
+  // 驻留登记表里的子会话是「有意保留」的，绝不能在这里删
+  if (residentChildren.has(String(childId)) || residentChildren.has(uuid)) return null
+  const keep = sessionKeepIds(ctx)
+  if (options.extraKeep) {
+    for (const value of options.extraKeep) {
+      const extra = sessionDirUuid(value)
+      if (extra) keep.add(extra)
+    }
+  }
+  if (keep.has(uuid)) return null
+  const expected = normalizeSessionId(options.parentSession) || null
+  const target = await findSessionDir(uuid)
+  if (!target) return null
+  const header = await sessionDirHeader(target.dir)
+  if (!header.parent) return null // 读不出父会话 → 不删
+  if (expected) {
+    if (header.parent !== expected) return null
+  } else if (!groupSessionIdSet().has(header.parent)) {
+    return null // 不是本插件任一组派出去的 → 不删
+  }
+  try {
+    await rm(target.dir, { recursive: true, force: true })
+    return uuid
+  } catch {
+    return null // 占用/权限失败：静默
+  }
+}
+
+/**
+ * `POST /council/api/sessions/prune-children` 的实现：只清「父会话 === sessionId」的
+ * 子会话目录，且目录 mtime 早于 keepMinutes 分钟、且不在保留集合/驻留表里。
+ *
+ * @param {object} ctx 插件 ctx
+ * @param {{ sessionId?: string, dryRun?: boolean, keepMinutes?: number, now?: number }} [options]
+ * @returns {Promise<{ removed: Array<{ id: string, sizeMb: number, mtime: number }>, kept: number, dryRun: boolean }>}
+ */
+async function pruneChildDirsByParent(ctx, { sessionId, dryRun = false, keepMinutes = CHILD_DIR_KEEP_MINUTES, now = Date.now() } = {}) {
+  const normalized = normalizeSessionId(sessionId)
+  const minutes = Number(keepMinutes)
+  const windowMinutes = Number.isFinite(minutes) && minutes >= 0 ? minutes : CHILD_DIR_KEEP_MINUTES
+  const cutoff = now - windowMinutes * 60_000
+  const result = { removed: [], kept: 0, dryRun: Boolean(dryRun) }
+  if (!normalized) return result
+  const keep = sessionKeepIds(ctx)
+  const own = sessionDirUuid(normalized)
+  if (own) keep.add(own) // 当前会话自己（哪怕它恰好是某个组的 sessionId 之外的写法）
+  for (const id of residentChildren.keys()) {
+    const uuid = sessionDirUuid(id)
+    if (uuid) keep.add(uuid)
+  }
+  const rows = await scanSessionDirRows()
+  let total = 0
+  for (const row of rows) {
+    if (row.parent !== normalized) continue
+    total += 1
+    if (keep.has(row.id) || row.mtime > cutoff) continue
+    const sizeMb = Math.round(((await dirSizeBytes(row.dir)) / 1048576) * 100) / 100
+    if (!dryRun) {
+      try { await rm(row.dir, { recursive: true, force: true }) } catch { continue } // 删不掉就计入 kept
+    }
+    result.removed.push({ id: row.id, sizeMb, mtime: row.mtime })
+  }
+  result.kept = total - result.removed.length
+  return result
 }
 
 function rosterText(group) {
