@@ -850,8 +850,16 @@ async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, time
   }
 }
 
-/** One Claude Code turn. Resumes the stored session when present. */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName }) {
+/** 测试可替换的进程执行器（只给 runClaude 用：断言 argv 里没有 `--resume`）。 */
+let claudeExecOverride = null
+
+/**
+ * One Claude Code turn. Resumes the stored session when present.
+ * `noResume` 强制全新会话 —— 不追加 `--resume`。审核一律走这个模式：续接一个
+ * 「已死/空上下文」的旧会话时，claude 不答题、只回问候（实测日志里 8 次
+ * `commander image review unparsed: I'm here and ready to help. What would you like me to do?`）。
+ */
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName, noResume }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -860,8 +868,9 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
     '--permission-mode', 'bypassPermissions']
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
-  if (resume) args.push('--resume', resume)
-  const { code, out, err, reason, error: killedError } = await run(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
+  const exec = claudeExecOverride || run
+  if (resume && !noResume) args.push('--resume', resume)
+  const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
   const events = jsonLines(out)
   const texts = []
   for (const event of events) {
@@ -877,7 +886,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   return {
     ok: code === 0 && Boolean(result) && result.is_error !== true && !reason,
     text,
-    convId: resume ?? sessionId,
+    convId: noResume ? sessionId : (resume ?? sessionId),
     usage: {
       input: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
       output: usage.output_tokens ?? 0,
@@ -1064,7 +1073,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   }
   const reuseEnabled = Boolean((state.config && state.config.reuseAgents) || (config && config.reuseAgents) || member.__reuse)
   const reviewSlot = presetId === 'minimal'
-  if (reviewSlot && reuseEnabled && member.__reviewConvId) {
+  // 审核位（`__noResume`）一律全新子会话：不复用历史审核会话，也不续接成员自己的会话。
+  if (!member.__noResume && reviewSlot && reuseEnabled && member.__reviewConvId) {
     member.convId = member.__reviewConvId
   }
   // `__continue`：截断续跑时即使没开 reuseAgents，也要接着同一个子会话跑（保住上下文）
@@ -1353,21 +1363,36 @@ async function reviewImage(ctx, group, result, config, styleOverride, callId) {
     '只输出一个 JSON 对象，不要其它文字：',
     '{"ok":true 或 false,"reason":"不超过 80 字的中文理由"}',
   ].join('\n')
-  const review = await runClaude({
+  const env = await envFor('claude', config)
+  // 审核看图也是旁路：`noResume: true` → 绝不追加 --resume（旧会话已死时只会拿到问候）
+  const ask = (text) => runClaude({
     cwd: group.workspacePath || config.defaultWorkspace || process.cwd(),
     model: reviewer.model,
-    prompt,
-    env: await envFor('claude', config),
+    prompt: text,
+    env,
+    noResume: true,
   })
-  const match = String(review.text || '').match(/\{[\s\S]*\}/)
-  let parsed = null
-  if (match) {
+  const parse = (review) => {
+    const match = String((review && review.text) || '').match(/\{[\s\S]*\}/)
+    if (!match) return null
     try {
       const value = JSON.parse(match[0])
-      parsed = { ok: value.ok === true, reason: String(value.reason ?? '') }
-    } catch { parsed = null }
+      return { ok: value.ok === true, reason: String(value.reason ?? '') }
+    } catch { return null }
   }
-  const verdict = parsed ?? { ok: null, reason: review.ok ? '审校输出无法解析' : (review.error || '审校失败') }
+  let review = await ask(prompt)
+  let parsed = parse(review)
+  let retried = false
+  if (!parsed && (looksLikeGreeting(review && review.text) || (review && review.ok))) {
+    retried = true
+    console.error('[council] reviewImage ' + (looksLikeGreeting(review && review.text) ? '疑似问候/空炮' : '输出无法解析')
+      + '，换新会话（无 resume）重试 · 首次原文=' + reviewRawSnippet(review && review.text))
+    review = await ask(prompt + REVIEW_JSON_NOTE)
+    parsed = parse(review)
+    console.error('[council] reviewImage 重试' + (parsed ? '成功' : '仍失败') + ' · 重试原文=' + reviewRawSnippet(review && review.text))
+  }
+  const verdict = parsed
+    ?? (retried || (review && review.ok) ? { ok: false, reason: REVIEW_UNPARSED_REASON } : { ok: false, reason: (review && review.error) || '审校失败' })
   verdict.by = reviewer.name
   return verdict
 }
@@ -1577,6 +1602,76 @@ function verdictOf(text) {
   return null
 }
 
+/**
+ * 问候 / 空炮识别：claude 在「已死/空上下文」的旧会话上 `--resume` 时不答题，
+ * 只回一句 `I'm here and ready to help.` / `How can I help you?` / `你希望我做什么？`。
+ * 这类输出长度都在一两百字符以内，而且**永远不含 JSON 结论** —— 所以调用方只在
+ * verdictOf() 拿不到结论时才用它，避免误伤「reason 里恰好带了这句话」的正常 JSON。
+ */
+const GREETING_PATTERNS = [
+  /ready to help/i,
+  /how can i help/i,
+  /what would you like/i,
+  /what can i do for you/i,
+  /let me know what you/i,
+  /你希望我/,
+  /请告诉我/,
+  /有什么可以帮/,
+  /有什么需要/,
+  /需要我做什么/,
+  /我能帮你/,
+]
+function looksLikeGreeting(text) {
+  const raw = String(text ?? '').trim()
+  if (!raw || raw.length >= 200) return false
+  return GREETING_PATTERNS.some((re) => re.test(raw))
+}
+
+/** 审核重试用语：明确要求只回 JSON（全新会话里没有历史上下文，必须自带指令）。 */
+const REVIEW_JSON_NOTE = '\n\n注意：只输出 JSON，不要任何解释或前后缀。'
+/** 审核输出无法解析时的兜底理由（不再产出「未判定」）。 */
+const REVIEW_UNPARSED_REASON = '审核输出无法解析（已重试）'
+
+/** 截断到 200 字符用于日志（去掉换行，便于一行对账）。 */
+function reviewRawSnippet(text) {
+  return JSON.stringify(String(text || '').replace(/\s+/g, ' ').slice(0, 200))
+}
+
+/**
+ * 审核调用统一入口（审校 / 自审 / 指挥文本审核 / 指挥看图 / 看图审校都走这里）。
+ *
+ * 三条硬规则：
+ *  ① **绝不续接历史会话**：成员 convId 一律置空 + `__noResume`（runClaude 不追加 --resume）。
+ *     审核是旁路；续接「已死/空上下文」的旧会话只会拿到问候。
+ *  ② 输出命中问候/空炮 → 丢掉本次结果，**强制新会话重试一次**（仍无 resume）。
+ *  ③ 重试后仍解析不出 JSON → verdict 归一为 `{ok:false}`（不再产出 `unverified`/「未判定」）。
+ *
+ * 返回 `{ verdict, result, parsed, retried }`：verdict 恒为 `{ok:boolean, reason}`（不会 ok:null），
+ * `result` 是最后一次调用的原始结果（调用方据此判失败原因）。
+ */
+async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, label) {
+  const clean = () => Object.assign({}, member, { convId: undefined, __noResume: true })
+  let result = await runKind(ctx, clean(), prompt, config, group, styleOverride, parent, timeoutMs, callId)
+  let raw = String(result && result.text || '')
+  let parsed = verdictOf(raw)
+  let retried = false
+  // 只有「拿不到 JSON 结论」时才看问候：正常 JSON 的 reason 里出现这些词不受影响。
+  if (parsed === null && (looksLikeGreeting(raw) || (result && result.ok))) {
+    const why = looksLikeGreeting(raw) ? '疑似问候/空炮（旧会话不答题）' : '输出无法解析'
+    retried = true
+    console.error('[council] ' + label + ' ' + why + '，换新会话（无 resume）重试 · 首次原文=' + reviewRawSnippet(raw))
+    result = await runKind(ctx, clean(), prompt + REVIEW_JSON_NOTE, config, group, styleOverride, parent, timeoutMs, callId)
+    raw = String(result && result.text || '')
+    parsed = verdictOf(raw)
+    console.error('[council] ' + label + ' 重试' + (parsed ? '成功' : '仍失败') + ' · 重试原文=' + reviewRawSnippet(raw))
+  }
+  let verdict
+  if (parsed) verdict = parsed
+  else if (!retried && result && result.ok === false) verdict = { ok: false, reason: String(result.error || '') || (label + '调用失败') }
+  else verdict = { ok: false, reason: REVIEW_UNPARSED_REASON }
+  return { verdict, result, parsed: Boolean(parsed), retried }
+}
+
 /** One turn on the member's own framework, preserving its session and tools. */
 let runKindOverride = null
 
@@ -1612,7 +1707,9 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
     result = await runner({
       cwd,
       model: member.model || undefined,
-      resume: member.convId || undefined,
+      // `__noResume`（审核调用）：强制全新会话，不追加 --resume
+      resume: member.__noResume ? undefined : (member.convId || undefined),
+      noResume: Boolean(member.__noResume),
       prompt,
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
@@ -1629,7 +1726,12 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
   return result
 }
 
-/** Stage one: the producing agent reviews its own output in its own session. */
+/**
+ * Stage one: the producing agent reviews its own output.
+ * ⚠️ 审核不续接历史会话：即使自审过去「在成员自己的会话里跑」，那个会话一旦已死/空上下文，
+ * `--resume` 只会换来一句问候。所以这里传的是**成员副本**（convId 清空 + `__noResume`），
+ * 既不复用它的线程，也不会把审核子会话写回 `member.convId`。
+ */
 async function selfReview(ctx, member, task, output, config, group, styleOverride, parent, callId) {
   if (member.kind === 'image') {
     const verdict = await reviewImage(ctx, group, { file: output.file, task }, config, styleOverride, callId)
@@ -1643,14 +1745,7 @@ async function selfReview(ctx, member, task, output, config, group, styleOverrid
     output.text,
     '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
   ].join('\n')
-  const result = await runKind(ctx, member, prompt, config, group, undefined, parent, undefined, callId)
-  let parsed = verdictOf(result.text)
-  if (parsed === null && result.ok) {
-    const retry = await runKind(ctx, member, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, undefined, callId)
-    parsed = verdictOf(retry.text)
-  }
-  if (parsed === null) console.error('[council] selfReview unparsed raw:', JSON.stringify(String(result.text || '').slice(0, 400)))
-  const verdict = parsed ?? { ok: null, reason: result.ok ? '自审输出无法解析（已重试一次）' : (result.error || '自审失败') }
+  const { verdict } = await runReviewTurn(ctx, member, prompt, config, group, undefined, parent, undefined, callId, 'selfReview')
   verdict.by = member.name
   return verdict
 }
@@ -1672,16 +1767,11 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
     reviewText(output),
     '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
   ].join('\n')
-  const reviewChildKey = '__reviewConvId'
-  reviewer[reviewChildKey] = (state.reviewChildren || {})[reviewer.id]
-  const result = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt, config, group, undefined, parent, 120_000, callId)
-  if (result && result.convId) { state.reviewChildren = state.reviewChildren || {}; state.reviewChildren[reviewer.id] = result.convId; save().catch(() => {}) }
-  let parsed = verdictOf(result.text)
-  if (parsed === null && result.ok) {
-    const retry = await runKind(ctx, Object.assign({}, reviewer, { convId: reviewer[reviewChildKey], __preset: 'minimal', __noTools: true }), prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000, callId)
-    parsed = verdictOf(retry.text)
-  }
-  const verdict = parsed ?? { ok: null, reason: result.ok ? '审校输出无法解析（已重试一次）' : (result.error || '审校失败') }
+  // 审核位一律全新会话（不再复用 state.reviewChildren / __reviewConvId）：见 runReviewTurn。
+  const { verdict } = await runReviewTurn(
+    ctx, Object.assign({}, reviewer, { __preset: 'minimal', __noTools: true }),
+    prompt, config, group, undefined, parent, 120_000, callId, 'prelimReview',
+  )
   verdict.by = reviewer.name
   return verdict
 }
@@ -1706,17 +1796,11 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       '',
       '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 80 字的中文理由"}',
     ].join('\n')
-    // 审核是旁路：不强制保留子会话（只有页面开了 reuseAgents 才会按复用走后端）
-    const imgReviewer = Object.assign({}, commanderMember, { convId: commanderMember.convId })
-    let seen = await runKind(ctx, imgReviewer, imagePrompt, config, group, styleOverride, parent, 120_000, callId)
-    let parsed = verdictOf(seen.text)
-    if (parsed === null && seen.ok) {
-      const retry = await runKind(ctx, imgReviewer, imagePrompt + '\n\n注意：只输出 JSON，不要任何解释。', config, group, styleOverride, parent, 120_000, callId)
-      parsed = verdictOf(retry.text)
-    }
-    const verdict = parsed ?? { ok: null, reason: seen.ok ? '指挥看图后输出无法解析（已重试一次）' : (seen.error || '指挥读图失败') }
+    // 审核是旁路：不强制保留子会话，也不续接指挥自己的旧会话（见 runReviewTurn）。
+    const { verdict } = await runReviewTurn(
+      ctx, commanderMember, imagePrompt, config, group, styleOverride, parent, 120_000, callId, 'commanderReview(image)',
+    )
     verdict.by = commanderMember.name
-    if (parsed === null) console.error('[council] commander image review unparsed:', String(seen.text || '').slice(0, 200))
     return verdict
   }
   if (commanderMember) {
@@ -1735,14 +1819,10 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
     // 审核不强制保留子会话（`__reuse` 会让 keepChild 恒为 true，审核子会话就永久驻留）。
-    const reviewMember = Object.assign({}, commanderMember, { convId: commanderMember.convId, __preset: 'minimal', __noTools: true })
-    const result = await runKind(ctx, reviewMember, prompt, config, group, undefined, parent, 120_000, callId)
-    let parsed = verdictOf(result.text)
-    if (parsed === null && result.ok) {
-      const retry = await runKind(ctx, reviewMember, prompt + '\n\n注意：只输出 JSON，不要任何解释或前后缀。', config, group, undefined, parent, 120_000, callId)
-      parsed = verdictOf(retry.text)
-    }
-    const verdict = parsed ?? { ok: null, reason: result.ok ? '指挥审核输出无法解析（已重试一次）' : (result.error || '审核失败') }
+    const { verdict } = await runReviewTurn(
+      ctx, Object.assign({}, commanderMember, { __preset: 'minimal', __noTools: true }),
+      prompt, config, group, undefined, parent, 120_000, callId, 'commanderReview',
+    )
     verdict.by = commanderMember.name
     return verdict
   }
