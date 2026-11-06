@@ -1307,6 +1307,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       const errorMsg = String(error?.message ?? error)
       // 第一层：捕获 UNSUPPORTED_REASONING_EFFORT，去掉 reasoningEffort 重试一次（同 provider/model）
       if (!reasoningEffortRetried && errorMsg.includes('UNSUPPORTED_REASONING_EFFORT')) {
+        console.error('[council] seam retry-without-effort:', provider, model, errorMsg)
         try { ctx0?.logger?.('council')?.info?.(`deepseek provider "${provider}" does not support reasoningEffort; retrying without it`) } catch { /* ignore */ }
         reasoningEffortRetried = true
         try {
@@ -1315,6 +1316,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           // 去掉 reasoningEffort 后仍失败 → 回退到 deepseek-official（如果还没用官方）
           if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw retryError
           const retryMsg = String(retryError?.message ?? retryError)
+          console.error('[council] seam fallback:', provider, model, retryMsg)
           try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed after removing reasoningEffort (${retryMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
           provider = DEEPSEEK_OFFICIAL_PROVIDER
           model = 'deepseek-flash'
@@ -1324,6 +1326,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         // 第二层：不是 UNSUPPORTED_REASONING_EFFORT（profile 里没注册该 provider / adapter 起不来）
         // → 直接用 DeepSeek 官方再开一次（只在「启动阶段」失败时回退；看门狗/取消不重试）
         if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
+        console.error('[council] seam fallback:', provider, model, errorMsg)
         try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed to start (${errorMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
         provider = DEEPSEEK_OFFICIAL_PROVIDER
         model = 'deepseek-flash'
