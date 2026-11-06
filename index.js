@@ -3436,6 +3436,16 @@ function losslessToolResult(value) {
   return keepLosslessFields(cloned.value, roundTripped)
 }
 
+/**
+ * 所有工具 `execute()` 的统一出口别名（council_delegate / council_member / council_role / council_policy）。
+ * 语义与 losslessToolResult 完全一致：递归只留 JSON 安全值（丢 undefined / function / Symbol /
+ * BigInt / Set/Map / 类实例 / 循环引用 / 非有限数字），保证 DSH 的 lossless JSON 校验必过。
+ * 单独留一个名字是为了让「工具返回值」在调用点上一眼可辨，将来要加内容过滤也只改这一处。
+ */
+function toolResult(value) {
+  return losslessToolResult(value)
+}
+
 /** 孤立成员判定：30 天没动过。 */
 const ORPHAN_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -4412,7 +4422,7 @@ function bindAgent(ctx, config, group, agent) {
         const acceptanceSummary = summarizeAcceptance(response.members)
         response.acceptanceStatus = acceptanceSummary.acceptanceStatus
         response.acceptanceNote = acceptanceSummary.acceptanceNote
-        return losslessToolResult(response)
+        return toolResult(response)
       },
     }))
     disposers.push(agentCtx.tools.register({
@@ -4455,7 +4465,7 @@ async execute(args) {
         if (args.action === 'prune') {
           const result = pruneOrphanMembers({ dryRun: Boolean(args.dryRun) })
           if (!result.dryRun && result.removed.length) await save()
-          return result
+          return toolResult(result)
         }
         if (args.action === 'list') {
           const members = (live.memberIds || [])
@@ -4463,9 +4473,11 @@ async execute(args) {
             .filter(Boolean)
             .map((m) => {
               const role = m.roleId ? state.roles.find((r) => r.id === m.roleId) : undefined
-              return { id: m.id, name: m.name, kind: m.kind, model: m.model, roleId: m.roleId, roleName: role?.name, cwd: m.cwd }
+              // 宁可给 null 也不产 undefined：成员缺 model / roleId / roleName / cwd 时，
+              // undefined 会让 DSH 判「value is not lossless JSON」并整条工具调用失败。
+              return { id: m.id, name: m.name, kind: m.kind, model: m.model ?? null, roleId: m.roleId ?? null, roleName: role?.name ?? null, cwd: m.cwd ?? null }
             })
-          return { members }
+          return toolResult({ members })
         }
         if (args.action === 'create') {
           const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
@@ -4486,12 +4498,12 @@ async execute(args) {
           state.members.push(member)
           if (!live.memberIds.includes(member.id)) live.memberIds.push(member.id)
           await save()
-          return { ok: true, persistent, member: { id: member.id, name: member.name, kind: member.kind, model: member.model, persistent } }
+          return toolResult({ ok: true, persistent, member: { id: member.id, name: member.name, kind: member.kind, model: member.model, persistent } })
         }
         if (args.action === 'update') {
-          if (!args.id) return { ok: false, error: 'id required for update' }
+          if (!args.id) return toolResult({ ok: false, error: 'id required for update' })
           const member = state.members.find((m) => m.id === args.id)
-          if (!member) return { ok: false, error: 'member not found: ' + args.id }
+          if (!member) return toolResult({ ok: false, error: 'member not found: ' + args.id })
           if (args.name !== undefined) member.name = args.name
           if (args.kind !== undefined && args.kind !== member.kind) {
             member.kind = args.kind
@@ -4502,23 +4514,23 @@ async execute(args) {
           if (args.cwd !== undefined) member.cwd = args.cwd || undefined
           member.updatedAt = Date.now()
           await save()
-          return { ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model } }
+          return toolResult({ ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model ?? null } })
         }
         if (args.action === 'delete') {
-          if (!args.id) return { ok: false, error: 'id required for delete' }
+          if (!args.id) return toolResult({ ok: false, error: 'id required for delete' })
           const inGroup = (live.memberIds || []).includes(args.id)
-          if (!inGroup) return { ok: false, error: 'member not in this group' }
-          if (live.memberIds.length <= 1) return { ok: false, error: 'cannot delete the last member' }
+          if (!inGroup) return toolResult({ ok: false, error: 'member not in this group' })
+          if (live.memberIds.length <= 1) return toolResult({ ok: false, error: 'cannot delete the last member' })
           const agents = ctx.get('agents')
           const parentAgent = agents ? agents.get(live.sessionId) : undefined
-          if (parentAgent && args.id === parentAgent.id) return { ok: false, error: 'cannot delete the parent session' }
+          if (parentAgent && args.id === parentAgent.id) return toolResult({ ok: false, error: 'cannot delete the parent session' })
           state.members = state.members.filter((m) => m.id !== args.id)
           live.memberIds = live.memberIds.filter((id) => id !== args.id)
           delete state.usage[args.id]
           await save()
-          return { ok: true }
+          return toolResult({ ok: true })
         }
-        return { ok: false, error: 'unknown action' }
+        return toolResult({ ok: false, error: 'unknown action' })
       },
     }))
     disposers.push(agentCtx.tools.register({
@@ -4550,10 +4562,11 @@ async execute(args) {
 async execute(args) {
         if (args.action === 'list') {
           const roles = state.roles.map((r) => ({
-            id: r.id, name: r.name, prompt: r.prompt, color: r.color, kind: r.kind, model: r.model,
-            defaultKind: roleKind(r), defaultModel: staffTarget(r, undefined, undefined).model,
+            id: r.id, name: r.name, prompt: r.prompt ?? null, color: r.color ?? null,
+            kind: r.kind ?? null, model: r.model ?? null,
+            defaultKind: roleKind(r) ?? null, defaultModel: staffTarget(r, undefined, undefined).model ?? null,
           }))
-          return { roles }
+          return toolResult({ roles })
         }
         if (args.action === 'create') {
           const role = {
@@ -4565,12 +4578,12 @@ async execute(args) {
           }
           state.roles.push(role)
           await save()
-          return { ok: true, role: { id: role.id, name: role.name } }
+          return toolResult({ ok: true, role: { id: role.id, name: role.name } })
         }
         if (args.action === 'update') {
-          if (!args.id) return { ok: false, error: 'id required for update' }
+          if (!args.id) return toolResult({ ok: false, error: 'id required for update' })
           const role = state.roles.find((r) => r.id === args.id)
-          if (!role) return { ok: false, error: 'role not found: ' + args.id }
+          if (!role) return toolResult({ ok: false, error: 'role not found: ' + args.id })
           if (args.name !== undefined) role.name = args.name
           if (args.prompt !== undefined) role.prompt = args.prompt
           if (args.color !== undefined) role.color = args.color
@@ -4578,27 +4591,27 @@ async execute(args) {
           if (args.kind !== undefined && args.kind !== role.kind && args.model === undefined) delete role.model
           Object.assign(role, pick(args, ['kind', 'model']))
           await save()
-          return { ok: true, role: { id: role.id, name: role.name } }
+          return toolResult({ ok: true, role: { id: role.id, name: role.name } })
         }
         if (args.action === 'delete') {
-          if (!args.id) return { ok: false, error: 'id required for delete' }
+          if (!args.id) return toolResult({ ok: false, error: 'id required for delete' })
           state.roles = state.roles.filter((r) => r.id !== args.id)
           for (const m of state.members) if (m.roleId === args.id) delete m.roleId
           await save()
-          return { ok: true }
+          return toolResult({ ok: true })
         }
         if (args.action === 'assign') {
-          if (!args.id) return { ok: false, error: 'role id required for assign' }
-          if (!args.memberId) return { ok: false, error: 'memberId required for assign' }
+          if (!args.id) return toolResult({ ok: false, error: 'role id required for assign' })
+          if (!args.memberId) return toolResult({ ok: false, error: 'memberId required for assign' })
           const role = state.roles.find((r) => r.id === args.id)
-          if (!role) return { ok: false, error: 'role not found: ' + args.id }
+          if (!role) return toolResult({ ok: false, error: 'role not found: ' + args.id })
           const member = state.members.find((m) => m.id === args.memberId)
-          if (!member) return { ok: false, error: 'member not found: ' + args.memberId }
+          if (!member) return toolResult({ ok: false, error: 'member not found: ' + args.memberId })
           member.roleId = args.id
           await save()
-          return { ok: true, member: { id: member.id, name: member.name, roleName: role.name } }
+          return toolResult({ ok: true, member: { id: member.id, name: member.name, roleName: role.name } })
         }
-        return { ok: false, error: 'unknown action' }
+        return toolResult({ ok: false, error: 'unknown action' })
       },
     }))
     disposers.push(agentCtx.tools.register({
@@ -4628,13 +4641,13 @@ async execute(args) {
 async execute(args) {
         const live = state.groups.find((g) => g.id === group.id) || group
         if (args.action === 'get') {
-          return {
+          return toolResult({
             maxRework: live.maxRework ?? 1,
             requirePrelim: live.requirePrelim ?? true,
             requireCommander: live.requireCommander ?? true,
             standard: live.standard ?? '',
             commanderPrompt: live.commanderPrompt ?? '',
-          }
+          })
         }
         if (args.action === 'set') {
           if (args.maxRework !== undefined) live.maxRework = Math.max(0, Math.floor(args.maxRework))
@@ -4643,16 +4656,16 @@ async execute(args) {
           if (args.standard !== undefined) live.standard = String(args.standard)
           if (args.commanderPrompt !== undefined) live.commanderPrompt = String(args.commanderPrompt)
           await save()
-          return {
+          return toolResult({
             ok: true,
             maxRework: live.maxRework ?? 1,
             requirePrelim: live.requirePrelim ?? true,
             requireCommander: live.requireCommander ?? true,
             standard: live.standard ?? '',
             commanderPrompt: live.commanderPrompt ?? '',
-          }
+          })
         }
-        return { ok: false, error: 'unknown action' }
+        return toolResult({ ok: false, error: 'unknown action' })
       },
     }))
     // 方案 A：父会话（本组会话的 agent）不得自己执行写操作，由守卫硬拦截。
