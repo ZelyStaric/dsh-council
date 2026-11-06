@@ -1262,7 +1262,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   // 成员该用哪个 provider/model：成员显式 provider 优先；没写就按小组默认
   // （apiclaude-deepseek），旧模型名映射到 deepseek-v4.1-flash。
   let provider = member.provider || deepseekMemberProvider(config, ctx)
-  const model = deepseekMemberModel(config, member)
+  let model = deepseekMemberModel(config, member)
   // 回执/日志要能看出**实际**走的是哪条链路（主会话与小组不是同一个 provider）。
   try { ctx0?.logger?.('council')?.info?.(`deepseek member "${member.name}" → ${provider} / ${model}`) } catch { /* ignore */ }
   const idleResult = () => ({
@@ -1285,7 +1285,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     model,
     usage: null,
   })
-  const startSeam = (providerId) => subagents.startActivation({
+  const startSeam = (providerId, modelId, includeReasoningEffort = true) => subagents.startActivation({
     provider: 'spawn',
     label: member.name,
     request: {
@@ -1295,9 +1295,10 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       cwd: member.cwd || config.defaultWorkspace || process.cwd(),
       agentOptions: {
         provider: providerId,
-        model,
+        model: modelId,
         // reviews only need a verdict: drop the default high reasoning effort
-        ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
+        // 只有 deepseek-official 才支持 reasoningEffort；其它 provider（如 apiclaude-deepseek）不传
+        ...presetId === 'minimal' && includeReasoningEffort && providerId === DEEPSEEK_OFFICIAL_PROVIDER ? { reasoningEffort: 'low' } : {},
       },
     },
     signal: activationSignal,
@@ -1305,16 +1306,35 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   })
   try {
     let activation
+    let reasoningEffortRetried = false
     try {
-      activation = await startSeam(provider)
+      activation = await startSeam(provider, model, true)
     } catch (error) {
-      // profile 里没注册该 provider / adapter 起不来时，用 DeepSeek 官方再开一次
-      // （只在「启动阶段」失败时回退；已经跑出内容后的失败不重放任务）。
-      // 看门狗/取消导致的 abort 不重试：重开也只会立刻再被中止。
-      if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
-      try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed to start (${String(error?.message ?? error)}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
-      provider = DEEPSEEK_OFFICIAL_PROVIDER
-      activation = await startSeam(provider)
+      const errorMsg = String(error?.message ?? error)
+      // 第一层：捕获 UNSUPPORTED_REASONING_EFFORT，去掉 reasoningEffort 重试一次（同 provider/model）
+      if (!reasoningEffortRetried && errorMsg.includes('UNSUPPORTED_REASONING_EFFORT')) {
+        try { ctx0?.logger?.('council')?.info?.(`deepseek provider "${provider}" does not support reasoningEffort; retrying without it`) } catch { /* ignore */ }
+        reasoningEffortRetried = true
+        try {
+          activation = await startSeam(provider, model, false)
+        } catch (retryError) {
+          // 去掉 reasoningEffort 后仍失败 → 回退到 deepseek-official（如果还没用官方）
+          if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw retryError
+          const retryMsg = String(retryError?.message ?? retryError)
+          try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed after removing reasoningEffort (${retryMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
+          provider = DEEPSEEK_OFFICIAL_PROVIDER
+          model = 'deepseek-flash'
+          activation = await startSeam(provider, model, true)
+        }
+      } else {
+        // 第二层：不是 UNSUPPORTED_REASONING_EFFORT（profile 里没注册该 provider / adapter 起不来）
+        // → 直接用 DeepSeek 官方再开一次（只在「启动阶段」失败时回退；看门狗/取消不重试）
+        if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
+        try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed to start (${errorMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
+        provider = DEEPSEEK_OFFICIAL_PROVIDER
+        model = 'deepseek-flash'
+        activation = await startSeam(provider, model, true)
+      }
     }
     childId = activation.childId ?? null
     // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录

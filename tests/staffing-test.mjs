@@ -3359,6 +3359,155 @@ try {
     return 'deepseek 行带 provider/model · claude 行不变'
   })
 
+  await check('deepseek 链路⑤：apiclaude-deepseek 不传 reasoningEffort（只有 deepseek-official 才传）', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    const parent = { id: 'session-b8888888-8888-4888-8888-888888888888' }
+    const member = { id: 'm_ds_apiclaude', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const okActivation = async (opts) => {
+      seen.push(opts.request.agentOptions)
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    // minimal preset（审核位）+ apiclaude-deepseek → 不该有 reasoningEffort
+    const apiclaude = await mod.runDeepseekViaSeam(makeCtx(okActivation), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    assert.ok(apiclaude.ok, 'apiclaude 审核应成功：' + JSON.stringify(apiclaude))
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', 'provider 必须是 apiclaude-deepseek')
+    assert.equal(seen[0].reasoningEffort, undefined, 'apiclaude-deepseek 不该传 reasoningEffort，实际：' + seen[0].reasoningEffort)
+
+    // minimal preset + deepseek-official → 该有 reasoningEffort: low
+    const officialMember = { id: 'm_ds_official', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', provider: 'deepseek-official' }
+    const official = await mod.runDeepseekViaSeam(makeCtx(okActivation, [{ id: 'deepseek-official' }]), officialMember, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    assert.ok(official.ok, 'deepseek-official 审核应成功：' + JSON.stringify(official))
+    assert.equal(seen[1].provider, 'deepseek-official', 'provider 必须是 deepseek-official')
+    assert.equal(seen[1].reasoningEffort, 'low', 'deepseek-official minimal 必须传 reasoningEffort: low，实际：' + seen[1].reasoningEffort)
+
+    // 非 minimal preset（干活成员）+ deepseek-official → 不传 reasoningEffort
+    const work = await mod.runDeepseekViaSeam(makeCtx(okActivation, [{ id: 'deepseek-official' }]), officialMember, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(work.ok, 'deepseek-official 工作应成功：' + JSON.stringify(work))
+    assert.equal(seen[2].provider, 'deepseek-official', 'provider 必须是 deepseek-official')
+    assert.equal(seen[2].reasoningEffort, undefined, 'deepseek-official 非审核位不该传 reasoningEffort，实际：' + seen[2].reasoningEffort)
+
+    return 'apiclaude 无 effort · official minimal 有 effort:low · official 工作无 effort'
+  })
+
+  await check('deepseek 链路⑥：回退 deepseek-official 时同步换 model 为 deepseek-flash', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-c9999999-9999-4999-8999-999999999999' }
+    const member = { id: 'm_ds_fallback', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const flaky = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
+      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    const fallback = await mod.runDeepseekViaSeam(makeCtx(flaky, [{ id: 'deepseek-official' }]), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
+    assert.equal(calls, 2, '首选 provider 启动失败时应重开一次官方，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次必须用 apiclaude-deepseek')
+    assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次 model 映射为 deepseek-v4.1-flash')
+    assert.equal(seen[1].provider, 'deepseek-official', '回退必须用 deepseek-official')
+    assert.equal(seen[1].model, 'deepseek-flash', '回退到 deepseek-official 必须同步换 model 为 deepseek-flash，实际：' + seen[1].model)
+    assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
+    assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
+    return '回退时 provider + model 都换 · 结果带回实际链路'
+  })
+
+  await check('deepseek 链路⑦：UNSUPPORTED_REASONING_EFFORT 错误 → 去掉 reasoningEffort 重试一次', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-d0000000-0000-4000-8000-000000000000' }
+    // deepseek-official + minimal preset 会传 reasoningEffort，但假设这个 provider 实例不支持
+    const member = { id: 'm_ds_unsupported', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'deepseek-official' }
+    const unsupported = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model, hasEffort: 'reasoningEffort' in opts.request.agentOptions })
+      if (calls === 1) throw new Error('UNSUPPORTED_REASONING_EFFORT: this provider does not support reasoningEffort')
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    // minimal preset（带 reasoningEffort）+ deepseek-official → 第一次失败、第二次去掉 effort 重试
+    const retry = await mod.runDeepseekViaSeam(makeCtx(unsupported, [{ id: 'deepseek-official' }]), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    assert.ok(retry.ok, 'UNSUPPORTED_REASONING_EFFORT 重试后应成功：' + JSON.stringify(retry))
+    assert.equal(calls, 2, '遇到 UNSUPPORTED_REASONING_EFFORT 应重试一次，实际 ' + calls + ' 次')
+    assert.equal(seen[0].hasEffort, true, '第一次应带 reasoningEffort（deepseek-official + minimal）')
+    assert.equal(seen[1].hasEffort, false, '第二次必须去掉 reasoningEffort，实际：' + seen[1].hasEffort)
+    assert.equal(seen[1].provider, 'deepseek-official', '重试应保持同一 provider')
+    assert.equal(seen[1].model, 'deepseek-v4.1-flash', '重试应保持同一 model（映射后）')
+    return 'UNSUPPORTED_REASONING_EFFORT → 去 effort 重试 · 同 provider/model'
+  })
+
+  await check('deepseek 链路⑧：UNSUPPORTED_REASONING_EFFORT 重试仍失败 → 回退 deepseek-official', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-e1111111-1111-4111-8111-111111111111' }
+    const member = { id: 'm_ds_fallback2', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const flakyProvider = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model, hasEffort: 'reasoningEffort' in opts.request.agentOptions })
+      // 第一次：apiclaude-deepseek + reasoningEffort → UNSUPPORTED_REASONING_EFFORT
+      if (calls === 1) throw new Error('UNSUPPORTED_REASONING_EFFORT: this provider does not support reasoningEffort')
+      // 第二次：apiclaude-deepseek 无 reasoningEffort → 仍失败（provider 本身有问题）
+      if (calls === 2) throw new Error('provider "apiclaude-deepseek" connection failed')
+      // 第三次：deepseek-official → 成功
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    const fallback = await mod.runDeepseekViaSeam(makeCtx(flakyProvider, [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }]), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
+    assert.equal(calls, 3, 'UNSUPPORTED_REASONING_EFFORT 重试失败应再回退官方，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
+    assert.equal(seen[0].hasEffort, false, '第一次：apiclaude-deepseek 不传 reasoningEffort（非 deepseek-official）')
+    assert.equal(seen[1].provider, 'apiclaude-deepseek', '第二次：重试仍用 apiclaude-deepseek')
+    assert.equal(seen[1].hasEffort, false, '第二次：仍无 reasoningEffort')
+    assert.equal(seen[2].provider, 'deepseek-official', '第三次：回退到 deepseek-official')
+    assert.equal(seen[2].model, 'deepseek-flash', '第三次：model 同步换成 deepseek-flash')
+    assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
+    assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
+    return '两次失败（effort + 无effort）→ 回退官方 · model 同步换'
+  })
+
 } finally {
   await new Promise((resolve) => server.close(resolve))
   await rm(HOME, { recursive: true, force: true })
