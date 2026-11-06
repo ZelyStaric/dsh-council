@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -3538,6 +3538,58 @@ try {
     assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
     return 'apiclaude 直接失败 → 回退 official · model 同步换 deepseek-flash'
+  })
+
+  await check('deepseek 链路⑩：stopReason=error + exhausted → 自动降级 official 重跑', async () => {
+    const makeCtx = (startActivation) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-g3333333-3333-4333-8333-333333333333' }
+    const member = { id: 'm_ds_degrade', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const exhausted = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
+      // 第一次：apiclaude-deepseek → stopReason=error + exhausted
+      if (calls === 1) {
+        return {
+          childId: 'child-exhausted-1',
+          dispose: async () => {},
+          result: Promise.resolve({
+            output: [{ type: 'text', text: '{"error":{"message":"All available accounts exhausted"}}' }],
+            stopReason: 'error',
+          }),
+        }
+      }
+      // 第二次：deepseek-official → 成功
+      return {
+        childId: 'child-official-2',
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: '改好了' }], stopReason: 'completed' }),
+      }
+    }
+    const degrade = await mod.runDeepseekViaSeam(makeCtx(exhausted), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(degrade.ok, '降级后应成功：' + JSON.stringify(degrade))
+    assert.equal(calls, 2, 'exhausted 应触发降级重跑，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
+    assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次：model 是 v4.1-flash')
+    assert.equal(seen[1].provider, 'deepseek-official', '第二次：降级到 deepseek-official')
+    assert.equal(seen[1].model, 'deepseek-flash', '第二次：model 同步换成 deepseek-flash')
+    assert.equal(degrade.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
+    assert.equal(degrade.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
+    assert.ok(degrade.degraded, '结果必须包含 degraded 字段')
+    assert.match(degrade.degraded, /apiclaude-deepseek.*不可用/, 'degraded 必须说明是 apiclaude 不可用')
+    assert.match(degrade.degraded, /降级.*deepseek-official/, 'degraded 必须说明降级到 official')
+    assert.equal(degrade.text, '改好了', '降级后的文本必须是官方返回的')
+    // 成员配置不应被修改
+    assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
+    assert.equal(member.model, 'deepseek-flash', '成员 model 不应被修改')
+    return 'stopReason=error + exhausted → 降级 official · 回执含说明 · 成员配置不变'
   })
 
 } finally {

@@ -1340,6 +1340,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     let keepChild = reuseEnabled
     // 只有「正常拿到结果且决定保留」才登记为驻留（抛错路径不登记，清理交给调用方）
     let keepResident = false
+    let degraded = false
     try {
       const result = await activation.result
       if (idleFired) { keepChild = false; return idleResult() }
@@ -1351,6 +1352,44 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         .trim()
       const stopReason = String(result.stopReason || '')
       const truncated = TRUNCATED_STOP_REASONS.has(stopReason)
+      // apiclaude 账号池耗尽/上游错误 → 自动降级 deepseek-official 重跑一次
+      const needsDegrade = stopReason === 'error' && /error.*(exhausted|server_error|upstream)/i.test(text)
+      if (needsDegrade && provider !== DEEPSEEK_OFFICIAL_PROVIDER) {
+        const degradeReason = text.match(/error[^}]*/i)?.[0] || stopReason
+        console.error('[council] seam degrade:', provider, model, degradeReason)
+        try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed with ${stopReason} (${degradeReason}); degrading to ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
+        // 降级：先 dispose 原 activation，用官方重跑（不改成员配置，只本次生效）
+        try { await activation.dispose() } catch { /* ignore */ }
+        const officialProvider = DEEPSEEK_OFFICIAL_PROVIDER
+        const officialModel = 'deepseek-flash'
+        activation = await startSeam(officialProvider, officialModel, presetId === 'minimal')
+        childId = activation.childId ?? null
+        if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
+        const officialResult = await activation.result
+        const officialText = (officialResult.output || [])
+          .filter((block) => block && block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+          .trim()
+        const officialStopReason = String(officialResult.stopReason || '')
+        const officialTruncated = TRUNCATED_STOP_REASONS.has(officialStopReason)
+        keepChild = reuseEnabled || officialTruncated
+        keepResident = keepChild && Boolean(childId)
+        degraded = true
+        provider = officialProvider
+        model = officialModel
+        return {
+          ok: Boolean(officialText) && !officialTruncated && officialStopReason === 'completed',
+          text: officialText,
+          convId: activation.childId,
+          error: officialText ? undefined : ('stop: ' + officialResult.stopReason + (officialResult.diagnostic ? ' · ' + officialResult.diagnostic : '')),
+          ...officialTruncated ? { truncated: true, stopReason: officialStopReason } : {},
+          provider: officialProvider,
+          model: officialModel,
+          degraded: `${member.provider || deepseekMemberProvider(config, ctx)} 不可用（${degradeReason}），已降级 ${officialProvider}`,
+          usage: null,
+        }
+      }
       keepChild = reuseEnabled || truncated
       keepResident = keepChild && Boolean(childId)
       return {
@@ -2989,6 +3028,14 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/models') {
             if (url.searchParams.get('refresh')) catalog = null
             return send(res, 200, await modelCatalog(ctx, config))
+          }
+          if (req.method === 'POST' && route === '/models/refresh') {
+            const body = await readBody(req)
+            const source = typeof body?.source === 'string' && body.source ? body.source : 'all'
+            if (source !== 'all' && CATALOG_KINDS.indexOf(source) < 0) {
+              return send(res, 400, { error: `unknown source ${source}` })
+            }
+            return send(res, 200, await refreshCatalog(ctx, config, source))
           }
           if (req.method === 'GET' && route === '/balance') {
             return send(res, 200, await deepseekBalance(ctx, config))
@@ -4956,12 +5003,27 @@ async function codexCliBase() {
   } catch { return '' }
 }
 
-async function modelCatalog(ctx, config) {
-  if (catalog && Date.now() - catalog.at < 10 * 60_000) return catalog.value
-  const value = { codex: [], claude: [], deepseek: [], image: [], error: null }
+const CATALOG_KINDS = ['codex', 'claude', 'deepseek', 'image']
+
+/**
+ * 拉一份完整模型目录，同时按框架收集各自的报错。
+ * 返回 { value, errors }：value 就是 /models 的老结构（含合并后的 error 字段）。
+ * `only` 只重算命中的框架，其余沿用 `base` 里的旧值（给 POST /models/refresh 用）。
+ */
+async function fetchCatalog(ctx, config, only, base) {
+  const picked = Array.isArray(only) && only.length ? only : CATALOG_KINDS
+  const want = (kind) => picked.indexOf(kind) >= 0
+  const value = Object.assign({ codex: [], claude: [], deepseek: [], image: [], error: null }, base || {})
+  value.error = null
+  const errors = {}
+  const fail = (kind, error) => {
+    const message = String(error?.message ?? error)
+    errors[kind] = errors[kind] || message
+    value.error = value.error || message
+  }
   // settings must live in function scope: the later claude/image branches use it too.
   const settings = apiSettings(config)
-  try {
+  if (want('codex') || want('image')) try {
     const token = settings.codexToken || await codexToken()
     const codexBase = settings.codexBase || await codexCliBase()
     if (!codexBase) throw new Error('未配置 codex/gpt 中转地址（base）')
@@ -4974,8 +5036,8 @@ async function modelCatalog(ctx, config) {
       value.codex = ids.filter((id) => !String(id).startsWith('claude') && !String(id).startsWith('gpt-image'))
       value.image = pickImageModels(ids)
     }
-  } catch (error) { value.error = String(error?.message ?? error) }
-  try {
+  } catch (error) { fail('codex', error) }
+  if (want('claude')) try {
     const claudeModelsBase = (apiSettings(config).claudeBase || '').replace(/\/$/, '')
     if (!claudeModelsBase) throw new Error('未配置 claude base URL')
     const response = await fetch(claudeModelsBase + '/v1/models', {
@@ -4986,8 +5048,8 @@ async function modelCatalog(ctx, config) {
       const data = await response.json()
       value.claude = (data.data ?? []).map((m) => m.id).filter((id) => String(id).startsWith('claude'))
     }
-  } catch (error) { value.error = value.error || String(error?.message ?? error) }
-  try {
+  } catch (error) { fail('claude', error) }
+  if (want('deepseek')) try {
     // listModels(provider) is async and throws NO_ADAPTER for an unknown route, so the
     // provider id must be checked first — a bare listModels() rejects unhandled and takes
     // the whole host process down with it.
@@ -5007,8 +5069,8 @@ async function modelCatalog(ctx, config) {
       }
     }
   } catch { /* keep empty */ }
-  if (!value.deepseek.length) value.deepseek = [DEEPSEEK_MEMBER_MODEL]
-  if (config.imageApiKey) {
+  if (want('deepseek') && !value.deepseek.length) value.deepseek = [DEEPSEEK_MEMBER_MODEL]
+  if (want('image') && config.imageApiKey) {
     try {
       const response = await fetch(settings.codexBase + '/v1/models', {
         headers: { authorization: 'Bearer ' + settings.imageKey },
@@ -5017,11 +5079,32 @@ async function modelCatalog(ctx, config) {
         const data = await response.json()
         value.image = pickImageModels((data.data ?? []).map((m) => m.id))
       }
-    } catch (error) { value.error = value.error || String(error?.message ?? error) }
+    } catch (error) { fail('image', error) }
   }
-  if (!value.image.length) value.image = [...IMAGE_MODEL_FALLBACK]
+  if (want('image') && !value.image.length) value.image = [...IMAGE_MODEL_FALLBACK]
+  return { value, errors }
+}
+
+/** 缓存未命中（或超过 10 分钟 TTL）时才真的重拉。 */
+async function modelCatalog(ctx, config) {
+  if (catalog && Date.now() - catalog.at < 10 * 60_000) return catalog.value
+  const { value } = await fetchCatalog(ctx, config)
   if (value.codex.length || value.claude.length) catalog = { at: Date.now(), value }
   return value
+}
+
+/**
+ * 丢掉缓存重拉（POST /models/refresh）。
+ * source='all'（默认）拉全部；其余只重算那一份框架，其它沿用缓存/上次结果，
+ * 这样「只刷出图」不会因为 claude base 没配而被一条错误整体污染。
+ */
+async function refreshCatalog(ctx, config, source) {
+  const picked = source && source !== 'all' ? [source] : CATALOG_KINDS
+  for (const kind of picked) if (CATALOG_KINDS.indexOf(kind) < 0) throw new Error('unknown source ' + kind)
+  const base = catalog ? catalog.value : null
+  const { value, errors } = await fetchCatalog(ctx, config, picked, base)
+  catalog = { at: Date.now(), value }
+  return { catalog: value, errors, at: catalog.at }
 }
 
 let usageCache = null

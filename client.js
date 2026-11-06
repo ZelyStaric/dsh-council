@@ -84,13 +84,35 @@ window.__ModuleLoader__.load({
     const tailCollapsedMap = {}
     /* 从 /models 拿到的实时模型列表（换 key / 换中转后要刷新） */
     const liveModels = {}
+    /* 把一份目录灌进 liveModels，返回总条数（成功提示用） */
+    function absorbModels(data) {
+      let total = 0
+      for (const kind of ['codex', 'claude', 'deepseek', 'image']) {
+        if (Array.isArray(data && data[kind]) && data[kind].length) liveModels[kind] = data[kind]
+        total += Array.isArray(liveModels[kind]) ? liveModels[kind].length : 0
+      }
+      return total
+    }
     async function refreshModels() {
       try {
         const data = await call('/models?refresh=1')
-        for (const kind of ['codex', 'claude', 'deepseek', 'image']) {
-          if (Array.isArray(data && data[kind]) && data[kind].length) liveModels[kind] = data[kind]
-        }
+        absorbModels(data)
       } catch { /* 保留旧值 */ }
+    }
+    /* 已存的成员/职位模型是否还在新列表里（只提示，不自动改） */
+    function staleModelNames(snapshot, catalog) {
+      if (!snapshot || !catalog) return []
+      const known = (kind) => (Array.isArray(catalog[kind]) ? catalog[kind] : FALLBACK_MODELS[kind] || [])
+      const names = []
+      for (const member of snapshot.members || []) {
+        const list = known(member.kind)
+        if (member.model && list.length && list.indexOf(member.model) < 0) names.push(member.name + ' ' + member.model)
+      }
+      for (const role of snapshot.roles || []) {
+        const list = known(role.kind)
+        if (role.model && list.length && list.indexOf(role.model) < 0) names.push(role.name + ' ' + role.model)
+      }
+      return names
     }
     const chatActive = { value: false }
     const chatActiveListeners = new Set()
@@ -217,6 +239,7 @@ window.__ModuleLoader__.load({
       const [balance, setBalance] = useState(null)
       const [keyUsage, setKeyUsage] = useState(null)
       const [models, setModels] = useState(null)
+      const [modelNote, setModelNote] = useState(null)
       const [dragId, setDragId] = useState(null)
       const [dropRole, setDropRole] = useState(null)
       const [editing, setEditing] = useState(null)
@@ -255,6 +278,34 @@ window.__ModuleLoader__.load({
           call('/usage').then(setKeyUsage).catch(() => {})
           call('/models').then(setModels).catch(() => {})
         } catch (e) { setError(String(e.message || e)) }
+      }
+
+      /* 一键重拉模型目录：更新 models + liveModels，两秒后按钮文字复原 */
+      async function refreshCatalog() {
+        setBusy('models'); setModelNote(null)
+        try {
+          const data = await call('/models/refresh', { source: 'all' })
+          const next = data && data.catalog ? data.catalog : null
+          if (!next) throw new Error('返回里没有 catalog')
+          setModels(next)
+          const total = absorbModels(next)
+          const stale = staleModelNames(state, next)
+          setModelNote({ ok: true, text: `已刷新（总计 ${total} 个）`, stale })
+          const errors = (data && data.errors) || {}
+          const failed = Object.keys(errors)
+          if (failed.length) setError('模型刷新有失败项：' + failed.map((kind) => kind + ' ' + errors[kind]).join('；'))
+          try {
+            const fresh = await call('/state')
+            applyData(fresh)
+            const again = staleModelNames(fresh.state, next)
+            setModelNote({ ok: true, text: `已刷新（总计 ${total} 个）`, stale: again })
+          } catch { /* 旧 state 的提示也够用 */ }
+          setTimeout(() => setModelNote((note) => (note && note.ok ? Object.assign({}, note, { text: null }) : note)), 2000)
+        } catch (e) {
+          setModelNote({ ok: false, text: '刷新失败：' + String(e.message || e), stale: [] })
+        } finally {
+          setBusy(null)
+        }
       }
 
       async function loadRolePresets() {
@@ -501,11 +552,28 @@ window.__ModuleLoader__.load({
             .catch(() => {})
         }
         const clearKey = (key) => mutate('/config', { [key]: '' }).then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
+        const note = modelNote || {}
+        const refreshButton = h('button', {
+          type: 'button',
+          style: {
+            padding: '4px 10px', fontSize: 12, cursor: 'pointer', borderRadius: 6,
+            border: '1px solid ' + (note.ok === false ? 'var(--dsw-alias-border-danger, #c0392b)' : 'var(--dsw-alias-border-secondary, rgba(127,127,127,.35))'),
+            background: 'transparent',
+            color: note.ok === false ? 'var(--dsw-alias-label-danger, #c0392b)' : 'var(--dsw-alias-label-secondary, rgba(127,127,127,.9))',
+          },
+          onClick: () => { if (busy !== 'models') refreshCatalog() },
+        }, note.text ? note.text : (busy === 'models' ? '刷新中…' : '刷新模型列表'))
         return h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: { fontWeight: 600, marginBottom: 2 } }, '① CLI 与出图密钥'),
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) },
             '只有 codex / claude CLI 成员和 image 出图成员需要这里；其余成员不需要填。'
             + '留空则用 profile 配置（当前来源：' + (info.source === 'page' ? '本页' : 'profile') + '）'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+            refreshButton,
+            note.stale && note.stale.length
+              ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 12 }) },
+                '这些模型已不在新列表里（不会自动改）：' + note.stale.join('、'))
+              : null),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('input', { id: 'council-codex-token', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt key（codex 用）' + (info.hasCodexToken ? ' · 已配置' : '') }),
             h(Button, { onClick: () => clearKey('codexToken') }, '清空'),
