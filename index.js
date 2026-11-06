@@ -2520,10 +2520,11 @@ export function apply(ctx, config = {}) {
     archiveGroupForSession(sid)
       .catch((error) => console.error('[council] archive on session-stop failed:', String(error?.message ?? error)))
   })
-  // 启动时跑一次性迁移（幂等）：出图模型 2.5 / gpt-image-2 → 2.6；deepseek 成员 → apiclaude。
+  // 启动时跑一次性迁移（幂等）：deepseek 成员 → apiclaude。
+  // 出图模型迁移已停用：用户要自己选 2.5 或 2.6，不再自动改成 2.6。
   // 先 load 再迁移，补绑也挂在这条链上 —— 两个 load() 并发会把迁移后的内存状态覆盖回旧值。
   const boot = load()
-    .then(() => migrateImageModels())
+    // .then(() => migrateImageModels())  // 已停用：让用户自己选模型
     .then(() => migrateDeepseekMembers())
     .catch((error) => console.error('[council] startup migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
@@ -3445,16 +3446,20 @@ function imageVariantRank(id) {
   return index === -1 ? IMAGE_VARIANT_ORDER.length : index
 }
 /**
- * 出图目录只留 2.6：/v1/models 回来的 gpt-image-* 里只要有 2.6，就只保留 2.6（flare、sunburst 在前）；
- * 一个 2.6 都没有时才退回 2.5。两边都没有就返回空数组，由调用方用 IMAGE_MODEL_FALLBACK 兜底。
+ * 保留中转返回的全部 gpt-image-* 模型，按中转返回顺序原样输出（只去重）。
+ * 不做筛选、不排序、不优先某个版本——让用户自己选。
  */
 function pickImageModels(ids) {
-  const list = [...new Set((ids || []).map(String).filter((id) => id.startsWith('gpt-image')))]
-  const sorted = (prefix) => list
-    .filter((id) => id.startsWith(prefix))
-    .sort((a, b) => imageVariantRank(a) - imageVariantRank(b) || a.localeCompare(b))
-  const next = sorted(IMAGE_NEW_PREFIX)
-  return next.length ? next : sorted(IMAGE_LEGACY_PREFIX)
+  const seen = new Set()
+  const result = []
+  for (const id of ids || []) {
+    const str = String(id)
+    if (str.startsWith('gpt-image') && !seen.has(str)) {
+      seen.add(str)
+      result.push(str)
+    }
+  }
+  return result
 }
 
 /** 职位的有效默认框架：只认四种，缺省/未知都按 claude。 */
