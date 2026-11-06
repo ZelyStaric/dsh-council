@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -3223,6 +3223,140 @@ try {
       mod.__setRunKind(undefined)
       setState(structuredClone(fixture))
     }
+  })
+
+  /* ── deepseek 成员走 apiclaude 中转（小组专用；主会话仍走官方） ─────────── */
+  await check('deepseek 链路①：默认识别 apiclaude-deepseek / deepseek-v4.1-flash，provider 不在 profile 时回退官方', () => {
+    setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
+    assert.equal(mod.deepseekMemberProvider({}), 'apiclaude-deepseek', '默认 provider 必须是 apiclaude-deepseek')
+    assert.equal(mod.deepseekMemberProvider(), 'apiclaude-deepseek', '不传 config 也必须是 apiclaude-deepseek')
+    assert.equal(mod.deepseekMemberModel({}, {}), 'deepseek-v4.1-flash', '默认模型必须是 deepseek-v4.1-flash')
+    assert.equal(mod.deepseekMemberModel({}, { model: '' }), 'deepseek-v4.1-flash', '空 model 也要回落默认值')
+    // config 覆盖
+    assert.equal(mod.deepseekMemberProvider({ deepseekProvider: 'deepseek-official' }), 'deepseek-official', 'config.deepseekProvider 必须能覆盖默认值')
+    assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
+    // provider 可用性：llm 服务里没有 apiclaude → 回退官方
+    const llmOnlyOfficial = {
+      get: (name) => (name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }] } : undefined),
+    }
+    assert.equal(mod.deepseekMemberProvider({}, llmOnlyOfficial), 'deepseek-official', 'profile 没注册 apiclaude-deepseek 时必须回退 deepseek-official')
+    const llmWithBoth = {
+      get: (name) => (name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }, { id: 'apiclaude-deepseek' }] } : undefined),
+    }
+    assert.equal(mod.deepseekMemberProvider({}, llmWithBoth), 'apiclaude-deepseek', '注册了 apiclaude-deepseek 就必须用它')
+    // 拿不到 llm 服务（启动早期 / 测试桩）≠ 判定不可用：乐观用首选，别把小组静默降级
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'apiclaude-deepseek', '探测不到时必须乐观用首选')
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'apiclaude-deepseek', 'provider 列表为空（服务刚起）时必须乐观用首选')
+    return 'apiclaude-deepseek / deepseek-v4.1-flash + 覆盖 + 回退'
+  })
+
+  await check('deepseek 链路②：旧值 deepseek-flash / deepseek-v4-pro 映射到 deepseek-v4.1-flash，其它显式模型尊重；seam 真把 provider/model 传下去（含启动失败回退）', async () => {
+    setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }), 'deepseek-v4.1-flash', 'deepseek-flash 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4-pro' }), 'deepseek-v4.1-flash', 'deepseek-v4-pro 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }), 'deepseek-v4.1-flash', '新值保持新值')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-reasoner' }), 'deepseek-reasoner', '其它显式模型必须尊重')
+    assert.ok(mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-flash') && mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-v4-pro'))
+
+    const seen = []
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const parent = { id: 'session-a7777777-7777-4777-8777-777777777777' }
+    const member = { id: 'm_ds_seam', name: '代码', kind: 'deepseek', model: 'deepseek-flash' }
+    const okActivation = async (opts) => {
+      seen.push(opts.request.agentOptions)
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    const out = await mod.runDeepseekViaSeam(makeCtx(okActivation), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(out.ok, '假 seam 应成功：' + JSON.stringify(out))
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', 'seam 必须把 apiclaude-deepseek 传下去，实际 ' + seen[0].provider)
+    assert.equal(seen[0].model, 'deepseek-v4.1-flash', 'seam 必须把旧模型映射后传下去，实际 ' + seen[0].model)
+    assert.equal(out.provider, 'apiclaude-deepseek', '结果里要带回实际 provider（回执用）')
+    assert.equal(out.model, 'deepseek-v4.1-flash', '结果里要带回实际 model（回执用）')
+
+    // 启动阶段报错（profile 里没注册）→ 自动用官方重开一次
+    let calls = 0
+    const flaky = async (opts) => {
+      calls += 1
+      seen.push(opts.request.agentOptions)
+      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    // 成员显式 provider = apiclaude 时，seam 启动失败会重开官方（显式 provider 优先于默认解析）
+    const explicitMember = { id: 'm_ds_seam2', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const fallback = await mod.runDeepseekViaSeam(makeCtx(flaky, [{ id: 'deepseek-official' }]), explicitMember, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
+    assert.equal(calls, 2, '首选 provider 启动失败时应重开一次官方，实际 ' + calls + ' 次')
+    assert.equal(seen[seen.length - 1].provider, 'deepseek-official', '回退必须用 deepseek-official，实际 ' + seen[seen.length - 1].provider)
+    assert.equal(fallback.provider, 'deepseek-official', '回退后结果里的 provider 必须是 deepseek-official')
+    return '映射 2 条 + seam 传参 + 启动失败回退'
+  })
+
+  await check('deepseek 链路③：迁移幂等、只动 deepseek 成员（其它框架/职位不动）、写盘', async () => {
+    setState({
+      roles: [
+        { id: 'r_ds', name: '代码', kind: 'deepseek', model: 'deepseek-flash' },
+        { id: 'r_claude', name: '审校', kind: 'claude', model: 'claude-sonnet-5' },
+      ],
+      members: [
+        { id: 'm_ds_old', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'deepseek-official' },
+        { id: 'm_ds_pro', name: '代码2', kind: 'deepseek', model: 'deepseek-v4-pro' },
+        { id: 'm_ds_new', name: '代码3', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'apiclaude-deepseek' },
+        { id: 'm_claude', name: '审校', kind: 'claude', model: 'claude-sonnet-5', provider: 'claude-code' },
+        { id: 'm_codex', name: '指挥', kind: 'codex', model: 'gpt-6.1-sol' },
+        { id: 'm_image', name: '画师', kind: 'image', model: 'gpt-image-2.6-flare' },
+      ],
+      groups: [], usage: {}, runs: [],
+    })
+    const member = (id) => mod.state.members.find((m) => m.id === id)
+    const first = await mod.migrateDeepseekMembers()
+    assert.deepEqual(first, { members: 2, total: 2 }, '只该迁移 2 个还挂旧值的 deepseek 成员：' + JSON.stringify(first))
+    for (const id of ['m_ds_old', 'm_ds_pro']) {
+      assert.equal(member(id).provider, 'apiclaude-deepseek', id + ' 的 provider 必须是 apiclaude-deepseek')
+      assert.equal(member(id).model, 'deepseek-v4.1-flash', id + ' 的 model 必须是 deepseek-v4.1-flash')
+      assert.equal(typeof member(id).updatedAt, 'number', id + ' 迁移后应更新 updatedAt')
+    }
+    assert.equal(member('m_ds_new').updatedAt, undefined, '已经是新值的成员不该被改动（含 updatedAt）')
+    assert.equal(member('m_claude').model, 'claude-sonnet-5', 'claude 成员不该被迁移')
+    assert.equal(member('m_claude').provider, 'claude-code', 'claude 成员的 provider 不该被改')
+    assert.equal(member('m_codex').model, 'gpt-6.1-sol', 'codex 成员不该被迁移')
+    assert.equal(member('m_image').model, 'gpt-image-2.6-flare', 'image 成员不该被迁移')
+    assert.equal(mod.state.roles.find((r) => r.id === 'r_ds').model, 'deepseek-flash', '职位不在这条迁移里（只动成员）')
+    assert.equal(mod.STAFF_MODELS.deepseek, 'deepseek-v4.1-flash', 'STAFF_MODELS.deepseek 必须同步为 deepseek-v4.1-flash')
+    const disk = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
+    assert.equal(disk.members.find((m) => m.id === 'm_ds_old').provider, 'apiclaude-deepseek', '有变化必须落盘')
+    const snapshot = JSON.stringify(mod.state)
+    const second = await mod.migrateDeepseekMembers()
+    assert.deepEqual(second, { members: 0, total: 0 }, '第二次跑必须无变化：' + JSON.stringify(second))
+    assert.equal(JSON.stringify(mod.state), snapshot, '第二次跑不该改任何字段')
+    return 'migrated ' + first.total + ' → 再跑 ' + second.total + ' · 其它框架/职位不动'
+  })
+
+  await check('deepseek 链路④：回执成员行写明实际 provider / model（非 deepseek 行保持原样）', () => {
+    const tool = registered.council_delegate
+    assert.ok(tool && tool.output && typeof tool.output.render === 'function', 'council_delegate 还没注册')
+    const text = tool.output.render({}, {
+      members: [{ name: '代码', kind: 'deepseek', provider: 'apiclaude-deepseek', model: 'deepseek-v4.1-flash', ok: true, text: '改好了', accepted: true, acceptance: 'none' }],
+    })[0].text
+    assert.match(text, /## 代码（deepseek \/ apiclaude-deepseek \/ deepseek-v4\.1-flash）/, '回执成员行必须带 provider/model，实际：' + text.split('\n')[0])
+    const claude = tool.output.render({}, {
+      members: [{ name: '审校', kind: 'claude', provider: 'claude-code', model: 'claude-sonnet-5', ok: true, text: 'ok', accepted: true, acceptance: 'none' }],
+    })[0].text
+    assert.match(claude, /## 审校（claude）\n/, '非 deepseek 成员行不该被塞 provider/model，实际：' + claude.split('\n')[0])
+    return 'deepseek 行带 provider/model · claude 行不变'
   })
 
 } finally {

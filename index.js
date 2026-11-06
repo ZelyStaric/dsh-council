@@ -1089,6 +1089,100 @@ function readContinuedText(agent, member) {
   }
 }
 
+/**
+ * 小组的 deepseek 成员跑在 **apiclaude 中转**上（provider `apiclaude-deepseek`，模型
+ * `deepseek-v4.1-flash`）；主会话仍由 `agent-default-model` 指向 DeepSeek 官方，互不影响。
+ *
+ * - `deepseekMemberProvider(config)`：默认 apiclaude-deepseek；`config.deepseekProvider`
+ *   （或页面 /config 写在 state.config 里的同名字段）可覆盖。
+ *   **不可用判定**：读 DSH `llm.listProviders()`。列表里没有首选 id → 回退
+ *   `deepseek-official`（例如 profile patch 还没 HMR 进去 / 被禁用）。拿不到 llm 服务或
+ *   列表为空（服务刚启动）时**不判死**，仍用首选 id —— 宁可乐观一次，也不要因为探测
+ *   时机把小组静默降级到官方；真启动失败还有下面 seam 里的一次性回退兜底。
+ * - `deepseekMemberModel(config, member)`：默认 deepseek-v4.1-flash；成员的旧值
+ *   `deepseek-flash` / `deepseek-v4-pro` 映射到新值；其它显式配置一律尊重。
+ */
+const DEEPSEEK_MEMBER_PROVIDER = 'apiclaude-deepseek'
+const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official'
+const DEEPSEEK_MEMBER_MODEL = 'deepseek-v4.1-flash'
+const DEEPSEEK_LEGACY_MODELS = new Set(['deepseek-flash', 'deepseek-v4-pro'])
+let deepseekProviderWarnedFor = ''
+
+/** 页面 /config 的值优先于 profile 配置，与其它 council 设置一致。 */
+function deepseekMemberSettings(config) {
+  const own = (state && state.config) || {}
+  const provider = String(own.deepseekProvider || (config && config.deepseekProvider) || DEEPSEEK_MEMBER_PROVIDER).trim()
+  const model = String(own.deepseekModel || (config && config.deepseekModel) || DEEPSEEK_MEMBER_MODEL).trim()
+  return {
+    provider: provider || DEEPSEEK_MEMBER_PROVIDER,
+    model: model || DEEPSEEK_MEMBER_MODEL,
+  }
+}
+
+/** 当前进程里注册的 provider id 列表；拿不到（没有 llm 服务 / 列表为空）返回 null = 无法判定。 */
+function liveProviderIds(ctx = ctx0) {
+  try {
+    const llm = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+    if (!llm || typeof llm.listProviders !== 'function') return null
+    const ids = (llm.listProviders() || [])
+      .map((entry) => entry?.id ?? entry?.provider?.id)
+      .filter(Boolean)
+      .map(String)
+    return ids.length ? ids : null
+  } catch {
+    return null
+  }
+}
+
+function deepseekMemberProvider(config, ctx = ctx0) {
+  const preferred = deepseekMemberSettings(config).provider
+  const ids = liveProviderIds(ctx)
+  // null = 探测不到，乐观使用首选（见上面的注释）
+  if (!ids || ids.includes(preferred)) return preferred
+  if (deepseekProviderWarnedFor !== preferred) {
+    deepseekProviderWarnedFor = preferred
+    try {
+      const logger = ctx0 && typeof ctx0.logger === 'function' ? ctx0.logger('council') : undefined
+      const line = `deepseek provider "${preferred}" is not registered in this profile; falling back to ${DEEPSEEK_OFFICIAL_PROVIDER}`
+      if (logger && typeof logger.warn === 'function') logger.warn(line)
+      else console.error('[council] ' + line)
+    } catch { /* logging must never break dispatch */ }
+  }
+  return DEEPSEEK_OFFICIAL_PROVIDER
+}
+
+function deepseekMemberModel(config, member) {
+  const fallback = deepseekMemberSettings(config).model
+  const explicit = String((member && member.model) || '').trim()
+  if (!explicit) return fallback
+  return DEEPSEEK_LEGACY_MODELS.has(explicit) ? fallback : explicit
+}
+
+/**
+ * 一次性迁移（启动时跑，幂等）：所有 `kind === 'deepseek'` 成员换到
+ * `apiclaude-deepseek` + `deepseek-v4.1-flash`；`STAFF_MODELS.deepseek` 同步。
+ * 只动 deepseek 成员与这条框架默认值：职位/其它框架/主会话默认模型都不碰。
+ * `agent-default-model` 在 profile patch 里独立配置，插件这边不会改它。
+ * @returns {{members:number,total:number}}
+ */
+async function migrateDeepseekMembers() {
+  STAFF_MODELS.deepseek = DEEPSEEK_MEMBER_MODEL
+  let members = 0
+  for (const member of state.members || []) {
+    if (member?.kind !== 'deepseek') continue
+    if (member.provider === DEEPSEEK_MEMBER_PROVIDER && member.model === DEEPSEEK_MEMBER_MODEL) continue
+    member.provider = DEEPSEEK_MEMBER_PROVIDER
+    member.model = DEEPSEEK_MEMBER_MODEL
+    member.updatedAt = Date.now()
+    members += 1
+  }
+  if (members) {
+    await save()
+    ctx0?.logger?.('council')?.info?.(`deepseek members migrated to ${DEEPSEEK_MEMBER_PROVIDER} / ${DEEPSEEK_MEMBER_MODEL}: ${members} member(s)`)
+  }
+  return { members, total: members }
+}
+
 async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, presetId, callId, childSink, onActivity) {
   // 显式预算（有界调用）照旧；成员调用不再有总时长，靠下面的静默看门狗。
   const budgetMs = timeoutMs
@@ -1165,12 +1259,20 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       try { controller.abort() } catch { /* ignore */ }
     }
   }, WATCHDOG_TICK_MS)
+  // 成员该用哪个 provider/model：成员显式 provider 优先；没写就按小组默认
+  // （apiclaude-deepseek），旧模型名映射到 deepseek-v4.1-flash。
+  let provider = member.provider || deepseekMemberProvider(config, ctx)
+  const model = deepseekMemberModel(config, member)
+  // 回执/日志要能看出**实际**走的是哪条链路（主会话与小组不是同一个 provider）。
+  try { ctx0?.logger?.('council')?.info?.(`deepseek member "${member.name}" → ${provider} / ${model}`) } catch { /* ignore */ }
   const idleResult = () => ({
     ok: false,
     text: '',
     convId: childId ?? member.convId,
     error: watchdogErrorText('idle-timeout', { idleMinutes: formatMinutes(idleMs) }),
     reason: 'idle-timeout',
+    provider,
+    model,
     usage: null,
   })
   const timeoutResult = () => ({
@@ -1179,27 +1281,41 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     convId: childId ?? member.convId,
     error: watchdogErrorText('timeout'),
     reason: 'timeout',
+    provider,
+    model,
     usage: null,
   })
-  try {
-    const activation = await subagents.startActivation({
-      provider: 'spawn',
-      label: member.name,
-      request: {
-        prompt: [{ type: 'text', text: prompt }],
-        parent,
-        ...presetId === undefined ? {} : { agentPreset: presetId },
-        cwd: member.cwd || config.defaultWorkspace || process.cwd(),
-        agentOptions: {
-          provider: member.provider || 'deepseek-official',
-          model: member.model || 'deepseek-flash',
-          // reviews only need a verdict: drop the default high reasoning effort
-          ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
-        },
+  const startSeam = (providerId) => subagents.startActivation({
+    provider: 'spawn',
+    label: member.name,
+    request: {
+      prompt: [{ type: 'text', text: prompt }],
+      parent,
+      ...presetId === undefined ? {} : { agentPreset: presetId },
+      cwd: member.cwd || config.defaultWorkspace || process.cwd(),
+      agentOptions: {
+        provider: providerId,
+        model,
+        // reviews only need a verdict: drop the default high reasoning effort
+        ...presetId === 'minimal' ? { reasoningEffort: 'low' } : {},
       },
-      signal: activationSignal,
-      delivery: 'caller',
-    })
+    },
+    signal: activationSignal,
+    delivery: 'caller',
+  })
+  try {
+    let activation
+    try {
+      activation = await startSeam(provider)
+    } catch (error) {
+      // profile 里没注册该 provider / adapter 起不来时，用 DeepSeek 官方再开一次
+      // （只在「启动阶段」失败时回退；已经跑出内容后的失败不重放任务）。
+      // 看门狗/取消导致的 abort 不重试：重开也只会立刻再被中止。
+      if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
+      try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed to start (${String(error?.message ?? error)}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
+      provider = DEEPSEEK_OFFICIAL_PROVIDER
+      activation = await startSeam(provider)
+    }
     childId = activation.childId ?? null
     // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录
     if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
@@ -1226,6 +1342,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         convId: activation.childId,
         error: text ? undefined : ('stop: ' + result.stopReason + (result.diagnostic ? ' · ' + result.diagnostic : '')),
         ...truncated ? { truncated: true, stopReason } : {},
+        provider,
+        model,
         usage: null,
       }
     } catch (error) {
@@ -1262,7 +1380,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   } catch (error) {
     if (idleFired) return idleResult()
     if (timedOut) return timeoutResult()
-    return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), usage: null }
+    return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), provider, model, usage: null }
   } finally {
     clearInterval(watchTimer)
     if (budgetTimer !== undefined) clearTimeout(budgetTimer)
@@ -1321,7 +1439,10 @@ async function runDeepseek(ctx, member, prompt, config) {
   if (!agents || typeof agents.create !== 'function') {
     return { ok: false, text: '', error: 'DSH agent service unavailable', usage: null }
   }
-  const agentOptions = { provider: member.provider || 'deepseek-official', model: member.model || 'deepseek-flash' }
+  const agentOptions = {
+    provider: member.provider || deepseekMemberProvider(config, ctx),
+    model: deepseekMemberModel(config, member),
+  }
   const composition = await agentComposition(ctx)
   let handle
   try {
@@ -2011,6 +2132,11 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
 
 async function callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   const role = roleOf(member)
+  // 回执要写「实际用的 provider + model」：deepseek 成员按小组默认解析（apiclaude），
+  // 成员自己显式配的 provider/model 优先；旧模型名由 deepseekMemberModel 映射。
+  const deepseekRoute = member.kind === 'deepseek'
+    ? { provider: deepseekMemberProvider(config, ctx), model: deepseekMemberModel(config, member) }
+    : null
   const memory = (state.memberMemory || {})[member.id]
   const memoryBlock = memory && memory.digest && (state.config || {}).memoryInject !== false
     ? '\n\n[你之前为这个小组做过的事（摘要）]\n' + memory.digest
@@ -2037,7 +2163,19 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
   if (callCancelled(callId)) {
     finishMemberStage(callId, member, onStage, '已停止')
-    return { memberId: member.id, name: member.name, role: role?.name, kind: member.kind, model: member.model, ok: false, accepted: false, acceptance: 'cancelled', text: '', error: '已被用户停止' }
+    return {
+      memberId: member.id,
+      name: member.name,
+      role: role?.name,
+      kind: member.kind,
+      model: deepseekRoute ? deepseekRoute.model : member.model,
+      ...deepseekRoute ? { provider: deepseekRoute.provider } : {},
+      ok: false,
+      accepted: false,
+      acceptance: 'cancelled',
+      text: '',
+      error: '已被用户停止',
+    }
   }
   if (onWork) { try { onWork(result) } catch { /* ignore */ } }
   if (result && result.ok) {
@@ -2145,7 +2283,12 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     name: member.name,
     role: role?.name,
     kind: member.kind,
-    model: member.model,
+    // 实际使用的 provider/model（deepseek 成员会带回 seam 真正启动的那一组；
+    // seam 在启动失败时回退到官方，所以不能只写成员记录里的旧值）。
+    model: result.model || (deepseekRoute ? deepseekRoute.model : member.model),
+    ...(result.provider || (deepseekRoute && deepseekRoute.provider))
+      ? { provider: result.provider || deepseekRoute.provider }
+      : {},
     ok: result.ok,
     // accepted 只表示「验收是否通过」；ok 仍表示「成员是否产出了东西」
     accepted: acceptance === 'passed' || acceptance === 'none',
@@ -2317,11 +2460,12 @@ export function apply(ctx, config = {}) {
     archiveGroupForSession(sid)
       .catch((error) => console.error('[council] archive on session-stop failed:', String(error?.message ?? error)))
   })
-  // 出图模型换代（2.5 / gpt-image-2 → 2.6）：启动时跑一次一次性迁移（幂等）。
+  // 启动时跑一次性迁移（幂等）：出图模型 2.5 / gpt-image-2 → 2.6；deepseek 成员 → apiclaude。
   // 先 load 再迁移，补绑也挂在这条链上 —— 两个 load() 并发会把迁移后的内存状态覆盖回旧值。
   const boot = load()
     .then(() => migrateImageModels())
-    .catch((error) => console.error('[council] image model migration failed:', String(error?.message ?? error)))
+    .then(() => migrateDeepseekMembers())
+    .catch((error) => console.error('[council] startup migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
   // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
   // 已归档的组不补绑：归档会话不该再拿到 council_* 工具。
@@ -2486,7 +2630,7 @@ export function createHandler(ctx, config = {}) {
               const defaultModels = {
                 codex: 'gpt-6.1-sol',
                 claude: 'claude-sonnet-5',
-                deepseek: 'deepseek-flash',
+                deepseek: DEEPSEEK_MEMBER_MODEL,
                 image: 'gpt-image-2.6-flare',
               }
               const kind = defaultModels[body.kind] ? body.kind : 'codex'
@@ -2495,7 +2639,7 @@ export function createHandler(ctx, config = {}) {
                 name: body.name || '新成员',
                 kind,
                 model: body.model || defaultModels[kind],
-                provider: kind === 'deepseek' ? (body.provider || 'deepseek-official') : undefined,
+                provider: kind === 'deepseek' ? (body.provider || deepseekMemberProvider(config)) : undefined,
                 roleId: body.roleId,
                 cwd: body.cwd || undefined,
                 updatedAt: Date.now(),
@@ -3214,7 +3358,7 @@ function makeSelfWorkGuard(group, config) {
   }
 }
 
-const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.6-flare' }
+const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
 const STAFF_KINDS = Object.keys(STAFF_MODELS)
 
 /**
@@ -3296,7 +3440,7 @@ function resolveMember(group, key) {
  * 返回值就是「补员变更」字符串数组（调用方用 push(...) 展开），不带任何附加属性——
  * 这个数组会链进工具返回值，必须保持纯 JSON 安全（DSH 会做 lossless JSON 校验）。
  */
-async function ensureStaffing(group, staffing, createdIds) {
+async function ensureStaffing(group, staffing, createdIds, config) {
   const changes = []
   const created = Array.isArray(createdIds) ? createdIds : []
   let dirty = false
@@ -3328,7 +3472,7 @@ async function ensureStaffing(group, staffing, createdIds) {
       member = {
         id: `m_${randomUUID().slice(0, 8)}`, name: role.name, roleId: role.id,
         kind: target.kind, model: target.model,
-        provider: target.kind === 'deepseek' ? 'deepseek-official' : undefined,
+        provider: target.kind === 'deepseek' ? deepseekMemberProvider(config) : undefined,
         updatedAt: Date.now(),
       }
       if (!wantPersistent) member.ephemeral = true // 持久成员不打临时标记
@@ -3368,7 +3512,7 @@ async function ensureStaffing(group, staffing, createdIds) {
           delete member.convId
           member.kind = target.kind
           member.model = target.model
-          member.provider = target.kind === 'deepseek' ? 'deepseek-official' : undefined
+          member.provider = target.kind === 'deepseek' ? deepseekMemberProvider(config) : undefined
           changes.push(`- 调整 ${role.name}（${member.name}）→ ${target.kind} / ${target.model}`)
           dirty = true
         }
@@ -4188,6 +4332,8 @@ function bindAgent(ctx, config, group, agent) {
                 properties: {
                   name: { type: 'string' },
                   kind: { type: 'string' },
+                  provider: { type: 'string', description: 'deepseek 成员实际使用的 provider（apiclaude-deepseek / 回退 deepseek-official）' },
+                  model: { type: 'string', description: 'deepseek 成员实际使用的模型 id' },
                   ok: { type: 'boolean' },
                   text: { type: 'string' },
                   image: { type: 'string' },
@@ -4229,7 +4375,11 @@ function bindAgent(ctx, config, group, agent) {
             const noReview = m.acceptance === 'none' ? '\n验收：无审核位（本组没有审校/指挥），本轮未做验收' : ''
             const cont = m.continued ? `\n续跑：${m.continued} 次（上一轮被截断，已在同一子会话里接着跑）` : ''
             const watchdog = idleTimeout ? '\n状态：静默超时终止（看门狗判定成员长时间没有任何输出，不是普通失败）' : ''
-            return `## ${m.name}（${m.kind}）\n${body}${image}${review}${accept}${noReview}${cont}${watchdog}`
+            // deepseek 成员在回执里写明实际链路（provider / model），主会话默认模型另有配置
+            const route = m.kind === 'deepseek' && (m.provider || m.model)
+              ? ' / ' + [m.provider, m.model].filter(Boolean).join(' / ')
+              : ''
+            return `## ${m.name}（${m.kind}${route}）\n${body}${image}${review}${accept}${noReview}${cont}${watchdog}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
@@ -4294,13 +4444,13 @@ function bindAgent(ctx, config, group, agent) {
         response.selfWorkBlocked = blockedSoFar.blocked
         response.selfWorkBlockedDetail = selfWorkBlockedDetail(blockedSoFar)
         if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
-        const staffing = await ensureStaffing(live, args?.staffing, ephemeral)
+        const staffing = await ensureStaffing(live, args?.staffing, ephemeral, config)
         let assignments = Array.isArray(args && args.assignments) ? args.assignments : []
         let planRaw
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
         if ((!assignments.length) && requestText) {
           const planned = await planWithCommander(ctx, live, args.request.trim(), config, exec && exec.agent, callId)
-          staffing.push(...await ensureStaffing(live, planned.staffing, ephemeral))
+          staffing.push(...await ensureStaffing(live, planned.staffing, ephemeral, config))
           planRaw = planned.raw
           assignments = planned.assignments
           if (!assignments.length) {
@@ -4314,7 +4464,7 @@ function bindAgent(ctx, config, group, agent) {
             && (state.roles || []).some((r) => r.name === a.member)
             && !resolveMember(live, a.member))
           .map((a) => ({ role: a.member }))
-        staffing.push(...await ensureStaffing(live, missingRoles, ephemeral))
+        staffing.push(...await ensureStaffing(live, missingRoles, ephemeral, config))
         // 成员已经定下来了，占位阶段从「拆解中」推进到「派活中」
         progressStage(callId, '派活中')
         const sid = exec && exec.agent && exec.agent.id
@@ -4379,7 +4529,10 @@ function bindAgent(ctx, config, group, agent) {
               const body = work.ok
                 ? (work.text || '')
                 : ((SILENT_KILL_REASONS.has(work.reason) ? '静默超时终止：' : '失败：') + (work.error || ''))
-              append('## ' + member.name + '（' + member.kind + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
+              const route = member.kind === 'deepseek' && (work.provider || work.model)
+                ? ' / ' + [work.provider, work.model].filter(Boolean).join(' / ')
+                : ''
+              append('## ' + member.name + '（' + member.kind + route + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
             }, callId, childSessions)
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
           const reviewChunks = []
@@ -4406,6 +4559,9 @@ function bindAgent(ctx, config, group, agent) {
           return {
             name: member.name,
             kind: member.kind,
+            // 只有 deepseek 成员会带 provider（回执里写明 apiclaude / 回退官方）
+            ...result.provider === undefined ? {} : { provider: String(result.provider) },
+            ...result.model === undefined ? {} : { model: String(result.model) },
             ok: Boolean(result.ok),
             text: result.text || '',
             ...result.image === undefined ? {} : { image: result.image },
@@ -4542,7 +4698,7 @@ async execute(args) {
           return toolResult({ members })
         }
         if (args.action === 'create') {
-          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.6-flare' }
+          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
           const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
           // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
           const persistent = args.persistent !== false
@@ -4551,7 +4707,7 @@ async execute(args) {
             name: args.name || '新成员',
             kind,
             model: args.model || defaultModels[kind],
-            provider: kind === 'deepseek' ? 'deepseek-official' : undefined,
+            provider: kind === 'deepseek' ? deepseekMemberProvider(config) : undefined,
             roleId: args.roleId,
             cwd: args.cwd || undefined,
             updatedAt: Date.now(),
@@ -4819,12 +4975,15 @@ async function modelCatalog(ctx, config) {
       const ids = llm.listProviders()
         .map((entry) => entry?.id ?? entry?.provider?.id)
         .filter(Boolean)
-      if (ids.includes('deepseek-official')) {
-        value.deepseek = (await llm.listModels('deepseek-official')).map((m) => m.id)
+      // 小组的 deepseek 成员走 apiclaude（不可用时 deepseekMemberProvider 已回退官方），
+      // 所以清单要按**实际会用的** provider 拉，否则指挥会分到官方那边的模型名。
+      const provider = deepseekMemberProvider(config, ctx)
+      if (ids.includes(provider)) {
+        value.deepseek = (await llm.listModels(provider)).map((m) => m.id)
       }
     }
   } catch { /* keep empty */ }
-  if (!value.deepseek.length) value.deepseek = ['deepseek-flash']
+  if (!value.deepseek.length) value.deepseek = [DEEPSEEK_MEMBER_MODEL]
   if (config.imageApiKey) {
     try {
       const response = await fetch(settings.codexBase + '/v1/models', {
