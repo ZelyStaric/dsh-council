@@ -3230,32 +3230,27 @@ try {
     setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
     assert.equal(mod.deepseekMemberProvider({}), 'apiclaude-deepseek', '默认 provider 必须是 apiclaude-deepseek')
     assert.equal(mod.deepseekMemberProvider(), 'apiclaude-deepseek', '不传 config 也必须是 apiclaude-deepseek')
-    assert.equal(mod.deepseekMemberModel({}, {}), 'deepseek-v4.1-flash', '默认模型必须是 deepseek-v4.1-flash')
-    assert.equal(mod.deepseekMemberModel({}, { model: '' }), 'deepseek-v4.1-flash', '空 model 也要回落默认值')
+    assert.equal(mod.deepseekMemberModel({}, {}, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 默认模型必须是 deepseek-v4.1-flash')
+    assert.equal(mod.deepseekMemberModel({}, { model: '' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 空 model 也要回落默认值')
+    assert.equal(mod.deepseekMemberModel({}, {}, 'deepseek-official'), 'deepseek-flash', 'official 必须固定返回 deepseek-flash')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 时即使显式 v4.1-flash 也返回 deepseek-flash')
     // config 覆盖
     assert.equal(mod.deepseekMemberProvider({ deepseekProvider: 'deepseek-official' }), 'deepseek-official', 'config.deepseekProvider 必须能覆盖默认值')
-    assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
-    // provider 可用性：llm 服务里没有 apiclaude → 回退官方
-    const llmOnlyOfficial = {
-      get: (name) => (name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }] } : undefined),
-    }
-    assert.equal(mod.deepseekMemberProvider({}, llmOnlyOfficial), 'deepseek-official', 'profile 没注册 apiclaude-deepseek 时必须回退 deepseek-official')
-    const llmWithBoth = {
-      get: (name) => (name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }, { id: 'apiclaude-deepseek' }] } : undefined),
-    }
-    assert.equal(mod.deepseekMemberProvider({}, llmWithBoth), 'apiclaude-deepseek', '注册了 apiclaude-deepseek 就必须用它')
-    // 拿不到 llm 服务（启动早期 / 测试桩）≠ 判定不可用：乐观用首选，别把小组静默降级
-    assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'apiclaude-deepseek', '探测不到时必须乐观用首选')
-    assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'apiclaude-deepseek', 'provider 列表为空（服务刚起）时必须乐观用首选')
-    return 'apiclaude-deepseek / deepseek-v4.1-flash + 覆盖 + 回退'
+    assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}, 'apiclaude-deepseek'), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
+    // 去掉了预检逻辑：直接返回配置值，不再根据 listProviders 回退
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'apiclaude-deepseek', '不再预检，直接返回配置值')
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'apiclaude-deepseek', '不再预检，直接返回配置值')
+    return 'apiclaude-deepseek / deepseek-v4.1-flash · official 固定 deepseek-flash'
   })
 
   await check('deepseek 链路②：旧值 deepseek-flash / deepseek-v4-pro 映射到 deepseek-v4.1-flash，其它显式模型尊重；seam 真把 provider/model 传下去（含启动失败回退）', async () => {
     setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }), 'deepseek-v4.1-flash', 'deepseek-flash 必须映射到新模型')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4-pro' }), 'deepseek-v4.1-flash', 'deepseek-v4-pro 必须映射到新模型')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }), 'deepseek-v4.1-flash', '新值保持新值')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-reasoner' }), 'deepseek-reasoner', '其它显式模型必须尊重')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下 deepseek-flash 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4-pro' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下 deepseek-v4-pro 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下新值保持新值')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-reasoner' }, 'apiclaude-deepseek'), 'deepseek-reasoner', 'apiclaude 下其它显式模型必须尊重')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 固定返回 deepseek-flash（忽略旧值映射）')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 时即使显式 v4.1-flash 也返回 deepseek-flash')
     assert.ok(mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-flash') && mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-v4-pro'))
 
     const seen = []
@@ -3464,7 +3459,7 @@ try {
     assert.equal(seen[0].hasEffort, true, '第一次应带 reasoningEffort（deepseek-official + minimal）')
     assert.equal(seen[1].hasEffort, false, '第二次必须去掉 reasoningEffort，实际：' + seen[1].hasEffort)
     assert.equal(seen[1].provider, 'deepseek-official', '重试应保持同一 provider')
-    assert.equal(seen[1].model, 'deepseek-v4.1-flash', '重试应保持同一 model（映射后）')
+    assert.equal(seen[1].model, 'deepseek-flash', '重试时 deepseek-official 固定返回 deepseek-flash')
     return 'UNSUPPORTED_REASONING_EFFORT → 去 effort 重试 · 同 provider/model'
   })
 
@@ -3506,6 +3501,43 @@ try {
     assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
     return '两次失败（effort + 无effort）→ 回退官方 · model 同步换'
+  })
+
+  await check('deepseek 链路⑨：apiclaude-deepseek 直接失败 → 回退 official + model 同步换', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => providers, listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-f2222222-2222-4222-8222-222222222222' }
+    // 成员没有显式 provider，使用默认 apiclaude-deepseek
+    const member = { id: 'm_ds_default', name: '代码', kind: 'deepseek', model: 'deepseek-flash' }
+    const directFail = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
+      // 第一次：apiclaude-deepseek → 直接失败（连接错误、不是 UNSUPPORTED_REASONING_EFFORT）
+      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      // 第二次：deepseek-official → 成功
+      return {
+        childId: null,
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
+      }
+    }
+    const fallback = await mod.runDeepseekViaSeam(makeCtx(directFail, [{ id: 'deepseek-official' }]), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
+    assert.equal(calls, 2, 'apiclaude 失败应立即回退官方，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：默认 apiclaude-deepseek')
+    assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次：apiclaude 对应 deepseek-v4.1-flash')
+    assert.equal(seen[1].provider, 'deepseek-official', '第二次：回退到 deepseek-official')
+    assert.equal(seen[1].model, 'deepseek-flash', '第二次：model 必须同步换成 deepseek-flash（不能用 v4.1-flash）')
+    assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
+    assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
+    return 'apiclaude 直接失败 → 回退 official · model 同步换 deepseek-flash'
   })
 
 } finally {

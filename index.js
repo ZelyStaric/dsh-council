@@ -1099,7 +1099,7 @@ function readContinuedText(agent, member) {
  *   `deepseek-official`（例如 profile patch 还没 HMR 进去 / 被禁用）。拿不到 llm 服务或
  *   列表为空（服务刚启动）时**不判死**，仍用首选 id —— 宁可乐观一次，也不要因为探测
  *   时机把小组静默降级到官方；真启动失败还有下面 seam 里的一次性回退兜底。
- * - `deepseekMemberModel(config, member)`：默认 deepseek-v4.1-flash；成员的旧值
+ * - `deepseekMemberModel(config, member, provider)`：默认 deepseek-v4.1-flash；成员的旧值
  *   `deepseek-flash` / `deepseek-v4-pro` 映射到新值；其它显式配置一律尊重。
  */
 const DEEPSEEK_MEMBER_PROVIDER = 'apiclaude-deepseek'
@@ -1136,25 +1136,19 @@ function liveProviderIds(ctx = ctx0) {
 
 function deepseekMemberProvider(config, ctx = ctx0) {
   const preferred = deepseekMemberSettings(config).provider
-  const ids = liveProviderIds(ctx)
-  // null = 探测不到，乐观使用首选（见上面的注释）
-  if (!ids || ids.includes(preferred)) return preferred
-  if (deepseekProviderWarnedFor !== preferred) {
-    deepseekProviderWarnedFor = preferred
-    try {
-      const logger = ctx0 && typeof ctx0.logger === 'function' ? ctx0.logger('council') : undefined
-      const line = `deepseek provider "${preferred}" is not registered in this profile; falling back to ${DEEPSEEK_OFFICIAL_PROVIDER}`
-      if (logger && typeof logger.warn === 'function') logger.warn(line)
-      else console.error('[council] ' + line)
-    } catch { /* logging must never break dispatch */ }
-  }
-  return DEEPSEEK_OFFICIAL_PROVIDER
+  // 直接返回配置值或默认 apiclaude-deepseek，不再预检 listProviders()；
+  // 启动失败时由 runDeepseekViaSeam 的回退逻辑处理（已会换成 official + deepseek-flash）。
+  return preferred
 }
 
-function deepseekMemberModel(config, member) {
+function deepseekMemberModel(config, member, provider) {
+  // provider === 'deepseek-official' 时固定返回 deepseek-flash（官方不认 v4.1-flash）
+  if (provider === DEEPSEEK_OFFICIAL_PROVIDER) return 'deepseek-flash'
+  // 其他 provider（apiclaude-deepseek 等）默认用 deepseek-v4.1-flash
   const fallback = deepseekMemberSettings(config).model
   const explicit = String((member && member.model) || '').trim()
   if (!explicit) return fallback
+  // 旧别名映射到 v4.1-flash
   return DEEPSEEK_LEGACY_MODELS.has(explicit) ? fallback : explicit
 }
 
@@ -1262,7 +1256,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   // 成员该用哪个 provider/model：成员显式 provider 优先；没写就按小组默认
   // （apiclaude-deepseek），旧模型名映射到 deepseek-v4.1-flash。
   let provider = member.provider || deepseekMemberProvider(config, ctx)
-  let model = deepseekMemberModel(config, member)
+  let model = deepseekMemberModel(config, member, provider)
   // 回执/日志要能看出**实际**走的是哪条链路（主会话与小组不是同一个 provider）。
   try { ctx0?.logger?.('council')?.info?.(`deepseek member "${member.name}" → ${provider} / ${model}`) } catch { /* ignore */ }
   const idleResult = () => ({
@@ -1459,9 +1453,10 @@ async function runDeepseek(ctx, member, prompt, config) {
   if (!agents || typeof agents.create !== 'function') {
     return { ok: false, text: '', error: 'DSH agent service unavailable', usage: null }
   }
+  const provider = member.provider || deepseekMemberProvider(config, ctx)
   const agentOptions = {
-    provider: member.provider || deepseekMemberProvider(config, ctx),
-    model: deepseekMemberModel(config, member),
+    provider,
+    model: deepseekMemberModel(config, member, provider),
   }
   const composition = await agentComposition(ctx)
   let handle
@@ -2155,7 +2150,10 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   // 回执要写「实际用的 provider + model」：deepseek 成员按小组默认解析（apiclaude），
   // 成员自己显式配的 provider/model 优先；旧模型名由 deepseekMemberModel 映射。
   const deepseekRoute = member.kind === 'deepseek'
-    ? { provider: deepseekMemberProvider(config, ctx), model: deepseekMemberModel(config, member) }
+    ? (() => {
+        const provider = deepseekMemberProvider(config, ctx)
+        return { provider, model: deepseekMemberModel(config, member, provider) }
+      })()
     : null
   const memory = (state.memberMemory || {})[member.id]
   const memoryBlock = memory && memory.digest && (state.config || {}).memoryInject !== false
@@ -4991,15 +4989,18 @@ async function modelCatalog(ctx, config) {
     // provider id must be checked first — a bare listModels() rejects unhandled and takes
     // the whole host process down with it.
     const llm = ctx.get('llm')
-    if (llm && typeof llm.listModels === 'function' && typeof llm.listProviders === 'function') {
-      const ids = llm.listProviders()
-        .map((entry) => entry?.id ?? entry?.provider?.id)
-        .filter(Boolean)
-      // 小组的 deepseek 成员走 apiclaude（不可用时 deepseekMemberProvider 已回退官方），
-      // 所以清单要按**实际会用的** provider 拉，否则指挥会分到官方那边的模型名。
+    if (llm && typeof llm.listModels === 'function') {
+      // 先试 apiclaude-deepseek，失败再试 deepseek-official（静态列表，不再预检 listProviders）
       const provider = deepseekMemberProvider(config, ctx)
-      if (ids.includes(provider)) {
+      try {
         value.deepseek = (await llm.listModels(provider)).map((m) => m.id)
+      } catch {
+        // apiclaude 失败 → 回退官方
+        if (provider !== DEEPSEEK_OFFICIAL_PROVIDER) {
+          try {
+            value.deepseek = (await llm.listModels(DEEPSEEK_OFFICIAL_PROVIDER)).map((m) => m.id)
+          } catch { /* keep empty */ }
+        }
       }
     }
   } catch { /* keep empty */ }
