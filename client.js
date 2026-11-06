@@ -1390,14 +1390,31 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         let alive = true
         const load = () => {
-          call('/progress').then((data) => {
+          const url = sessionId ? '/progress?sessionId=' + encodeURIComponent(sessionId) : '/progress'
+          call(url).then((data) => {
             if (!alive) return
             const all = (data && data.progress) || {}
-            // 不在客户端再按总时长硬截：服务端 /progress 已按「静默 idle + 5 分钟」自愈，
-            // 且 activeCalls 里的 callId 永不标 stale。这里再截一刀只会让长任务凭空消失。
+            // 双保险：服务端已按 sessionId 过滤，客户端再过滤一次防止渗漏
+            // 规范化比对：统一补齐 session- 前缀
+            const normalizedSessionId = sessionId
+              ? (sessionId.startsWith('session-') ? sessionId : 'session-' + sessionId)
+              : null
             const list = Object.keys(all).map((id) => all[id])
-              .filter((e) => !e.finishedAt && !e.stale)
-              .filter((e) => !sessionId || e.sessionId === sessionId)
+              .filter((e) => {
+                // 过滤策略：
+                // - stale 条目：服务端返回（保留 5 分钟），客户端不渲染
+                // - finished 条目：服务端默认不返回（除非 includeFinished=1），客户端也不渲染
+                // - 不匹配 sessionId 的条目：双保险过滤掉
+                if (e.stale || e.finishedAt) return false
+                // 有 sessionId 时双保险过滤：只要匹配当前会话的
+                if (normalizedSessionId && e.sessionId) {
+                  const entrySessionId = e.sessionId.startsWith('session-')
+                    ? e.sessionId
+                    : 'session-' + e.sessionId
+                  if (entrySessionId !== normalizedSessionId) return false
+                }
+                return true
+              })
             setEntry(list.length ? list[list.length - 1] : null)
             setNow(Date.now())
           }).catch(() => {})
@@ -1474,7 +1491,11 @@ window.__ModuleLoader__.load({
           if (entry.stoppedAt) return
           setEntry((prev) => (prev ? Object.assign({}, prev, { stoppedAt: Date.now() }) : prev))
           try {
-            await call('/runs/cancel', { all: true })
+            const result = await call('/runs/cancel', { all: true })
+            // 即使 stopped=0 也本地置灰，反馈"已请求取消"
+            if (!result || !result.stopped) {
+              setEntry((prev) => (prev && prev.stoppedAt ? prev : (prev ? Object.assign({}, prev, { stoppedAt: Date.now() }) : prev)))
+            }
           } catch { /* ignore */ }
         },
         title: entry.stoppedAt ? '已发送停止请求，正在终止…' : '停止本轮所有成员（立即终止进行中的 CLI / 子代理）',

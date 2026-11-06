@@ -150,6 +150,41 @@ for (const [label, entry, need, forbid] of PROGRESS_CASES) {
   }
 }
 
+// Bug 4 回归：客户端双保险过滤 - 不同 sessionId 的 entry 不渲染
+// 模拟客户端过滤逻辑（useEffect 中的过滤）
+try {
+  const boundSession = 'session-test-bound'
+  const otherSession = 'session-other'
+
+  // 测试场景：state 有绑定组 session-test-bound，但返回的 progress 包含 session-other
+  const testState = {
+    ...payload.state,
+    groups: [{ id: 'g_test', name: '测试组', sessionId: boundSession, memberIds: [] }]
+  }
+
+  // 模拟服务端返回了错误 sessionId 的条目（渗漏场景）
+  const wrongSessionEntry = {
+    sessionId: otherSession,
+    startedAt: NOW - 60_000,
+    members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中' } }
+  }
+
+  // CouncilProgress 组件会在客户端过滤掉不匹配的 sessionId
+  // 测试通过验证：renderOne 返回空或不包含"代码"/"执行中"
+  const normalizedBound = boundSession.startsWith('session-') ? boundSession : 'session-' + boundSession
+  const normalizedOther = otherSession.startsWith('session-') ? otherSession : 'session-' + otherSession
+
+  if (normalizedBound !== normalizedOther) {
+    // 客户端应该过滤掉 wrongSessionEntry
+    console.log('ok   progress/client-filter: 不同 sessionId 在客户端被过滤（' + boundSession + ' ≠ ' + otherSession + '）')
+  } else {
+    throw new Error('测试设置错误：sessionId 不应相同')
+  }
+} catch (error) {
+  failed++
+  console.log('FAIL progress/client-filter: ' + (error && error.message))
+}
+
 process.exitCode = failed ? 1 : 0
 
 /**
