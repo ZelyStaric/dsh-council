@@ -14,6 +14,9 @@
  *   - staffing persistent:true → 建持久成员（不回收、不标 ephemeral、不进 /members/prune 预览）；
  *     默认 persistent:false 仍回收；council_member create 默认持久，显式 persistent:false → 临时
  *   - council_delegate 返回值是 lossless JSON（stringify→parse deep-equal；staffingCreated/pruned 字符串数组）
+ *   - council_member / council_role / council_policy 的返回值同样过 lossless 出口：成员缺
+ *     model/roleName/cwd、职位缺 prompt/color/kind/model 时回落 null（不产 undefined），
+ *     JSON.stringify→parse 全等，且通过镜像 DSH walkJsonValue 的递归检查（无 undefined/函数/Symbol/循环）
  *   - POST /members/prune 与 council_member prune：dryRun / 真删 / 30 天阈值
  *   - POST /groups/prune-archived 归档组清理：默认 keepDays=7（8 天前删、6 天前留）/
  *     归档 40 天被删（连成员/usage）/ 未归档保留 / 缺 archivedAt 保留（保守）/ dryRun 不动盘 / 前后端路由一致
@@ -54,7 +57,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -727,6 +730,129 @@ try {
     const art = roles.find((r) => r.name === '画师')
     assert.equal(art.defaultKind, 'claude')
     return 'kind/model + 默认值'
+  })
+
+  /* ── lossless JSON 出口（council_member / council_role / council_policy）─────────
+   *
+   * DSH 在 execute() 返回后跑 snapshotJsonValue（dsh-util-values 的 walkJsonValue）：
+   * 只接受 null / 字符串 / 布尔 / 有限且非 -0 的数字 / 普通对象（原型 Object.prototype 或 null）/
+   * 普通数组（除下标外不许有 symbol / 非枚举属性）；其余（含 undefined、函数、Symbol、
+   * Set/Map/Date、循环引用）一律判「value is not lossless JSON」→ 整条工具调用失败。
+   * 这里逐条镜像它的规则（不引依赖），并额外扫一遍 undefined 键。 */
+  const assertLosslessJson = (value, path = '$') => {
+    if (value === null) return
+    const type = typeof value
+    if (type === 'string' || type === 'boolean') return
+    if (type === 'number') {
+      assert.ok(Number.isFinite(value), path + ': 非有限数字')
+      assert.ok(!Object.is(value, -0), path + ': -0 不是 lossless JSON')
+      return
+    }
+    assert.equal(type, 'object', path + ': 非 JSON 类型 ' + type) // undefined / function / symbol / bigint
+    if (Array.isArray(value)) {
+      assert.equal(Object.getPrototypeOf(value), Array.prototype, path + ': 数组原型不是 Array.prototype')
+      assert.equal(Reflect.ownKeys(value).length, value.length + 1, path + ': 数组上挂了额外/非枚举/symbol 属性')
+      for (let i = 0; i < value.length; i += 1) assertLosslessJson(value[i], `${path}[${i}]`)
+      return
+    }
+    assert.equal(Object.getPrototypeOf(value), Object.prototype, path + ': 不是普通对象')
+    for (const key of Reflect.ownKeys(value)) {
+      assert.equal(typeof key, 'string', path + ': 有 symbol 键')
+      assert.ok(Object.prototype.propertyIsEnumerable.call(value, key), path + '.' + key + ': 非枚举属性')
+      assertLosslessJson(value[key], path + '.' + key)
+    }
+  }
+  const undefinedKeyPaths = (value, path = '$', seen = new Set()) => {
+    if (value === undefined) return [path]
+    if (value === null || typeof value !== 'object') return []
+    if (seen.has(value)) return [] // 循环引用另由 assertLosslessJson 负责
+    seen.add(value)
+    if (Array.isArray(value)) return value.flatMap((item, i) => undefinedKeyPaths(item, `${path}[${i}]`, seen))
+    const bad = []
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === 'symbol') bad.push(path + '.<symbol>')
+      else bad.push(...undefinedKeyPaths(value[key], path + '.' + key, seen))
+    }
+    return bad
+  }
+
+  await check('lossless①：council_member list 在成员缺 model/roleName/cwd 时不产 undefined（JSON 往返全等）', async () => {
+    const tool = registered.council_member
+    const group = mod.state.groups.find((g) => g.id === 'g5')
+    // 故意缺 model / roleId（→ roleName 也无从解析）/ cwd
+    mod.state.members.push({ id: 'm_bare', name: '裸成员', kind: 'codex' })
+    group.memberIds.push('m_bare')
+    try {
+      const result = await tool.execute({ action: 'list' })
+      const bare = result.members.find((m) => m.id === 'm_bare')
+      assert.ok(bare, 'list 没返回 m_bare')
+      assert.equal(bare.model, null, '缺 model 必须回落 null')
+      assert.equal(bare.roleId, null, '缺 roleId 必须回落 null')
+      assert.equal(bare.roleName, null, '缺 roleName 必须回落 null')
+      assert.equal(bare.cwd, null, '缺 cwd 必须回落 null')
+      assert.deepEqual(JSON.parse(JSON.stringify(result)), result, 'stringify → parse 后必须与原返回值 deep-equal')
+      assert.deepEqual(undefinedKeyPaths(result), [], '返回值里还有 undefined 键')
+      assertLosslessJson(result)
+      // update 不是 list，但同样走 toolResult；老成员缺 model 时回落 null，而不是被静默丢掉字段
+      const updated = await tool.execute({ action: 'update', id: 'm_bare' })
+      assert.equal(updated.member.model, null, 'update 对缺 model 的成员应回落 null')
+      assert.deepEqual(undefinedKeyPaths(updated), [], 'update 返回值里还有 undefined 键')
+      assertLosslessJson(updated)
+      return `m_bare = ${JSON.stringify(bare)} · update.model=${JSON.stringify(updated.member.model)}`
+    } finally {
+      mod.state.members = mod.state.members.filter((m) => m.id !== 'm_bare')
+      group.memberIds = group.memberIds.filter((id) => id !== 'm_bare')
+    }
+  })
+
+  await check('lossless②：council_role list / council_policy get 同样无 undefined（JSON 往返全等）', async () => {
+    const roleTool = registered.council_role
+    const policyTool = registered.council_policy
+    mod.state.roles.push({ id: 'r_bare', name: '裸职位' }) // 故意缺 prompt / color / kind / model
+    try {
+      const roles = await roleTool.execute({ action: 'list' })
+      const bare = roles.roles.find((r) => r.id === 'r_bare')
+      assert.ok(bare, 'role list 没返回 r_bare')
+      for (const key of ['prompt', 'color', 'kind', 'model']) assert.equal(bare[key], null, `缺 ${key} 必须回落 null`)
+      const policy = await policyTool.execute({ action: 'get' })
+      for (const [key, value] of Object.entries(policy)) assert.notEqual(value, undefined, 'policy.' + key + ' 是 undefined')
+      for (const [label, value] of [['council_role list', roles], ['council_policy get', policy]]) {
+        assert.deepEqual(JSON.parse(JSON.stringify(value)), value, label + ': stringify → parse 后不一致')
+        assert.deepEqual(undefinedKeyPaths(value), [], label + ': 还有 undefined 键')
+        assertLosslessJson(value)
+      }
+      return `裸职位 = ${JSON.stringify(bare)} · policy.maxRework=${policy.maxRework}`
+    } finally {
+      mod.state.roles = mod.state.roles.filter((r) => r.id !== 'r_bare')
+    }
+  })
+
+  await check('lossless③：递归检查器能拒 undefined/函数/Symbol/循环/NaN，三个工具返回值全部通过', async () => {
+    const assertRejected = (label, bad) => {
+      let threw = false
+      try { assertLosslessJson(bad) } catch { threw = true }
+      assert.equal(threw, true, label + ' 应被拒收')
+    }
+    const cyclic = { ok: true }
+    cyclic.self = cyclic
+    assertRejected('undefined 字段', { ok: true, model: undefined })
+    assertRejected('函数字段', { ok: true, run: () => {} })
+    assertRejected('Symbol 键', { ok: true, [Symbol('s')]: 1 })
+    assertRejected('循环引用', cyclic)
+    assertRejected('NaN', { ok: true, n: NaN })
+    // 通用出口别名与 losslessToolResult 同语义（四个工具统一用它）
+    assert.deepEqual(mod.toolResult({ a: undefined, b: 1, fn: () => {}, ok: true }), { b: 1, ok: true }, 'toolResult 没清掉非法值')
+    const outputs = [
+      ['council_member list', await registered.council_member.execute({ action: 'list' })],
+      ['council_role list', await registered.council_role.execute({ action: 'list' })],
+      ['council_policy get', await registered.council_policy.execute({ action: 'get' })],
+    ]
+    for (const [label, value] of outputs) {
+      assertLosslessJson(value)
+      assert.deepEqual(undefinedKeyPaths(value), [], label + ' 含 undefined 键')
+      assert.deepEqual(JSON.parse(JSON.stringify(value)), value, label + ': JSON 往返不一致')
+    }
+    return '检查器拒绝 5 类非法值 · 三工具返回值 + toolResult 全部通过'
   })
 
   await check('清理：删除自测职位', async () => {
