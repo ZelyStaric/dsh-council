@@ -1222,10 +1222,15 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   let childId = null
   let idleFired = false
   let timedOut = false
+  let cancelled = false
   let lastSeamStamp = ''
   const controller = new AbortController()
   const cancelSignal = signalFor(callId)
   const activationSignal = cancelSignal ? AbortSignal.any([controller.signal, cancelSignal]) : controller.signal
+  // 监听取消信号：立即 resolve 并标记 cancelled
+  if (cancelSignal && !cancelSignal.aborted) {
+    cancelSignal.addEventListener('abort', () => { cancelled = true }, { once: true })
+  }
   // 显式预算（审校等有界调用）才设总计时；成员调用没有总时长，只有静默看门狗。
   const budgetTimer = Number.isFinite(budgetMs) && budgetMs > 0
     ? setTimeout(() => { timedOut = true; try { controller.abort() } catch { /* ignore */ } }, budgetMs)
@@ -1275,6 +1280,16 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     convId: childId ?? member.convId,
     error: watchdogErrorText('timeout'),
     reason: 'timeout',
+    provider,
+    model,
+    usage: null,
+  })
+  const cancelledResult = () => ({
+    ok: false,
+    text: '',
+    convId: childId ?? member.convId,
+    error: '已取消',
+    reason: 'cancelled',
     provider,
     model,
     usage: null,
@@ -1403,6 +1418,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         usage: null,
       }
     } catch (error) {
+      if (cancelled) { keepChild = false; return cancelledResult() }
       if (idleFired) { keepChild = false; return idleResult() }
       if (timedOut) { keepChild = false; return timeoutResult() }
       throw error
@@ -1434,6 +1450,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       }
     }
   } catch (error) {
+    if (cancelled) return cancelledResult()
     if (idleFired) return idleResult()
     if (timedOut) return timeoutResult()
     return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), provider, model, usage: null }
@@ -2939,8 +2956,25 @@ export function createHandler(ctx, config = {}) {
             // 阈值跟着静默阈值走（见 progressStaleMs），activeCalls 里的条目不会被误收。
             const now = progressNow()
             healProgress(now, config)
+            const sessionIdFilter = url.searchParams.get('sessionId')
+            const includeFinished = url.searchParams.get('includeFinished') === '1'
+            // 规范化 sessionId：兼容 session- 前缀（前端可能带或不带）
+            const normalizedFilter = sessionIdFilter
+              ? (sessionIdFilter.startsWith('session-') ? sessionIdFilter : 'session-' + sessionIdFilter)
+              : null
             const out = {}
             for (const [id, entry] of progressMap) {
+              // 支持 ?sessionId=xxx 过滤：2.5D 等无组绑定场景仍能按会话查进度
+              // 比对时双向规范化：entry.sessionId 和 filter 都补齐 session- 前缀
+              if (normalizedFilter) {
+                const entrySessionId = entry.sessionId
+                  ? (entry.sessionId.startsWith('session-') ? entry.sessionId : 'session-' + entry.sessionId)
+                  : null
+                if (entrySessionId !== normalizedFilter) continue
+              }
+              // 默认不返回已完成的条目（除非 includeFinished=1）
+              // 但 stale 条目即使有 finishedAt 也返回（保留 5 分钟供前端看到一次）
+              if (!includeFinished && entry.finishedAt && !entry.stale) continue
               // 既有字段名一律保留；只追加只读派生字段：
               //  - runningMs：跑了多久
               //  - silentMs（每个成员条目）：距最后一次活动（= 最近一次 stdout/子代理活动）过了多久，
@@ -4324,7 +4358,11 @@ function rosterText(group) {
 /** Register the delegate tool and roster prompt on one live chat session. */
 function bindAgent(ctx, config, group, agent) {
   const key = group.id + '\u0000' + agent.id
-  if (boundAgents.has(key)) return { bound: true, reused: true }
+  // 重复绑定时先释放旧的 disposer，避免"already registered"错误
+  if (boundAgents.has(key)) {
+    const oldCleanup = boundAgents.get(key)
+    try { oldCleanup() } catch { /* ignore */ }
+  }
   const agentCtx = agent.ctx || ctx
   const disposers = []
   try {
@@ -4595,7 +4633,20 @@ function bindAgent(ctx, config, group, agent) {
             progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '已停止' })
             return { name: member.name, kind: member.kind, ok: false, text: '', error: '已被用户停止', accepted: false, acceptance: 'cancelled' }
           }
-          const result = await callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
+          // 放弃等待兜底：取消后 2 秒内强制结束，避免永久挂起
+          const abortPromise = new Promise((resolve) => {
+            if (!callId) return
+            const signal = signalFor(callId)
+            if (!signal) return
+            const handler = () => {
+              setTimeout(() => {
+                resolve({ name: member.name, kind: member.kind, ok: false, text: '', error: '已取消，成员未完成', accepted: false, acceptance: 'cancelled' })
+              }, 2000)
+            }
+            if (signal.aborted) handler()
+            else signal.addEventListener('abort', handler, { once: true })
+          })
+          const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
@@ -4607,6 +4658,7 @@ function bindAgent(ctx, config, group, agent) {
                 : ''
               append('## ' + member.name + '（' + member.kind + route + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
             }, callId, childSessions)
+          const result = await Promise.race([memberPromise, abortPromise])
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
           const reviewChunks = []
           if (result.review && result.review.self) {
