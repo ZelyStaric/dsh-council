@@ -3656,13 +3656,64 @@ try {
     assert.equal(degrade.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(degrade.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
     assert.ok(degrade.degraded, '结果必须包含 degraded 字段')
-    assert.match(degrade.degraded, /apiclaude-deepseek.*不可用/, 'degraded 必须说明是 apiclaude 不可用')
-    assert.match(degrade.degraded, /降级.*deepseek-official/, 'degraded 必须说明降级到 official')
+    assert.match(degrade.degraded, /apiclaude.*不可用/, 'degraded 必须说明 apiclaude 不可用')
+    assert.match(degrade.degraded, /本次已改用官方 deepseek-flash/, 'degraded 必须说明本次改用官方')
     assert.equal(degrade.text, '改好了', '降级后的文本必须是官方返回的')
     // 成员配置不应被修改
     assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
     assert.equal(member.model, 'deepseek-flash', '成员 model 不应被修改')
     return 'stopReason=error + exhausted → 降级 official · 回执含说明 · 成员配置不变'
+  })
+
+  await check('deepseek 链路⑪：stopReason=error 且 text 为空 → 仍降级并重跑官方', async () => {
+    const makeCtx = (startActivation) => ({
+      get: (name) => (name === 'subagents'
+        ? { getProvider: () => ({ id: 'spawn' }), startActivation }
+        : name === 'llm'
+          ? { listProviders: () => [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          : undefined),
+    })
+    const seen = []
+    let calls = 0
+    const parent = { id: 'session-empty-text' }
+    const member = { id: 'm_empty', name: '建模', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'apiclaude-deepseek' }
+    const emptyText = async (opts) => {
+      calls += 1
+      seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
+      // 第一次：apiclaude-deepseek → stopReason=error，text 为空，有 diagnostic
+      if (calls === 1) {
+        return {
+          childId: 'child-empty-1',
+          dispose: async () => {},
+          result: Promise.resolve({
+            output: [], // 空输出
+            stopReason: 'error',
+            diagnostic: 'All available accounts exhausted',
+          }),
+        }
+      }
+      // 第二次：deepseek-official → 成功
+      return {
+        childId: 'child-official-empty',
+        dispose: async () => {},
+        result: Promise.resolve({ output: [{ type: 'text', text: '模型已生成' }], stopReason: 'completed' }),
+      }
+    }
+    const result = await mod.runDeepseekViaSeam(makeCtx(emptyText), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(result.ok, '降级后应成功：' + JSON.stringify(result))
+    assert.equal(calls, 2, 'text 为空时仍应触发降级，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
+    assert.equal(seen[1].provider, 'deepseek-official', '第二次：降级到 deepseek-official')
+    assert.equal(result.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
+    assert.equal(result.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
+    assert.ok(result.degraded, '结果必须包含 degraded 字段')
+    assert.match(result.degraded, /apiclaude.*不可用/, 'degraded 必须说明 apiclaude 不可用')
+    assert.match(result.degraded, /本次已改用官方 deepseek-flash/, 'degraded 必须说明改用官方')
+    assert.equal(result.text, '模型已生成', '降级后的文本必须是官方返回的')
+    // 成员配置不应被修改
+    assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
+    assert.equal(member.model, 'deepseek-v4.1-flash', '成员 model 不应被修改')
+    return 'stopReason=error + text 为空 → 降级 official · 回执含"本次已改用官方" · 成员配置不变'
   })
 
   // Bug 2① 测试暂时跳过（会超时，需要更复杂的 mock）

@@ -1368,9 +1368,13 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       const stopReason = String(result.stopReason || '')
       const truncated = TRUNCATED_STOP_REASONS.has(stopReason)
       // apiclaude 账号池耗尽/上游错误 → 自动降级 deepseek-official 重跑一次
-      const needsDegrade = stopReason === 'error' && /error.*(exhausted|server_error|upstream)/i.test(text)
-      if (needsDegrade && provider !== DEEPSEEK_OFFICIAL_PROVIDER) {
-        const degradeReason = text.match(/error[^}]*/i)?.[0] || stopReason
+      // 触发条件：stopReason='error' 且非官方 provider → 直接降级（不依赖 text）
+      const needsDegrade = stopReason === 'error' && provider !== DEEPSEEK_OFFICIAL_PROVIDER
+      if (needsDegrade) {
+        // 日志细节：优先用 diagnostic，其次 text 里的 error 片段，最后用 stopReason
+        const degradeReason = result.diagnostic
+          || text.match(/error[^}]*/i)?.[0]
+          || `stop: ${stopReason}`
         console.error('[council] seam degrade:', provider, model, degradeReason)
         try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed with ${stopReason} (${degradeReason}); degrading to ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
         // 降级：先 dispose 原 activation，用官方重跑（不改成员配置，只本次生效）
@@ -1401,7 +1405,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           ...officialTruncated ? { truncated: true, stopReason: officialStopReason } : {},
           provider: officialProvider,
           model: officialModel,
-          degraded: `${member.provider || deepseekMemberProvider(config, ctx)} 不可用（${degradeReason}），已降级 ${officialProvider}`,
+          degraded: `apiclaude 不可用（${degradeReason}），本次已改用官方 deepseek-flash`,
           usage: null,
         }
       }
