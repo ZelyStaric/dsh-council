@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
       const presets = [
         { role: '指挥', kind: 'claude', model: 'claude-sonnet-5' },
         { role: '审校', kind: 'deepseek', model: 'deepseek-flash' },
-        { role: '画师', kind: 'image', model: 'gpt-image-2.5-flare' },
+        { role: '画师', kind: 'image', model: 'gpt-image-2.6-flare' },
       ]
       let snapshot = (await call('/state')).state
       const group = (snapshot.groups || []).find((g) => g.id === groupId)
@@ -128,7 +128,7 @@ window.__ModuleLoader__.load({
       codex: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'codex-auto-review'],
       claude: ['claude-sonnet-5', 'claude-sonnet-5-5', 'claude-sonnet-4-6', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1', 'claude-fable-5'],
       deepseek: ['deepseek-flash'],
-      image: ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2'],
+      image: ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'],
     }
 
     const styles = {

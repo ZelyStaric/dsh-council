@@ -232,6 +232,35 @@ function save() {
   return saving
 }
 
+/**
+ * 一次性迁移：把成员/职位上还挂着的老出图模型换成 2.6（启动时跑一次）。
+ *   旧集：gpt-image-2.5-flare / gpt-image-2.5-sunburst / gpt-image-2
+ *   *sunburst → gpt-image-2.6-sunburst，其余 → gpt-image-2.6-flare
+ * 幂等：新值不在旧集里，第二次跑没有任何变更、也不写盘、不打日志。
+ * @returns {{members:number, roles:number, total:number}}
+ */
+async function migrateImageModels() {
+  const target = (model) => (String(model).includes('sunburst') ? 'gpt-image-2.6-sunburst' : 'gpt-image-2.6-flare')
+  let members = 0
+  let roles = 0
+  for (const member of state.members || []) {
+    if (member?.kind !== 'image' || !OLD_IMAGE_MODELS.has(member.model)) continue
+    member.model = target(member.model)
+    member.updatedAt = Date.now()
+    members += 1
+  }
+  for (const role of state.roles || []) {
+    if (role?.kind !== 'image' || !OLD_IMAGE_MODELS.has(role.model)) continue
+    role.model = target(role.model)
+    roles += 1
+  }
+  if (members || roles) {
+    await save()
+    ctx0?.logger?.('council')?.info?.(`image models migrated to 2.6: ${members} member(s), ${roles} role(s)`)
+  }
+  return { members, roles, total: members + roles }
+}
+
 /** 读 workspace.json 的 global.archivedSessionIds（归一化去掉 `session-` 前缀），10 秒缓存。 */
 async function archivedSessionIds() {
   const now = Date.now()
@@ -901,7 +930,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
 async function runImage(member, prompt, config) {
   const token = apiSettings(config).imageKey
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
-  const model = member.model || 'gpt-image-2.5-flare'
+  const model = member.model || 'gpt-image-2.6-flare'
   // 出图是普通 HTTP 请求、没有流式输出，没法用「静默看门狗」；
   // 保留一个宽松的请求超时（默认 240s，config.imageTimeoutSeconds 可改）。
   const imageTimeoutMs = imageTimeoutSeconds(config) * 1000
@@ -2288,11 +2317,16 @@ export function apply(ctx, config = {}) {
     archiveGroupForSession(sid)
       .catch((error) => console.error('[council] archive on session-stop failed:', String(error?.message ?? error)))
   })
+  // 出图模型换代（2.5 / gpt-image-2 → 2.6）：启动时跑一次一次性迁移（幂等）。
+  // 先 load 再迁移，补绑也挂在这条链上 —— 两个 load() 并发会把迁移后的内存状态覆盖回旧值。
+  const boot = load()
+    .then(() => migrateImageModels())
+    .catch((error) => console.error('[council] image model migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
   // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
   // 已归档的组不补绑：归档会话不该再拿到 council_* 工具。
   const rebindExisting = () => {
-    load().then(() => {
+    boot.then(() => {
       const agents = ctx.get('agents')
       if (!agents || typeof agents.list !== 'function') return
       let list = []
@@ -2453,7 +2487,7 @@ export function createHandler(ctx, config = {}) {
                 codex: 'gpt-6.1-sol',
                 claude: 'claude-sonnet-5',
                 deepseek: 'deepseek-flash',
-                image: 'gpt-image-2.5-flare',
+                image: 'gpt-image-2.6-flare',
               }
               const kind = defaultModels[body.kind] ? body.kind : 'codex'
               const member = {
@@ -3180,8 +3214,36 @@ function makeSelfWorkGuard(group, config) {
   }
 }
 
-const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
+const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.6-flare' }
 const STAFF_KINDS = Object.keys(STAFF_MODELS)
+
+/**
+ * 出图模型换代（2.5 / gpt-image-2 → 2.6 flare/sunburst）：
+ * 中转现在同时列 2.5 与 2.6，页面与默认值**只用 2.6**，老的等启动迁移换掉。
+ */
+const IMAGE_MODEL_FALLBACK = ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']
+const IMAGE_NEW_PREFIX = 'gpt-image-2.6-'
+const IMAGE_LEGACY_PREFIX = 'gpt-image-2.5-'
+/** 启动迁移要换掉的历史值（gpt-image-2 也归到 flare）。 */
+const OLD_IMAGE_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2'])
+/** 同一代内的展示顺序：flare 在前、sunburst 次之，其余按字典序。 */
+const IMAGE_VARIANT_ORDER = ['flare', 'sunburst']
+function imageVariantRank(id) {
+  const index = IMAGE_VARIANT_ORDER.indexOf(String(id).slice(IMAGE_NEW_PREFIX.length))
+  return index === -1 ? IMAGE_VARIANT_ORDER.length : index
+}
+/**
+ * 出图目录只留 2.6：/v1/models 回来的 gpt-image-* 里只要有 2.6，就只保留 2.6（flare、sunburst 在前）；
+ * 一个 2.6 都没有时才退回 2.5。两边都没有就返回空数组，由调用方用 IMAGE_MODEL_FALLBACK 兜底。
+ */
+function pickImageModels(ids) {
+  const list = [...new Set((ids || []).map(String).filter((id) => id.startsWith('gpt-image')))]
+  const sorted = (prefix) => list
+    .filter((id) => id.startsWith(prefix))
+    .sort((a, b) => imageVariantRank(a) - imageVariantRank(b) || a.localeCompare(b))
+  const next = sorted(IMAGE_NEW_PREFIX)
+  return next.length ? next : sorted(IMAGE_LEGACY_PREFIX)
+}
 
 /** 职位的有效默认框架：只认四种，缺省/未知都按 claude。 */
 function roleKind(role) {
@@ -4480,7 +4542,7 @@ async execute(args) {
           return toolResult({ members })
         }
         if (args.action === 'create') {
-          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.5-flare' }
+          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: 'deepseek-flash', image: 'gpt-image-2.6-flare' }
           const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
           // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
           const persistent = args.persistent !== false
@@ -4733,7 +4795,7 @@ async function modelCatalog(ctx, config) {
       const data = await response.json()
       const ids = (data.data ?? []).map((m) => m.id)
       value.codex = ids.filter((id) => !String(id).startsWith('claude') && !String(id).startsWith('gpt-image'))
-      value.image = ids.filter((id) => String(id).startsWith('gpt-image'))
+      value.image = pickImageModels(ids)
     }
   } catch (error) { value.error = String(error?.message ?? error) }
   try {
@@ -4770,11 +4832,11 @@ async function modelCatalog(ctx, config) {
       })
       if (response.ok) {
         const data = await response.json()
-        value.image = (data.data ?? []).map((m) => m.id).filter((id) => String(id).startsWith('gpt-image'))
+        value.image = pickImageModels((data.data ?? []).map((m) => m.id))
       }
     } catch (error) { value.error = value.error || String(error?.message ?? error) }
   }
-  if (!value.image.length) value.image = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2']
+  if (!value.image.length) value.image = [...IMAGE_MODEL_FALLBACK]
   if (value.codex.length || value.claude.length) catalog = { at: Date.now(), value }
   return value
 }

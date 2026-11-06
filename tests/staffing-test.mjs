@@ -6,6 +6,9 @@
  *
  * Covers:
  *   - rosterText / catalogText prompt text (默认框架/默认模型、四组模型清单)
+ *   - 出图模型换代（2.5 / gpt-image-2 → 2.6）：modelCatalog 同时读到 2.5+2.6 时只留 2.6（flare、sunburst 顺序）、
+ *     没有 2.6 才退回 2.5、空目录兜底是 2.6 两个；migrateImageModels 三种旧值→对应 2.6 / 非 image 不动 /
+ *     写盘 / 幂等（跑两次零变化）；新建 image 成员默认模型 = gpt-image-2.6-flare
  *   - ensureStaffing: 新建 / 复用 / 不重复造人 / 同名跨组拉入 / 显式改模型 / 无效项跳过
  *   - resolveMember: 按 id、职位名、成员名派发
  *   - POST /roles 写入并读回 kind/model，非法 kind 返回 400
@@ -57,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -133,6 +136,109 @@ await check('catalogText 优先读 modelCatalog() 缓存', () => {
   assert.match(text, /codex: gpt-6\.1-sol、gpt-6-astra/)
   assert.match(text, /claude: claude-opus-5-5/)
   return '缓存命中'
+})
+
+/* ── 出图模型换代：2.5 / gpt-image-2 → 2.6 flare/sunburst ─────────────────── */
+/** 用假 relay 跑一次真实 modelCatalog：/v1/models 只回给定的 gpt-image 列表。 */
+async function catalogWithImageModels(ids) {
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const href = String(url)
+    const body = href.includes('claude.test')
+      ? { data: [{ id: 'claude-opus-5-5' }] }
+      : { data: [...ids.map((id) => ({ id })), { id: 'gpt-6.1-sol' }] }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    mod.__setCatalog(null) // 清 10 分钟缓存，否则拿的是上一条用例的目录
+    return await mod.modelCatalog({ get: () => undefined }, {
+      codexBaseUrl: 'http://relay.test/codex',
+      claudeBaseUrl: 'http://claude.test',
+      imageApiKey: 'img-key',
+    })
+  } finally {
+    globalThis.fetch = savedFetch
+  }
+}
+
+await check('出图目录①：2.5 与 2.6 同时存在时只返回 2.6（flare、sunburst 顺序）', async () => {
+  const value = await catalogWithImageModels([
+    'gpt-image-2.5-flare', 'gpt-image-2', 'gpt-image-2.6-sunburst',
+    'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare',
+  ])
+  assert.deepEqual(value.image, ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'],
+    '同时存在时必须只留 2.6 且 flare 在前，实际：' + JSON.stringify(value.image))
+  assert.ok(!value.image.some((id) => id.includes('2.5') || id === 'gpt-image-2'), '老的 2.5 / gpt-image-2 必须消失')
+  return value.image.join('、')
+})
+
+await check('出图目录②：没有 2.6 才退回 2.5；两边都没有才用硬编码兜底（也只有 2.6）', async () => {
+  const legacy = await catalogWithImageModels(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-2.5-flare'])
+  assert.deepEqual(legacy.image, ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'],
+    '没有 2.6 时应退回 2.5（gpt-image-2 不再列出），实际：' + JSON.stringify(legacy.image))
+  const none = await catalogWithImageModels([])
+  assert.deepEqual(none.image, mod.IMAGE_MODEL_FALLBACK, '空目录的兜底必须是 2.6 两个')
+  assert.deepEqual(mod.IMAGE_MODEL_FALLBACK, ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'], '硬编码兜底本身必须是 2.6 两个')
+  return '>= ' + legacy.image.join('、') + ' / 兜底 ' + none.image.join('、')
+})
+
+await check('出图迁移③：三种旧值→对应 2.6、非 image 不动、写盘、幂等（跑两次无变化）', async () => {
+  setState({
+    roles: [
+      { id: 'r_old_flare', name: '画师', kind: 'image', model: 'gpt-image-2.5-flare' },
+      { id: 'r_old_sun', name: '画师2', kind: 'image', model: 'gpt-image-2.5-sunburst' },
+      { id: 'r_code', name: '代码', kind: 'deepseek', model: 'deepseek-flash' },
+      { id: 'r_plain', name: '未定', prompt: 'x' }, // 没 kind → 默认 claude，不该动
+    ],
+    members: [
+      { id: 'm_old_flare', name: 'A', kind: 'image', model: 'gpt-image-2.5-flare' },
+      { id: 'm_old_sun', name: 'B', kind: 'image', model: 'gpt-image-2.5-sunburst' },
+      { id: 'm_old_plain', name: 'C', kind: 'image', model: 'gpt-image-2' },
+      { id: 'm_new', name: 'D', kind: 'image', model: 'gpt-image-2.6-sunburst' }, // 已是新值
+      { id: 'm_code', name: '代码', kind: 'codex', model: 'gpt-image-2.5-flare' }, // 非 image 一律不动
+    ],
+    groups: [], usage: {}, runs: [],
+  })
+  const member = (id) => mod.state.members.find((m) => m.id === id)
+  const role = (id) => mod.state.roles.find((r) => r.id === id)
+  const first = await mod.migrateImageModels()
+  assert.equal(member('m_old_flare').model, 'gpt-image-2.6-flare', '2.5-flare 应换成 2.6-flare')
+  assert.equal(member('m_old_sun').model, 'gpt-image-2.6-sunburst', '*sunburst 应换成 2.6-sunburst')
+  assert.equal(member('m_old_plain').model, 'gpt-image-2.6-flare', 'gpt-image-2 应换成 2.6-flare')
+  assert.equal(member('m_new').model, 'gpt-image-2.6-sunburst', '已是 2.6 的值不该再动')
+  assert.equal(member('m_code').model, 'gpt-image-2.5-flare', '非 image 成员不该被迁移')
+  assert.equal(role('r_old_flare').model, 'gpt-image-2.6-flare', '职位同样迁移')
+  assert.equal(role('r_old_sun').model, 'gpt-image-2.6-sunburst', '职位 *sunburst 同样迁移')
+  assert.equal(role('r_code').model, 'deepseek-flash', '非 image 职位不该被迁移')
+  assert.equal(role('r_plain').model, undefined, '无 model 的职位不该被塞值')
+  assert.deepEqual(first, { members: 3, roles: 2, total: 5 }, '迁移计数不对：' + JSON.stringify(first))
+  const disk = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
+  assert.equal(disk.members.find((m) => m.id === 'm_old_sun').model, 'gpt-image-2.6-sunburst', '有变化必须 save() 落盘')
+  const snapshot = JSON.stringify(mod.state)
+  const second = await mod.migrateImageModels()
+  assert.deepEqual(second, { members: 0, roles: 0, total: 0 }, '第二次跑必须无变化：' + JSON.stringify(second))
+  assert.equal(JSON.stringify(mod.state), snapshot, '第二次跑不该改任何字段（含 updatedAt）')
+  return 'migrated ' + first.total + ' → 再跑 ' + second.total
+})
+
+await check('出图默认值④：新建 image 成员 / 职位默认模型都是 gpt-image-2.6-flare', async () => {
+  setState(structuredClone(fixture)) // 先复位：本用例失败也不要把脏状态留给后面的用例
+  assert.equal(STAFF_MODELS.image, 'gpt-image-2.6-flare')
+  // 源码里不再有「老模型当默认值」的硬编码；只允许迁移用的旧集/前缀常量与它的注释。
+  const legacyHardcoded = source
+    .split('\n')
+    .filter((line) => /'gpt-image-2\.5/.test(line) && !/OLD_IMAGE_MODELS|IMAGE_LEGACY_PREFIX|旧集|→ gpt-image-2/.test(line))
+  assert.deepEqual(legacyHardcoded, [], '还有硬编码的 2.5 默认值：\n' + legacyHardcoded.join('\n'))
+  const group = { id: 'g_img', name: 'IMG', memberIds: [] }
+  const imgRole = { id: 'r_img', name: '出图', prompt: 'x', kind: 'image' }
+  mod.state.groups.push(group)
+  mod.state.roles.push(imgRole)
+  await mod.ensureStaffing(group, [{ role: '出图' }])
+  const created = mod.state.members.find((m) => m.roleId === 'r_img')
+  assert.ok(created, 'ensureStaffing 没给 image 职位补员')
+  assert.equal(created.kind, 'image')
+  assert.equal(created.model, 'gpt-image-2.6-flare', '新建 image 成员默认模型不对：' + created.model)
+  return created.name + ' / ' + created.model
 })
 
 await check('rosterText 每个职位后带 默认框架/默认模型', () => {
