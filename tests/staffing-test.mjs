@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberHardLimitMinutes, memberHardLimitMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_HARD_LIMIT_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -491,23 +491,23 @@ try {
     return 'GET true → POST false → GET false → POST true'
   })
 
-  await check('GET/POST /config 暴露 memberIdleMinutes（10）与 memberHardLimitMinutes（360），可改可读回', async () => {
+  await check('GET/POST /config 暴露 memberIdleMinutes（10）与 memberMaxMinutes（60），可改可读回', async () => {
     const before = await (await fetch(base + '/config')).json()
     assert.equal(before.config.memberIdleMinutes, 10, 'memberIdleMinutes 默认必须是 10')
-    assert.equal(before.config.memberHardLimitMinutes, 360, 'memberHardLimitMinutes 默认必须是 360')
+    assert.equal(before.config.memberMaxMinutes, 60, 'memberMaxMinutes 默认必须是 60')
     assert.equal(before.config.memberTimeoutMinutes, undefined, '已废弃的 memberTimeoutMinutes 不再暴露')
-    const changed = await (await post('/config', { memberIdleMinutes: 6, memberHardLimitMinutes: 0 })).json()
+    const changed = await (await post('/config', { memberIdleMinutes: 6, memberMaxMinutes: 0 })).json()
     assert.equal(changed.config.memberIdleMinutes, 6, 'POST memberIdleMinutes 没生效')
-    assert.equal(changed.config.memberHardLimitMinutes, 0, 'POST memberHardLimitMinutes=0（不限制）没生效')
+    assert.equal(changed.config.memberMaxMinutes, 0, 'POST memberMaxMinutes=0（不限制）没生效')
     const readBack = await (await fetch(base + '/config')).json()
     assert.equal(readBack.config.memberIdleMinutes, 6)
-    assert.equal(readBack.config.memberHardLimitMinutes, 0)
+    assert.equal(readBack.config.memberMaxMinutes, 0)
     // 恢复默认，别影响后面的测试
-    await post('/config', { memberIdleMinutes: 10, memberHardLimitMinutes: 360 })
+    await post('/config', { memberIdleMinutes: 10, memberMaxMinutes: 60 })
     const restored = await (await fetch(base + '/config')).json()
     assert.equal(restored.config.memberIdleMinutes, 10)
-    assert.equal(restored.config.memberHardLimitMinutes, 360)
-    return 'GET 10/360 → POST 6/0 → GET 6/0 → 恢复 10/360'
+    assert.equal(restored.config.memberMaxMinutes, 60)
+    return 'GET 10/60 → POST 6/0 → GET 6/0 → 恢复 10/60'
   })
 
   await check('GET/POST /config 暴露 authoritativeReviewer（默认 any，可切 commander）', async () => {
@@ -2362,7 +2362,7 @@ try {
     ...extra,
   })
   const DEFAULT_IDLE = 10 * 60_000
-  const DEFAULT_HARD = 360 * 60_000
+  const DEFAULT_MAX = 60 * 60_000
 
   await check('真实 /proc 读数：readProcCpuMs(本进程) 是数字、忙循环后变大、无效 pid → null', () => {
     assert.equal(mod.readProcCpuMs(undefined), null, '断 pid 必须返回 null（退化为只看 stdout）')
@@ -2378,35 +2378,35 @@ try {
     return before + 'ms → ' + after + 'ms（+' + (after - before) + 'ms）'
   })
 
-  await check('看门狗参数：idle 默认 10 / hard 默认 360 / 页面优先 / 旧的 memberTimeoutMinutes 只读不生效', async () => {
+  await check('看门狗参数：idle 默认 10 / max 默认 60 / 页面优先 / 旧的 memberTimeoutMinutes 只读不生效', async () => {
     setState({ ...structuredClone(fixture), config: {} })
     assert.equal(mod.DEFAULT_MEMBER_IDLE_MINUTES, 10, 'idle 默认必须是 10 分钟')
-    assert.equal(mod.DEFAULT_MEMBER_HARD_LIMIT_MINUTES, 360, '硬上限默认必须是 360 分钟')
+    assert.equal(mod.DEFAULT_MEMBER_MAX_MINUTES, 60, 'max 默认必须是 60 分钟')
     assert.equal(mod.memberIdleMinutes({}), 10)
     assert.equal(mod.memberIdleMs({}), DEFAULT_IDLE)
-    assert.equal(mod.memberHardLimitMinutes({}), 360)
-    assert.equal(mod.memberHardLimitMs({}), DEFAULT_HARD)
+    assert.equal(mod.memberMaxMinutes({}), 60)
+    assert.equal(mod.memberMaxMinutesMs({}), DEFAULT_MAX)
     // profile config 兜底
     assert.equal(mod.memberIdleMinutes({ memberIdleMinutes: 3 }), 3)
-    assert.equal(mod.memberHardLimitMinutes({ memberHardLimitMinutes: 120 }), 120)
+    assert.equal(mod.memberMaxMinutes({ memberMaxMinutes: 120 }), 120)
     // 页面配置优先
-    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 4, memberHardLimitMinutes: 90 } })
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 4, memberMaxMinutes: 90 } })
     assert.equal(mod.memberIdleMinutes({ memberIdleMinutes: 3 }), 4, 'state.config 应优先')
-    assert.equal(mod.memberHardLimitMinutes({ memberHardLimitMinutes: 120 }), 90, 'state.config 应优先')
-    // 非法值回落默认；hard=0 是合法值（= 完全不限制）
-    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0, memberHardLimitMinutes: -1 } })
+    assert.equal(mod.memberMaxMinutes({ memberMaxMinutes: 120 }), 90, 'state.config 应优先')
+    // 非法值回落默认；max=0 是合法值（= 完全不限制）
+    setState({ ...structuredClone(fixture), config: { memberIdleMinutes: 0, memberMaxMinutes: -1 } })
     assert.equal(mod.memberIdleMinutes({}), 10, 'idle 非正数必须回落默认 10')
-    assert.equal(mod.memberHardLimitMinutes({}), 360, 'hard 负数必须回落默认 360')
-    setState({ ...structuredClone(fixture), config: { memberHardLimitMinutes: 0 } })
-    assert.equal(mod.memberHardLimitMinutes({}), 0, 'hard=0 是「不限制」，不能回落默认')
-    assert.equal(mod.memberHardLimitMs({}), 0)
+    assert.equal(mod.memberMaxMinutes({}), 60, 'max 负数必须回落默认 60')
+    setState({ ...structuredClone(fixture), config: { memberMaxMinutes: 0 } })
+    assert.equal(mod.memberMaxMinutes({}), 0, 'max=0 是「不限制」，不能回落默认')
+    assert.equal(mod.memberMaxMinutesMs({}), 0)
     // 旧字段仍可读，但不再影响任何终止判断
     setState({ ...structuredClone(fixture), config: { memberTimeoutMinutes: 45 } })
     assert.equal(mod.memberTimeoutMinutes({}), 45, '旧字段必须还能读（兼容老配置）')
     assert.equal(mod.memberIdleMs({}), DEFAULT_IDLE, '旧 memberTimeoutMinutes 不能再影响 idle')
-    assert.equal(mod.memberHardLimitMs({}), DEFAULT_HARD)
+    assert.equal(mod.memberMaxMinutesMs({}), DEFAULT_MAX)
     setState(structuredClone(fixture))
-    return 'idle 10 / hard 360（0=不限）· 页面优先 · 旧字段只读'
+    return 'idle 10 / max 60（0=不限）· 页面优先 · 旧字段只读'
   })
 
   await check('看门狗①：持续有输出的进程跑过 40 分钟不被杀（没有总时长超时）', async () => {
@@ -2463,8 +2463,8 @@ try {
     return 'idle=2 → 静默 3min 被杀 · error=「' + result.error + '」'
   })
 
-  await check('看门狗④：memberHardLimitMinutes=0 时 6 小时也不硬杀（只按静默）', async () => {
-    setState({ ...structuredClone(fixture), config: { memberHardLimitMinutes: 0 } })
+  await check('看门狗④：memberMaxMinutes=0 时 6 小时也不硬杀（只按静默）', async () => {
+    setState({ ...structuredClone(fixture), config: { memberMaxMinutes: 0 } })
     const clock = { t: 1_700_000_000_000 }
     const timers = fakeTimers()
     const child = fakeChildProcess()
@@ -3714,6 +3714,101 @@ try {
     assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
     assert.equal(member.model, 'deepseek-v4.1-flash', '成员 model 不应被修改')
     return 'stopReason=error + text 为空 → 降级 official · 回执含"本次已改用官方" · 成员配置不变'
+  })
+
+  await check('Bug 修复①：只有状态变化、无消息 → 心跳不刷新，idle 到期后被杀', async () => {
+    const makeCtx = (startActivation) => ({
+      get: (name) => {
+        if (name === 'subagents') return { getProvider: () => ({ id: 'spawn' }), startActivation }
+        if (name === 'llm') return { listProviders: () => [{ id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-flash' }] }
+        if (name === 'agents') {
+          // 模拟子代理：status 变化但无消息
+          let statusCount = 0
+          return {
+            get: (childId) => ({
+              status: 'running-' + (++statusCount), // status 一直变
+              session: { events: [] }, // 但没有 assistant/message 事件
+            }),
+          }
+        }
+        return undefined
+      },
+    })
+    const parent = { id: 'session-no-message' }
+    const member = { id: 'm_idle', name: '代码', kind: 'deepseek', model: 'deepseek-flash' }
+    const config = { memberIdleMinutes: 0.02 } // 1.2 秒 idle 超时
+    let activationCalled = false
+    const noMessage = async (opts) => {
+      activationCalled = true
+      // 模拟长时间挂起，直到被 abort
+      return {
+        childId: 'child-no-msg',
+        dispose: async () => {},
+        result: new Promise((resolve) => {
+          opts.signal.addEventListener('abort', () => {
+            resolve({ output: [], stopReason: 'error' })
+          })
+          // 永不自然完成
+        }),
+      }
+    }
+    const result = await mod.runDeepseekViaSeam(makeCtx(noMessage), member, '任务', config, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.ok(activationCalled, '应该调用了 startActivation')
+    assert.equal(result.ok, false, '应该失败')
+    assert.match(result.error, /静默超过.*已终止/, 'error 应说明静默超时')
+    return '只有 status 变化、无 assistant 消息 → idle 超时杀死'
+  })
+
+  await check('Bug 修复②：memberMaxMinutes=1 时 61 秒被杀且 reason=max-duration', async () => {
+    const makeCtx = (startActivation) => ({
+      get: (name) => {
+        if (name === 'subagents') return { getProvider: () => ({ id: 'spawn' }), startActivation }
+        if (name === 'llm') return { listProviders: () => [{ id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-flash' }] }
+        if (name === 'agents') {
+          return {
+            get: (childId) => ({
+              status: 'running',
+              session: { events: [{ type: 'assistant/message', text: '工作中' }] },
+            }),
+          }
+        }
+        return undefined
+      },
+    })
+    const parent = { id: 'session-max-dur' }
+    const member = { id: 'm_max', name: '代码', kind: 'deepseek', model: 'deepseek-flash' }
+    const config = { memberMaxMinutes: 0.02 } // 1.2 秒 max duration
+    const longTask = async (opts) => {
+      return {
+        childId: 'child-long',
+        dispose: async () => {},
+        result: new Promise((resolve) => {
+          opts.signal.addEventListener('abort', () => {
+            resolve({ output: [], stopReason: 'error' })
+          })
+          // 永不自然完成
+        }),
+      }
+    }
+    const result = await mod.runDeepseekViaSeam(makeCtx(longTask), member, '任务', config, parent, undefined, undefined, undefined, undefined, undefined)
+    assert.equal(result.ok, false, '应该失败')
+    assert.equal(result.reason, 'max-duration', 'reason 必须是 max-duration')
+    assert.match(result.error, /成员超过.*分钟上限已终止/, 'error 应说明超过上限')
+    return 'memberMaxMinutes=1 → 61s 被杀 · reason=max-duration'
+  })
+
+  await check('Bug 修复③：profile 里 streamIdleTimeoutMs=120000 能被读到', async () => {
+    // 读取 profile 配置并验证
+    const profilePath = path.join(process.env.HOME || require('os').homedir(), '.dsh/profiles/web/cordis.patch.yml')
+    let content
+    try {
+      content = await readFile(profilePath, 'utf8')
+    } catch (err) {
+      return 'SKIP: profile 文件不存在 (' + profilePath + ')'
+    }
+    assert.match(content, /apiclaude-deepseek/, 'profile 应包含 apiclaude-deepseek 配置')
+    assert.match(content, /streamIdleTimeoutMs:\s*120000/, 'profile 应包含 streamIdleTimeoutMs: 120000')
+    return 'profile 包含 streamIdleTimeoutMs: 120000'
   })
 
   // Bug 2① 测试暂时跳过（会超时，需要更复杂的 mock）

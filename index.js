@@ -73,13 +73,13 @@ const REVIEW_TEXT_HARD_CAP = 200_000
  *    就算活着；连续 `memberIdleMinutes`（默认 10 分钟）没有任何变化才终止。
  *    **stderr 不算活动**：codex 重试网络时会往 stderr 反复刷日志，把它当活动就等于
  *    让「网络卡死」永远续命（2026-11-04 实测漏杀）。stderr 只进 `err` 供报错使用；
- *  - **极大兵底**：另留一个 `memberHardLimitMinutes`（默认 360 分钟 = 6 小时）的硬上限，
- *    防止「一直有输出但永不结束」的进程把机器拖住；设 0 = 完全不限制。
+ *  - **单次调用硬上限**：`memberMaxMinutes`（默认 60 分钟）从成员开始运行算起，
+ *    超时直接终止并返回 reason: 'max-duration'。设 0 = 完全不限制。
  *
  * 旧的 `memberTimeoutMinutes` 仍然会被读取（兼容老配置），但**不再生效**。
  */
 const DEFAULT_MEMBER_IDLE_MINUTES = 10
-const DEFAULT_MEMBER_HARD_LIMIT_MINUTES = 360
+const DEFAULT_MEMBER_MAX_MINUTES = 60
 /** 已废弃：旧的总超时默认值，只用于兼容读取，不参与任何终止判断。 */
 const DEFAULT_MEMBER_MAX_MEMORY_MB = 12 * 1024
 const DEFAULT_MEMBER_TIMEOUT_MINUTES = 30
@@ -481,20 +481,20 @@ function memberIdleMs(config) {
 }
 
 /**
- * 成员硬上限（分钟）：默认 360（6 小时）的兜底，**0 = 完全不限制**。
+ * 成员单次调用硬上限（分钟）：默认 60 分钟，**0 = 完全不限制**。
  * 非数字/负数一律回落默认值（别让一个拼错的配置变成「立刻杀」）。
  */
-function memberHardLimitMinutes(config) {
+function memberMaxMinutes(config) {
   const own = (state && state.config) || {}
-  const raw = own.memberHardLimitMinutes ?? (config && config.memberHardLimitMinutes)
-  if (raw === undefined || raw === null || raw === '') return DEFAULT_MEMBER_HARD_LIMIT_MINUTES
+  const raw = own.memberMaxMinutes ?? (config && config.memberMaxMinutes)
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_MEMBER_MAX_MINUTES
   const value = Number(raw)
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_MEMBER_HARD_LIMIT_MINUTES
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_MEMBER_MAX_MINUTES
 }
 
-/** 成员硬上限（毫秒）；0 表示不设硬上限。 */
-function memberHardLimitMs(config) {
-  const minutes = memberHardLimitMinutes(config)
+/** 成员单次调用硬上限（毫秒）；0 表示不设硬上限。 */
+function memberMaxMinutesMs(config) {
+  const minutes = memberMaxMinutes(config)
   return minutes > 0 ? Math.round(minutes * 60_000) : 0
 }
 
@@ -534,7 +534,7 @@ function progressStaleMs(config) {
 
 /**
  * `/config` 的公开视图（GET / POST 共用）。密钥只报「有没有」，不回报明文。
- * 新增看门狗参数：memberIdleMinutes（默认 10）、memberHardLimitMinutes（默认 360，0=不限）。
+ * 新增看门狗参数：memberIdleMinutes（默认 10）、memberMaxMinutes（默认 60，0=不限）。
  * 旧的 memberTimeoutMinutes 不再返回（已废弃、不再生效）。
  */
 function configView(config, source) {
@@ -554,7 +554,7 @@ function configView(config, source) {
     codexBaseFromProfile: Boolean(!own.codexBase && config.codexBaseUrl),
     memberMaxMemoryMb: memberMaxMemoryMb(config),
     memberIdleMinutes: memberIdleMinutes(config),
-    memberHardLimitMinutes: memberHardLimitMinutes(config),
+    memberMaxMinutes: memberMaxMinutes(config),
     imageTimeoutSeconds: imageTimeoutSeconds(config),
     // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
     authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
@@ -674,10 +674,11 @@ function formatMinutes(ms) {
 const SILENT_KILL_REASONS = new Set(['idle-timeout', 'stalled-no-progress'])
 
 /** 看门狗终止原因 → 面向用户的中文错误（回执/日志共用）。 */
-function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes } = {}) {
+function watchdogErrorText(reason, { idleMinutes, hardLimitMinutes, maxMinutes } = {}) {
   if (reason === 'idle-timeout') return `成员静默超过 ${idleMinutes} 分钟，已终止（看门狗）`
   if (reason === 'stalled-no-progress') return `成员静默超过 ${idleMinutes} 分钟且 CPU 无进展，已终止（看门狗）`
   if (reason === 'hard-limit') return `成员超过硬上限 ${hardLimitMinutes} 分钟，已终止（看门狗）`
+  if (reason === 'max-duration') return `成员超过 ${maxMinutes} 分钟上限已终止`
   if (reason === 'cancelled') return '已被用户停止'
   if (reason === 'timeout') return '成员超过本次调用的显式超时，已终止'
   return undefined
@@ -716,7 +717,7 @@ function run(bin, args, options = {}) {
     signal,
     timeoutMs,
     idleMs = memberIdleMs(),
-    hardLimitMs = memberHardLimitMs(),
+    hardLimitMs = memberMaxMinutesMs(),
     killGraceMs = MEMBER_KILL_GRACE_MS,
     tickMs = WATCHDOG_TICK_MS,
     memberName,
@@ -853,29 +854,63 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
-  const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
-  const events = jsonLines(out)
-  const started = events.find((e) => e.type === 'thread.started')
-  const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
-  const done = [...events].reverse().find((e) => e.type === 'turn.completed')
-  const text = messages.map((e) => e.item.text).join('\n').trim()
-  const usage = done?.usage ?? {}
-  return {
-    ok: code === 0 && text.length > 0 && !reason,
-    text,
-    error: killedError ?? (code === 0 ? (text.length ? undefined : 'codex 没有返回任何消息（检查 base/key 或网络）') : (err.trim().slice(-600) || `codex exited ${code}`)),
-    convId: resume ?? started?.thread_id,
-    usage: {
-      input: usage.input_tokens ?? 0,
-      output: usage.output_tokens ?? 0,
-      costUsd: 0,
-    },
-    ...reason ? { reason } : {},
+
+  // 单次调用硬上限：独立的 AbortController + timer
+  let maxDurationFired = false
+  let maxDurationTimer
+  let abortController
+  let actualSignal = signal
+  const maxMs = maxDurationMs !== undefined ? maxDurationMs : memberMaxMinutesMs(config)
+  if (maxMs > 0) {
+    abortController = new AbortController()
+    actualSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal
+    maxDurationTimer = setTimeout(() => {
+      maxDurationFired = true
+      try { abortController.abort() } catch { /* ignore */ }
+    }, maxMs)
+  }
+
+  try {
+    const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
+    const events = jsonLines(out)
+    const started = events.find((e) => e.type === 'thread.started')
+    const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
+    const done = [...events].reverse().find((e) => e.type === 'turn.completed')
+    const text = messages.map((e) => e.item.text).join('\n').trim()
+    const usage = done?.usage ?? {}
+
+    // 检查是否是 max-duration 超时
+    if (maxDurationFired) {
+      const maxMinutes = formatMinutes(maxMs)
+      return {
+        ok: false,
+        text: '',
+        error: watchdogErrorText('max-duration', { maxMinutes }),
+        convId: resume ?? started?.thread_id,
+        usage: { input: 0, output: 0, costUsd: 0 },
+        reason: 'max-duration',
+      }
+    }
+
+    return {
+      ok: code === 0 && text.length > 0 && !reason,
+      text,
+      error: killedError ?? (code === 0 ? (text.length ? undefined : 'codex 没有返回任何消息（检查 base/key 或网络）') : (err.trim().slice(-600) || `codex exited ${code}`)),
+      convId: resume ?? started?.thread_id,
+      usage: {
+        input: usage.input_tokens ?? 0,
+        output: usage.output_tokens ?? 0,
+        costUsd: 0,
+      },
+      ...reason ? { reason } : {},
+    }
+  } finally {
+    if (maxDurationTimer !== undefined) clearTimeout(maxDurationTimer)
   }
 }
 
@@ -888,7 +923,7 @@ let claudeExecOverride = null
  * 「已死/空上下文」的旧会话时，claude 不答题、只回问候（实测日志里 8 次
  * `commander image review unparsed: I'm here and ready to help. What would you like me to do?`）。
  */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName, noResume }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -899,30 +934,64 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   const exec = claudeExecOverride || run
   if (resume && !noResume) args.push('--resume', resume)
-  const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, { cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
-  const events = jsonLines(out)
-  const texts = []
-  for (const event of events) {
-    if (event.type !== 'assistant') continue
-    for (const block of event.message?.content ?? []) {
-      if (block.type === 'text' && block.text) texts.push(block.text)
-    }
+
+  // 单次调用硬上限：独立的 AbortController + timer
+  let maxDurationFired = false
+  let maxDurationTimer
+  let abortController
+  let actualSignal = signal
+  const maxMs = maxDurationMs !== undefined ? maxDurationMs : memberMaxMinutesMs(config)
+  if (maxMs > 0) {
+    abortController = new AbortController()
+    actualSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal
+    maxDurationTimer = setTimeout(() => {
+      maxDurationFired = true
+      try { abortController.abort() } catch { /* ignore */ }
+    }, maxMs)
   }
-  const result = events.find((e) => e.type === 'result')
-  const sessionId = result?.session_id ?? events.find((e) => e.session_id)?.session_id
-  const text = (result?.result ?? texts.join('\n')).trim()
-  const usage = result?.usage ?? {}
-  return {
-    ok: code === 0 && Boolean(result) && result.is_error !== true && !reason,
-    text,
-    convId: noResume ? sessionId : (resume ?? sessionId),
-    usage: {
-      input: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
-      output: usage.output_tokens ?? 0,
-      costUsd: result?.total_cost_usd ?? 0,
-    },
-    error: killedError ?? (code === 0 ? undefined : (err.trim().slice(-600) || `claude exited ${code}`)),
-    ...reason ? { reason } : {},
+
+  try {
+    const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, { cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
+    const events = jsonLines(out)
+    const texts = []
+    for (const event of events) {
+      if (event.type !== 'assistant') continue
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'text' && block.text) texts.push(block.text)
+      }
+    }
+    const result = events.find((e) => e.type === 'result')
+    const sessionId = result?.session_id ?? events.find((e) => e.session_id)?.session_id
+    const text = (result?.result ?? texts.join('\n')).trim()
+    const usage = result?.usage ?? {}
+
+    // 检查是否是 max-duration 超时
+    if (maxDurationFired) {
+      const maxMinutes = formatMinutes(maxMs)
+      return {
+        ok: false,
+        text: '',
+        error: watchdogErrorText('max-duration', { maxMinutes }),
+        convId: noResume ? sessionId : (resume ?? sessionId),
+        usage: { input: 0, output: 0, costUsd: 0 },
+        reason: 'max-duration',
+      }
+    }
+
+    return {
+      ok: code === 0 && Boolean(result) && result.is_error !== true && !reason,
+      text,
+      convId: noResume ? sessionId : (resume ?? sessionId),
+      usage: {
+        input: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+        output: usage.output_tokens ?? 0,
+        costUsd: result?.total_cost_usd ?? 0,
+      },
+      error: killedError ?? (code === 0 ? undefined : (err.trim().slice(-600) || `claude exited ${code}`)),
+      ...reason ? { reason } : {},
+    }
+  } finally {
+    if (maxDurationTimer !== undefined) clearTimeout(maxDurationTimer)
   }
 }
 
@@ -982,17 +1051,20 @@ async function agentComposition(ctx) {
 /** Run one DeepSeek member through the subagent seam (concurrency + cancellation owned by it). */
 
 /**
- * 子代理活动指纹：状态 + 已提交事件数。
- * 只要这几项有变化就说明「链上还在动」，看门狗据此刷新 lastActivity。
+ * 子代理活动指纹：仅统计 assistant 真实输出事件数。
+ * 只有真正收到 assistant 消息/输出才算活动，纯 status 变化不刷新心跳。
+ * 这样可以防止请求挂死时仍因 status 变化而刷新 lastActivity，导致看门狗永远不触发。
  */
 function agentActivityStamp(agent) {
   if (!agent) return ''
-  const status = String(agent.status || '')
   let count = 0
   try {
-    count = agent.session ? sessionEvents(agent.session).length : 0
+    if (agent.session) {
+      const events = sessionEvents(agent.session)
+      count = events.filter((e) => e && e.type === 'assistant/message').length
+    }
   } catch { /* ignore */ }
-  return status + ':' + count
+  return String(count)
 }
 
 /** Continue an already-created child agent instead of spawning a new one. */
@@ -1223,6 +1295,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   let idleFired = false
   let timedOut = false
   let cancelled = false
+  let maxDurationFired = false
   let lastSeamStamp = ''
   const controller = new AbortController()
   const cancelSignal = signalFor(callId)
@@ -1234,6 +1307,11 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   // 显式预算（审校等有界调用）才设总计时；成员调用没有总时长，只有静默看门狗。
   const budgetTimer = Number.isFinite(budgetMs) && budgetMs > 0
     ? setTimeout(() => { timedOut = true; try { controller.abort() } catch { /* ignore */ } }, budgetMs)
+    : undefined
+  // 单次调用硬上限：独立 timer，到期时 abort
+  const maxMs = memberMaxMinutesMs(config)
+  const maxDurationTimer = maxMs > 0
+    ? setTimeout(() => { maxDurationFired = true; try { controller.abort() } catch { /* ignore */ } }, maxMs)
     : undefined
   const seamAgents = ctx.get('agents')
   // 只有能观察到子代理（agents.get）时才做静默判定；观察不到就退化成只等结果，
@@ -1284,6 +1362,16 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     model,
     usage: null,
   })
+  const maxDurationResult = () => ({
+    ok: false,
+    text: '',
+    convId: childId ?? member.convId,
+    error: watchdogErrorText('max-duration', { maxMinutes: formatMinutes(maxMs) }),
+    reason: 'max-duration',
+    provider,
+    model,
+    usage: null,
+  })
   const cancelledResult = () => ({
     ok: false,
     text: '',
@@ -1329,7 +1417,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           activation = await startSeam(provider, model, false)
         } catch (retryError) {
           // 去掉 reasoningEffort 后仍失败 → 回退到 deepseek-official（如果还没用官方）
-          if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw retryError
+          if (idleFired || timedOut || maxDurationFired || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw retryError
           const retryMsg = String(retryError?.message ?? retryError)
           console.error('[council] seam fallback:', provider, model, retryMsg)
           try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed after removing reasoningEffort (${retryMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
@@ -1340,7 +1428,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       } else {
         // 第二层：不是 UNSUPPORTED_REASONING_EFFORT（profile 里没注册该 provider / adapter 起不来）
         // → 直接用 DeepSeek 官方再开一次（只在「启动阶段」失败时回退；看门狗/取消不重试）
-        if (idleFired || timedOut || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
+        if (idleFired || timedOut || maxDurationFired || provider === DEEPSEEK_OFFICIAL_PROVIDER) throw error
         console.error('[council] seam fallback:', provider, model, errorMsg)
         try { ctx0?.logger?.('council')?.warn?.(`deepseek provider "${provider}" failed to start (${errorMsg}); retrying with ${DEEPSEEK_OFFICIAL_PROVIDER}`) } catch { /* ignore */ }
         provider = DEEPSEEK_OFFICIAL_PROVIDER
@@ -1358,6 +1446,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     let degraded = false
     try {
       const result = await activation.result
+      if (maxDurationFired) { keepChild = false; return maxDurationResult() }
       if (idleFired) { keepChild = false; return idleResult() }
       if (timedOut) { keepChild = false; return timeoutResult() }
       const text = (result.output || [])
@@ -1423,6 +1512,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       }
     } catch (error) {
       if (cancelled) { keepChild = false; return cancelledResult() }
+      if (maxDurationFired) { keepChild = false; return maxDurationResult() }
       if (idleFired) { keepChild = false; return idleResult() }
       if (timedOut) { keepChild = false; return timeoutResult() }
       throw error
@@ -1455,12 +1545,14 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     }
   } catch (error) {
     if (cancelled) return cancelledResult()
+    if (maxDurationFired) return maxDurationResult()
     if (idleFired) return idleResult()
     if (timedOut) return timeoutResult()
     return { ok: false, text: '', error: 'subagent failed: ' + String(error?.message ?? error), provider, model, usage: null }
   } finally {
     clearInterval(watchTimer)
     if (budgetTimer !== undefined) clearTimeout(budgetTimer)
+    if (maxDurationTimer !== undefined) clearTimeout(maxDurationTimer)
   }
 }
 
@@ -1915,7 +2007,8 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
   // 终止交给 run() / seam 的静默看门狗。
   const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined
   const idleMs = memberIdleMs(config)
-  const hardLimitMs = memberHardLimitMs(config)
+  const hardLimitMs = memberMaxMinutesMs(config)
+  const maxDurationMs = memberMaxMinutesMs(config)
   let result
   if (member.kind === 'image') {
     const style = String(styleOverride || (group && group.style) || '')
@@ -1945,8 +2038,10 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       timeoutMs: budgetMs,
       idleMs,
       hardLimitMs,
+      maxDurationMs,
       onActivity,
       memberName: member.name,
+      config,
     })
   }
   if (result.convId) member.convId = result.convId
@@ -3034,12 +3129,12 @@ export function createHandler(ctx, config = {}) {
               }
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
               if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
-              // 看门狗参数可写：memberIdleMinutes > 0；memberHardLimitMinutes >= 0（0 = 不限制）
+              // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
               if (body.memberIdleMinutes !== undefined && Number.isFinite(Number(body.memberIdleMinutes)) && Number(body.memberIdleMinutes) > 0) {
                 next.memberIdleMinutes = Number(body.memberIdleMinutes)
               }
-              if (body.memberHardLimitMinutes !== undefined && Number.isFinite(Number(body.memberHardLimitMinutes)) && Number(body.memberHardLimitMinutes) >= 0) {
-                next.memberHardLimitMinutes = Number(body.memberHardLimitMinutes)
+              if (body.memberMaxMinutes !== undefined && Number.isFinite(Number(body.memberMaxMinutes)) && Number(body.memberMaxMinutes) >= 0) {
+                next.memberMaxMinutes = Number(body.memberMaxMinutes)
               }
               if (body.imageTimeoutSeconds !== undefined && Number.isFinite(Number(body.imageTimeoutSeconds)) && Number(body.imageTimeoutSeconds) > 0) {
                 next.imageTimeoutSeconds = Number(body.imageTimeoutSeconds)
