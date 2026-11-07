@@ -1386,7 +1386,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     provider: 'spawn',
     label: member.name,
     request: {
-      prompt: [{ type: 'text', text: prompt }],
+      prompt: Array.isArray(prompt) ? prompt : [{ type: 'text', text: prompt }],
       parent,
       ...presetId === undefined ? {} : { agentPreset: presetId },
       cwd: member.cwd || config.defaultWorkspace || process.cwd(),
@@ -1669,9 +1669,10 @@ async function runDeepseek(ctx, member, prompt, config) {
 /** Ask an Anthropic-family member whether an image matches the group style. */
 async function reviewImage(ctx, group, result, config, styleOverride, callId) {
   const inGroup = (m) => (group.memberIds || []).indexOf(m.id) >= 0
-  const reviewerId = (group.reviewerId && inGroup({ id: group.reviewerId }) ? group.reviewerId : undefined)
-    || (state.members.find((m) => inGroup(m) && m.kind === 'claude') || {}).id
-  const reviewer = state.members.find((m) => m.id === reviewerId)
+  const configured = state.members.find((m) => m.id === group.reviewerId)
+  const claudeMember = state.members.find((m) => inGroup(m) && m.kind === 'claude')
+  // 图片审核必须用能 Read 文件的 claude 腿：配置的审校不是 claude 时改选组内 claude 成员
+  const reviewer = configured && configured.kind === 'claude' ? configured : claudeMember
   if (!reviewer || reviewer.kind !== 'claude' || !result.file) return null
   const prompt = [
     '你是这个小组的总画师审校。统一风格规范：',
@@ -1969,6 +1970,32 @@ function reviewRawSnippet(text) {
  * 返回 `{ verdict, result, parsed, retried }`：verdict 恒为 `{ok:boolean, reason}`（不会 ok:null），
  * `result` 是最后一次调用的原始结果（调用方据此判失败原因）。
  */
+
+/** 把本地图片发布为 DSH attachment，组装成 [image, text] 多模态 prompt；失败返回 null。 */
+async function imagePromptParts(ctx, file, text) {
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const store = ctx && typeof ctx.get === 'function' ? ctx.get('attachments') : undefined
+    if (!store || typeof store.saveImages !== 'function' || !file) return null
+    const bytes = await readFile(file)
+    const lower = String(file).toLowerCase()
+    const mediaType = lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg' : 'image/png'
+    const refs = await store.saveImages([{ data: new Uint8Array(bytes), mediaType, name: 'review' }])
+    const ref = refs && refs[0]
+    if (!ref) return null
+    return [{ type: 'image', attachment: ref }, { type: 'text', text }]
+  } catch (error) {
+    console.error('[council] imagePromptParts failed:', String(error && error.message || error))
+    return null
+  }
+}
+
+/** 数组型 prompt 追加一段文本（重试时用）。 */
+function appendPromptText(prompt, extra) {
+  if (!Array.isArray(prompt)) return prompt + extra
+  return prompt.concat([{ type: 'text', text: extra }])
+}
+
 async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, label) {
   const clean = () => Object.assign({}, member, { convId: undefined, __noResume: true })
   let result = await runKind(ctx, clean(), prompt, config, group, styleOverride, parent, timeoutMs, callId)
@@ -1980,7 +2007,7 @@ async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, 
     const why = looksLikeGreeting(raw) ? '疑似问候/空炮（旧会话不答题）' : '输出无法解析'
     retried = true
     console.error('[council] ' + label + ' ' + why + '，换新会话（无 resume）重试 · 首次原文=' + reviewRawSnippet(raw))
-    result = await runKind(ctx, clean(), prompt + REVIEW_JSON_NOTE, config, group, styleOverride, parent, timeoutMs, callId)
+    result = await runKind(ctx, clean(), appendPromptText(prompt, REVIEW_JSON_NOTE), config, group, styleOverride, parent, timeoutMs, callId)
     raw = String(result && result.text || '')
     parsed = verdictOf(raw)
     console.error('[council] ' + label + ' 重试' + (parsed ? '成功' : '仍失败') + ' · 重试原文=' + reviewRawSnippet(raw))
@@ -2078,6 +2105,23 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
   const reviewer = memberWithRole(group, '审校')
   if (!reviewer) return null
   if (output && output.image) {
+    // 1) 先让「配置的审校」自己看图（deepseek 也有视觉能力）：把图片作为多模态块塞进审核请求。
+    const imageText = [
+      '你是这个小组的审校，做初步校验。下面这张图就是成员的产出，请**实际看图**后判断，不要凭文字推测。',
+      '禁止使用任何工具（bash / read / 搜索等），图片已经附在消息里。',
+      ...(brief ? ['[背景]', brief, ''] : []),
+      `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
+      '请逐条对照任务要求检查画面里到底有没有，只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
+    ].join('\n')
+    const parts = output.file ? await imagePromptParts(ctx, output.file, imageText) : null
+    if (parts) {
+      const { verdict } = await runReviewTurn(
+        ctx, Object.assign({}, reviewer, { __preset: 'minimal', __noTools: true }),
+        parts, config, group, styleOverride, parent, 120_000, callId, 'prelimReview(image)',
+      )
+      if (verdict) { verdict.by = reviewer.name; verdict.sawImage = true; return verdict }
+    }
+    // 2) 拿不到多模态块时，退回 claude 腿 Read 图片
     return reviewImage(ctx, group, { file: output.file, task }, config, styleOverride, callId)
   }
   const prompt = [
