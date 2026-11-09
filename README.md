@@ -126,6 +126,32 @@ systemctl --user restart dsh-web        # 或重启你起的 dsh web
 | `deepseek` | DSH 内建 agent（subagent seam） | 用完即弃 + 摘要回灌；可复用同一条子会话 |
 | `image` | 图像接口（OpenAI 兼容 `/v1/images/generations`） | 出图、序列帧 |
 
+### deepseek 成员的 API 提供方
+
+`deepseek` 成员**默认使用 `deepseek-official`**（官方主对话 API），无需额外配置。
+
+**可选配置**：如果本地 profile 支持 `apiclaude-deepseek`（中转或自建），可通过以下方式覆盖：
+
+1. **全局配置**：在 profile 的 `cordis.patch.yml` 中设置 `config.deepseekProvider`：
+   ```yaml
+   - insert:
+       - id: council
+         name: '@zelystaric/dsh-council'
+         config:
+           deepseekProvider: apiclaude    # 全局改用 apiclaude-deepseek
+   ```
+
+2. **单个成员配置**：在「小组」页或 profile 中为特定成员设置 `member.provider`：
+   ```yaml
+   members:
+     - id: coder
+       kind: deepseek
+       provider: apiclaude              # 仅此成员用 apiclaude-deepseek
+       model: deepseek-chat
+   ```
+
+成员级 `provider` 优先于全局 `deepseekProvider`。不配置时自动使用 `deepseek-official`。
+
 ## 岗位（角色）
 
 内置 8 个：指挥 / 代码 / 全栈 / 审校 / 画师 / 配乐 / 3D建模 / 动画。**都只是预设**——岗位名、提示词、成员、模型、风格都可以自己改。指挥负责拆解与终审，审校负责初审，其余按任务分派。

@@ -242,7 +242,58 @@ await check('出图默认值④：新建 image 成员 / 职位默认模型都是
   return created.name + ' / ' + created.model
 })
 
+/* ── DeepSeek 提供商与模型解析 ───────────────────────────────────────────── */
+await check('DeepSeek①：默认解析为 deepseek-official + deepseek-flash', () => {
+  setState(structuredClone(fixture))
+  assert.equal(mod.deepseekMemberProvider({}), 'deepseek-official', 'deepseekMemberProvider({}) 应返回 deepseek-official')
+  assert.equal(mod.deepseekMemberModel({}), 'deepseek-flash', 'deepseekMemberModel({}) 应返回 deepseek-flash')
+  return `provider=${mod.deepseekMemberProvider({})} model=${mod.deepseekMemberModel({})}`
+})
+
+await check('DeepSeek②：config.deepseekProvider=apiclaude-deepseek 时覆盖生效', () => {
+  setState({ ...structuredClone(fixture), config: { deepseekProvider: 'apiclaude-deepseek' } })
+  assert.equal(mod.deepseekMemberProvider({}), 'apiclaude-deepseek', 'config.deepseekProvider 应覆盖默认值')
+  return `provider=${mod.deepseekMemberProvider({})}`
+})
+
+await check('DeepSeek③：迁移不再覆盖显式 apiclaude 配置', async () => {
+  setState({
+    roles: [
+      { id: 'r_old_legacy', name: '旧deepseek', kind: 'deepseek', model: 'deepseek-chat' }, // 旧模型，应迁移
+      { id: 'r_apiclaude', name: 'apiclaude配置', kind: 'deepseek', model: 'deepseek-chat', provider: 'apiclaude-deepseek' }, // 旧模型，但有 apiclaude provider
+    ],
+    members: [
+      { id: 'm_old_legacy', name: '旧deepseek成员', kind: 'deepseek', model: 'deepseek-reasoner' }, // 旧模型，应迁移
+      { id: 'm_apiclaude', name: 'apiclaude成员', kind: 'deepseek', model: 'deepseek-reasoner', provider: 'apiclaude-deepseek' }, // 显式 apiclaude，不应迁移
+      { id: 'm_official', name: '官方成员', kind: 'deepseek', model: 'deepseek-reasoner', provider: 'deepseek-official' }, // 显式官方，应迁移
+    ],
+    groups: [], usage: {}, runs: [],
+  })
+
+  const result = await mod.migrateDeepseekMembers()
+
+  // 验证旧模型被迁移到新模型
+  const oldLegacy = mod.state.members.find((m) => m.id === 'm_old_legacy')
+  assert.equal(oldLegacy.model, 'deepseek-flash', '旧模型（无 provider）应迁移到 deepseek-flash')
+
+  // 验证显式 apiclaude 配置的成员不被迁移
+  const apiclaude = mod.state.members.find((m) => m.id === 'm_apiclaude')
+  assert.equal(apiclaude.provider, 'apiclaude-deepseek', 'apiclaude provider 应保持不变')
+  assert.equal(apiclaude.model, 'deepseek-reasoner', '显式 apiclaude 配置的旧模型不应被迁移')
+
+  // 验证显式 official provider 的成员被迁移
+  const official = mod.state.members.find((m) => m.id === 'm_official')
+  assert.equal(official.model, 'deepseek-flash', '显式 deepseek-official provider 的旧模型应被迁移')
+
+  // 验证迁移计数（只有 2 个成员 + 1 个职位应被迁移）
+  assert.equal(result.members, 2, '应迁移 2 个成员（m_old_legacy + m_official），实际：' + result.members)
+  assert.equal(result.roles, 1, '应迁移 1 个职位（r_old_legacy），实际：' + result.roles)
+
+  return `迁移 ${result.members} 成员 + ${result.roles} 职位 · apiclaude 成员保持 ${apiclaude.model}`
+})
+
 await check('rosterText 每个职位后带 默认框架/默认模型', () => {
+  setState(structuredClone(fixture))
   const text = mod.rosterText(fixture.groups[0])
   assert.match(text, /- 代码（默认框架=deepseek，默认模型=deepseek-flash）/)
   assert.match(text, /- 审校（默认框架=claude，默认模型=claude-opus-5-5）/)
@@ -3301,8 +3352,8 @@ try {
   /* ── deepseek 成员走 apiclaude 中转（小组专用；主会话仍走官方） ─────────── */
   await check('deepseek 链路①：默认识别 apiclaude-deepseek / deepseek-v4.1-flash，provider 不在 profile 时回退官方', () => {
     setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
-    assert.equal(mod.deepseekMemberProvider({}), 'apiclaude-deepseek', '默认 provider 必须是 apiclaude-deepseek')
-    assert.equal(mod.deepseekMemberProvider(), 'apiclaude-deepseek', '不传 config 也必须是 apiclaude-deepseek')
+    assert.equal(mod.deepseekMemberProvider({}), 'deepseek-official', '默认 provider 必须是 deepseek-official')
+    assert.equal(mod.deepseekMemberProvider(), 'deepseek-official', '不传 config 也必须是 deepseek-official')
     assert.equal(mod.deepseekMemberModel({}, {}, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 默认模型必须是 deepseek-v4.1-flash')
     assert.equal(mod.deepseekMemberModel({}, { model: '' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 空 model 也要回落默认值')
     assert.equal(mod.deepseekMemberModel({}, {}, 'deepseek-official'), 'deepseek-flash', 'official 必须固定返回 deepseek-flash')
@@ -3311,9 +3362,9 @@ try {
     assert.equal(mod.deepseekMemberProvider({ deepseekProvider: 'deepseek-official' }), 'deepseek-official', 'config.deepseekProvider 必须能覆盖默认值')
     assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}, 'apiclaude-deepseek'), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
     // 去掉了预检逻辑：直接返回配置值，不再根据 listProviders 回退
-    assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'apiclaude-deepseek', '不再预检，直接返回配置值')
-    assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'apiclaude-deepseek', '不再预检，直接返回配置值')
-    return 'apiclaude-deepseek / deepseek-v4.1-flash · official 固定 deepseek-flash'
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'deepseek-official', '不再预检，直接返回配置值')
+    assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'deepseek-official', '不再预检，直接返回配置值')
+    return 'deepseek-official / deepseek-flash（apiclaude 需显式配置）'
   })
 
   await check('deepseek 链路②：旧值 deepseek-flash / deepseek-v4-pro 映射到 deepseek-v4.1-flash，其它显式模型尊重；seam 真把 provider/model 传下去（含启动失败回退）', async () => {
@@ -3346,10 +3397,10 @@ try {
     }
     const out = await mod.runDeepseekViaSeam(makeCtx(okActivation), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(out.ok, '假 seam 应成功：' + JSON.stringify(out))
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', 'seam 必须把 apiclaude-deepseek 传下去，实际 ' + seen[0].provider)
-    assert.equal(seen[0].model, 'deepseek-v4.1-flash', 'seam 必须把旧模型映射后传下去，实际 ' + seen[0].model)
-    assert.equal(out.provider, 'apiclaude-deepseek', '结果里要带回实际 provider（回执用）')
-    assert.equal(out.model, 'deepseek-v4.1-flash', '结果里要带回实际 model（回执用）')
+    assert.equal(seen[0].provider, 'deepseek-official', '默认必须走 deepseek-official，实际 ' + seen[0].provider)
+    assert.equal(seen[0].model, 'deepseek-flash', '官方链路模型必须是 deepseek-flash，实际 ' + seen[0].model)
+    assert.equal(out.provider, 'deepseek-official', '结果里要带回实际 provider（回执用）')
+    assert.equal(out.model, 'deepseek-flash', '结果里要带回实际 model（回执用）')
 
     // 启动阶段报错（profile 里没注册）→ 自动用官方重开一次
     let calls = 0
@@ -3370,7 +3421,7 @@ try {
     assert.equal(calls, 2, '首选 provider 启动失败时应重开一次官方，实际 ' + calls + ' 次')
     assert.equal(seen[seen.length - 1].provider, 'deepseek-official', '回退必须用 deepseek-official，实际 ' + seen[seen.length - 1].provider)
     assert.equal(fallback.provider, 'deepseek-official', '回退后结果里的 provider 必须是 deepseek-official')
-    return '映射 2 条 + seam 传参 + 启动失败回退'
+    return '映射 2 条 + seam 传参 + 启动失败回退（默认官方）'
   })
 
   await check('deepseek 链路③：迁移幂等、只动 deepseek 成员（其它框架/职位不动）、写盘', async () => {
@@ -3391,10 +3442,11 @@ try {
     })
     const member = (id) => mod.state.members.find((m) => m.id === id)
     const first = await mod.migrateDeepseekMembers()
-    assert.deepEqual(first, { members: 2, total: 2 }, '只该迁移 2 个还挂旧值的 deepseek 成员：' + JSON.stringify(first))
-    for (const id of ['m_ds_old', 'm_ds_pro']) {
-      assert.equal(member(id).provider, 'apiclaude-deepseek', id + ' 的 provider 必须是 apiclaude-deepseek')
-      assert.equal(member(id).model, 'deepseek-v4.1-flash', id + ' 的 model 必须是 deepseek-v4.1-flash')
+    assert.deepEqual(first, { members: 1, roles: 0, total: 1 }, '只该迁移仍挂旧值/非法配置的 deepseek 成员：' + JSON.stringify(first))
+    assert.equal(member('m_ds_old').provider, 'deepseek-official', '本来就在官方链路的不动')
+    for (const id of ['m_ds_pro']) {
+      assert.equal(member(id).provider, 'deepseek-official', id + ' 的 provider 必须是 deepseek-official')
+      assert.equal(member(id).model, 'deepseek-flash', id + ' 的 model 必须是 deepseek-flash')
       assert.equal(typeof member(id).updatedAt, 'number', id + ' 迁移后应更新 updatedAt')
     }
     assert.equal(member('m_ds_new').updatedAt, undefined, '已经是新值的成员不该被改动（含 updatedAt）')
@@ -3403,12 +3455,12 @@ try {
     assert.equal(member('m_codex').model, 'gpt-6.1-sol', 'codex 成员不该被迁移')
     assert.equal(member('m_image').model, 'gpt-image-2.6-flare', 'image 成员不该被迁移')
     assert.equal(mod.state.roles.find((r) => r.id === 'r_ds').model, 'deepseek-flash', '职位不在这条迁移里（只动成员）')
-    assert.equal(mod.STAFF_MODELS.deepseek, 'deepseek-v4.1-flash', 'STAFF_MODELS.deepseek 必须同步为 deepseek-v4.1-flash')
+    assert.equal(mod.STAFF_MODELS.deepseek, 'deepseek-flash', 'STAFF_MODELS.deepseek 必须同步为 deepseek-flash')
     const disk = JSON.parse(await readFile(path.join(HOME, 'storages', 'council.json'), 'utf8'))
-    assert.equal(disk.members.find((m) => m.id === 'm_ds_old').provider, 'apiclaude-deepseek', '有变化必须落盘')
+    assert.equal(disk.members.find((m) => m.id === 'm_ds_old').provider, 'deepseek-official', '有变化必须落盘')
     const snapshot = JSON.stringify(mod.state)
     const second = await mod.migrateDeepseekMembers()
-    assert.deepEqual(second, { members: 0, total: 0 }, '第二次跑必须无变化：' + JSON.stringify(second))
+    assert.deepEqual(second, { members: 0, roles: 0, total: 0 }, '第二次跑必须无变化：' + JSON.stringify(second))
     assert.equal(JSON.stringify(mod.state), snapshot, '第二次跑不该改任何字段')
     return 'migrated ' + first.total + ' → 再跑 ' + second.total + ' · 其它框架/职位不动'
   })
@@ -3588,7 +3640,7 @@ try {
     let calls = 0
     const parent = { id: 'session-f2222222-2222-4222-8222-222222222222' }
     // 成员没有显式 provider，使用默认 apiclaude-deepseek
-    const member = { id: 'm_ds_default', name: '代码', kind: 'deepseek', model: 'deepseek-flash' }
+    const member = { id: 'm_ds_default', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
     const directFail = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })

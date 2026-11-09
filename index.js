@@ -1174,9 +1174,9 @@ function readContinuedText(agent, member) {
  * - `deepseekMemberModel(config, member, provider)`：默认 deepseek-v4.1-flash；成员的旧值
  *   `deepseek-flash` / `deepseek-v4-pro` 映射到新值；其它显式配置一律尊重。
  */
-const DEEPSEEK_MEMBER_PROVIDER = 'apiclaude-deepseek'
+const DEEPSEEK_MEMBER_PROVIDER = 'deepseek-official'
 const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official'
-const DEEPSEEK_MEMBER_MODEL = 'deepseek-v4.1-flash'
+const DEEPSEEK_MEMBER_MODEL = 'deepseek-flash'
 const DEEPSEEK_LEGACY_MODELS = new Set(['deepseek-flash', 'deepseek-v4-pro'])
 let deepseekProviderWarnedFor = ''
 
@@ -1214,39 +1214,87 @@ function deepseekMemberProvider(config, ctx = ctx0) {
 }
 
 function deepseekMemberModel(config, member, provider) {
-  // provider === 'deepseek-official' 时固定返回 deepseek-flash（官方不认 v4.1-flash）
-  if (provider === DEEPSEEK_OFFICIAL_PROVIDER) return 'deepseek-flash'
-  // 其他 provider（apiclaude-deepseek 等）默认用 deepseek-v4.1-flash
-  const fallback = deepseekMemberSettings(config).model
+  const settings = deepseekMemberSettings(config)
+  const effective = provider || DEEPSEEK_MEMBER_PROVIDER
+  // 官方链路只认 deepseek-flash（显式别的也回落，避免拿官方打不存在的模型）
+  if (effective === DEEPSEEK_OFFICIAL_PROVIDER) return 'deepseek-flash'
+  // apiclaude 链路用 v4.1-flash（config.deepseekModel 可覆盖）
+  const apiclaudeModel = settings.model && settings.model !== 'deepseek-flash' ? settings.model : 'deepseek-v4.1-flash'
+  const target = apiclaudeModel
   const explicit = String((member && member.model) || '').trim()
-  if (!explicit) return fallback
-  // 旧别名映射到 v4.1-flash
-  return DEEPSEEK_LEGACY_MODELS.has(explicit) ? fallback : explicit
+  if (!explicit) return target
+  // 旧别名（deepseek-flash / deepseek-v4-pro）按当前链路换成语义正确的模型
+  return DEEPSEEK_LEGACY_MODELS.has(explicit) ? target : explicit
 }
 
 /**
  * 一次性迁移（启动时跑，幂等）：所有 `kind === 'deepseek'` 成员换到
- * `apiclaude-deepseek` + `deepseek-v4.1-flash`；`STAFF_MODELS.deepseek` 同步。
- * 只动 deepseek 成员与这条框架默认值：职位/其它框架/主会话默认模型都不碰。
+ * `deepseek-official` + `deepseek-flash`；`STAFF_MODELS.deepseek` 同步。
+ *
+ * **迁移策略**：
+ * - 只迁移空配置、失效配置（deepseek-flash/deepseek-v4-pro）、或指向不存在链路的成员
+ * - 保留用户显式配置的 provider（如 'apiclaude-deepseek'）
+ * - 只动 deepseek 成员与这条框架默认值：职位/其它框架/主会话默认模型都不碰。
+ *
  * `agent-default-model` 在 profile patch 里独立配置，插件这边不会改它。
  * @returns {{members:number,total:number}}
  */
 async function migrateDeepseekMembers() {
   STAFF_MODELS.deepseek = DEEPSEEK_MEMBER_MODEL
   let members = 0
+  const liveProviders = liveProviderIds()
+  const invalidLegacyProviders = new Set(['deepseek-flash', 'deepseek-v4-pro'])
+
   for (const member of state.members || []) {
     if (member?.kind !== 'deepseek') continue
+
+    // 已经是目标配置，跳过
     if (member.provider === DEEPSEEK_MEMBER_PROVIDER && member.model === DEEPSEEK_MEMBER_MODEL) continue
+
+    const currentProvider = String(member.provider || '').trim()
+
+    // 白名单：明确保留的 provider（用户可能手配的，不迁移其模型）
+    const preserveProviders = new Set(['apiclaude-deepseek'])
+
+    // 如果 provider 在白名单中，保留用户显式配置，不迁移
+    if (preserveProviders.has(currentProvider)) continue
+
+    // 其他情况都需要迁移到标准配置
+    // 包括：空 provider、失效 provider、deepseek-official 的旧模型等
+
     member.provider = DEEPSEEK_MEMBER_PROVIDER
     member.model = DEEPSEEK_MEMBER_MODEL
     member.updatedAt = Date.now()
     members += 1
   }
-  if (members) {
-    await save()
-    ctx0?.logger?.('council')?.info?.(`deepseek members migrated to ${DEEPSEEK_MEMBER_PROVIDER} / ${DEEPSEEK_MEMBER_MODEL}: ${members} member(s)`)
+
+  // 迁移职位（roles）
+  let roles = 0
+  for (const role of state.roles || []) {
+    if (role?.kind !== 'deepseek') continue
+
+    // 已经是目标配置，跳过
+    if (role.model === DEEPSEEK_MEMBER_MODEL) continue
+
+    const currentProvider = String(role.provider || '').trim()
+
+    // 白名单：明确保留的 provider（用户可能手配的，不迁移其模型）
+    const preserveProviders = new Set(['apiclaude-deepseek'])
+
+    // 如果 provider 在白名单中，保留用户显式配置，不迁移
+    if (preserveProviders.has(currentProvider)) continue
+
+    // 职位通常没有 provider 字段，直接迁移模型
+    role.model = DEEPSEEK_MEMBER_MODEL
+    role.updatedAt = Date.now()
+    roles += 1
   }
-  return { members, total: members }
+
+  if (members || roles) {
+    await save()
+    ctx0?.logger?.('council')?.info?.(`deepseek migrated to ${DEEPSEEK_MEMBER_PROVIDER} / ${DEEPSEEK_MEMBER_MODEL}: ${members} member(s) + ${roles} role(s)`)
+  }
+  return { members, roles, total: members + roles }
 }
 
 async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs, presetId, callId, childSink, onActivity) {
