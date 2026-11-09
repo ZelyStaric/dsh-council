@@ -65,7 +65,7 @@
 在**另一台全新 Ubuntu 24.04**（Node 22 + 全新 profile + 从 tarball 安装）上实测部署后发现并修复。
 
 ### 修复
-- **分发包里残留厂商默认地址**：`cordis.patch.yml` 原来内置 `claudeBaseUrl: https://apiclaude.cc`，在别人机器上会指向错误中转；现已移除，配置全部由页面或 profile 提供。
+- **分发包里残留厂商默认地址**：`cordis.patch.yml` 原来内置 `claudeBaseUrl: （厂商默认中转地址）`，在别人机器上会指向错误中转；现已移除，配置全部由页面或 profile 提供。
 - **缺少 CLI 时报错不明确**：`codex` / `claude` 不存在时，原先只会得到 `spawn ... ENOENT`；现在先探测可执行文件，直接返回「未找到 codex CLI（…）。安装 Codex，或用环境变量 COUNCIL_CODEX_BIN 指定绝对路径」。
 
 - **更新不存在的成员时静默成功**：`POST /members` 带未知 `id` 现在返回 `404 member not found`，不再假装成功。

@@ -1162,10 +1162,11 @@ function readContinuedText(agent, member) {
 }
 
 /**
- * 小组的 deepseek 成员跑在 **apiclaude 中转**上（provider `apiclaude-deepseek`，模型
- * `deepseek-v4.1-flash`）；主会话仍由 `agent-default-model` 指向 DeepSeek 官方，互不影响。
+ * 小组的 deepseek 成员默认跑在 **`deepseek-official`**（与主对话同一个官方 API）；
+ * 若本地 profile 自建了第三方中转 provider（例如 `relay-deepseek`），可用
+ * `config.deepseekProvider` 把成员切过去，主对话仍由 `agent-default-model` 指向官方，互不影响。
  *
- * - `deepseekMemberProvider(config)`：默认 apiclaude-deepseek；`config.deepseekProvider`
+ * - `deepseekMemberProvider(config)`：默认 `deepseek-official`（主对话同款官方 API）；`config.deepseekProvider` 可指向自建中转
  *   （或页面 /config 写在 state.config 里的同名字段）可覆盖。
  *   **不可用判定**：读 DSH `llm.listProviders()`。列表里没有首选 id → 回退
  *   `deepseek-official`（例如 profile patch 还没 HMR 进去 / 被禁用）。拿不到 llm 服务或
@@ -1208,7 +1209,7 @@ function liveProviderIds(ctx = ctx0) {
 
 function deepseekMemberProvider(config, ctx = ctx0) {
   const preferred = deepseekMemberSettings(config).provider
-  // 直接返回配置值或默认 apiclaude-deepseek，不再预检 listProviders()；
+  // 直接返回配置值或默认 deepseek-official，不再预检 listProviders()；
   // 启动失败时由 runDeepseekViaSeam 的回退逻辑处理（已会换成 official + deepseek-flash）。
   return preferred
 }
@@ -1218,9 +1219,9 @@ function deepseekMemberModel(config, member, provider) {
   const effective = provider || DEEPSEEK_MEMBER_PROVIDER
   // 官方链路只认 deepseek-flash（显式别的也回落，避免拿官方打不存在的模型）
   if (effective === DEEPSEEK_OFFICIAL_PROVIDER) return 'deepseek-flash'
-  // apiclaude 链路用 v4.1-flash（config.deepseekModel 可覆盖）
-  const apiclaudeModel = settings.model && settings.model !== 'deepseek-flash' ? settings.model : 'deepseek-v4.1-flash'
-  const target = apiclaudeModel
+  // relay 链路用 v4.1-flash（config.deepseekModel 可覆盖）
+  const relayModel = settings.model && settings.model !== 'deepseek-flash' ? settings.model : 'deepseek-v4.1-flash'
+  const target = relayModel
   const explicit = String((member && member.model) || '').trim()
   if (!explicit) return target
   // 旧别名（deepseek-flash / deepseek-v4-pro）按当前链路换成语义正确的模型
@@ -1233,7 +1234,7 @@ function deepseekMemberModel(config, member, provider) {
  *
  * **迁移策略**：
  * - 只迁移空配置、失效配置（deepseek-flash/deepseek-v4-pro）、或指向不存在链路的成员
- * - 保留用户显式配置的 provider（如 'apiclaude-deepseek'）
+ * - 保留用户显式配置的 provider（如自建中转 'relay-deepseek'）
  * - 只动 deepseek 成员与这条框架默认值：职位/其它框架/主会话默认模型都不碰。
  *
  * `agent-default-model` 在 profile patch 里独立配置，插件这边不会改它。
@@ -1254,7 +1255,7 @@ async function migrateDeepseekMembers() {
     const currentProvider = String(member.provider || '').trim()
 
     // 白名单：明确保留的 provider（用户可能手配的，不迁移其模型）
-    const preserveProviders = new Set(['apiclaude-deepseek'])
+    const preserveProviders = new Set(['relay-deepseek'])
 
     // 如果 provider 在白名单中，保留用户显式配置，不迁移
     if (preserveProviders.has(currentProvider)) continue
@@ -1279,7 +1280,7 @@ async function migrateDeepseekMembers() {
     const currentProvider = String(role.provider || '').trim()
 
     // 白名单：明确保留的 provider（用户可能手配的，不迁移其模型）
-    const preserveProviders = new Set(['apiclaude-deepseek'])
+    const preserveProviders = new Set(['relay-deepseek'])
 
     // 如果 provider 在白名单中，保留用户显式配置，不迁移
     if (preserveProviders.has(currentProvider)) continue
@@ -1385,7 +1386,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     }
   }, WATCHDOG_TICK_MS)
   // 成员该用哪个 provider/model：成员显式 provider 优先；没写就按小组默认
-  // （apiclaude-deepseek），旧模型名映射到 deepseek-v4.1-flash。
+  // （relay-deepseek），旧模型名映射到 deepseek-v4.1-flash。
   let provider = member.provider || deepseekMemberProvider(config, ctx)
   let model = deepseekMemberModel(config, member, provider)
   // 回执/日志要能看出**实际**走的是哪条链路（主会话与小组不是同一个 provider）。
@@ -1442,7 +1443,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         provider: providerId,
         model: modelId,
         // reviews only need a verdict: drop the default high reasoning effort
-        // 只有 deepseek-official 才支持 reasoningEffort；其它 provider（如 apiclaude-deepseek）不传
+        // 只有 deepseek-official 才支持 reasoningEffort；其它 provider（如 relay-deepseek）不传
         ...presetId === 'minimal' && includeReasoningEffort && providerId === DEEPSEEK_OFFICIAL_PROVIDER ? { reasoningEffort: 'low' } : {},
       },
     },
@@ -1504,7 +1505,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
         .trim()
       const stopReason = String(result.stopReason || '')
       const truncated = TRUNCATED_STOP_REASONS.has(stopReason)
-      // apiclaude 账号池耗尽/上游错误 → 自动降级 deepseek-official 重跑一次
+      // relay 账号池耗尽/上游错误 → 自动降级 deepseek-official 重跑一次
       // 触发条件：stopReason='error' 且非官方 provider → 直接降级（不依赖 text）
       const needsDegrade = stopReason === 'error' && provider !== DEEPSEEK_OFFICIAL_PROVIDER
       if (needsDegrade) {
@@ -1542,7 +1543,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
           ...officialTruncated ? { truncated: true, stopReason: officialStopReason } : {},
           provider: officialProvider,
           model: officialModel,
-          degraded: `apiclaude 不可用（${degradeReason}），本次已改用官方 deepseek-flash`,
+          degraded: `relay 不可用（${degradeReason}），本次已改用官方 deepseek-flash`,
           usage: null,
         }
       }
@@ -2397,7 +2398,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
 
 async function callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   const role = roleOf(member)
-  // 回执要写「实际用的 provider + model」：deepseek 成员按小组默认解析（apiclaude），
+  // 回执要写「实际用的 provider + model」：deepseek 成员按小组默认解析（relay），
   // 成员自己显式配的 provider/model 优先；旧模型名由 deepseekMemberModel 映射。
   const deepseekRoute = member.kind === 'deepseek'
     ? (() => {
@@ -2728,7 +2729,7 @@ export function apply(ctx, config = {}) {
     archiveGroupForSession(sid)
       .catch((error) => console.error('[council] archive on session-stop failed:', String(error?.message ?? error)))
   })
-  // 启动时跑一次性迁移（幂等）：deepseek 成员 → apiclaude。
+  // 启动时跑一次性迁移（幂等）：deepseek 成员 → relay。
   // 出图模型迁移已停用：用户要自己选 2.5 或 2.6，不再自动改成 2.6。
   // 先 load 再迁移，补绑也挂在这条链上 —— 两个 load() 并发会把迁移后的内存状态覆盖回旧值。
   const boot = load()
@@ -4634,7 +4635,7 @@ function bindAgent(ctx, config, group, agent) {
                 properties: {
                   name: { type: 'string' },
                   kind: { type: 'string' },
-                  provider: { type: 'string', description: 'deepseek 成员实际使用的 provider（apiclaude-deepseek / 回退 deepseek-official）' },
+                  provider: { type: 'string', description: 'deepseek 成员实际使用的 provider（relay-deepseek / 回退 deepseek-official）' },
                   model: { type: 'string', description: 'deepseek 成员实际使用的模型 id' },
                   ok: { type: 'boolean' },
                   text: { type: 'string' },
@@ -4875,7 +4876,7 @@ function bindAgent(ctx, config, group, agent) {
           return {
             name: member.name,
             kind: member.kind,
-            // 只有 deepseek 成员会带 provider（回执里写明 apiclaude / 回退官方）
+            // 只有 deepseek 成员会带 provider（回执里写明 relay / 回退官方）
             ...result.provider === undefined ? {} : { provider: String(result.provider) },
             ...result.model === undefined ? {} : { model: String(result.model) },
             ok: Boolean(result.ok),
@@ -5303,12 +5304,12 @@ async function fetchCatalog(ctx, config, only, base) {
     // the whole host process down with it.
     const llm = ctx.get('llm')
     if (llm && typeof llm.listModels === 'function') {
-      // 先试 apiclaude-deepseek，失败再试 deepseek-official（静态列表，不再预检 listProviders）
+      // 先试 relay-deepseek，失败再试 deepseek-official（静态列表，不再预检 listProviders）
       const provider = deepseekMemberProvider(config, ctx)
       try {
         value.deepseek = (await llm.listModels(provider)).map((m) => m.id)
       } catch {
-        // apiclaude 失败 → 回退官方
+        // relay 失败 → 回退官方
         if (provider !== DEEPSEEK_OFFICIAL_PROVIDER) {
           try {
             value.deepseek = (await llm.listModels(DEEPSEEK_OFFICIAL_PROVIDER)).map((m) => m.id)

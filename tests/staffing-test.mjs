@@ -250,21 +250,21 @@ await check('DeepSeek①：默认解析为 deepseek-official + deepseek-flash', 
   return `provider=${mod.deepseekMemberProvider({})} model=${mod.deepseekMemberModel({})}`
 })
 
-await check('DeepSeek②：config.deepseekProvider=apiclaude-deepseek 时覆盖生效', () => {
-  setState({ ...structuredClone(fixture), config: { deepseekProvider: 'apiclaude-deepseek' } })
-  assert.equal(mod.deepseekMemberProvider({}), 'apiclaude-deepseek', 'config.deepseekProvider 应覆盖默认值')
+await check('DeepSeek②：config.deepseekProvider=relay-deepseek 时覆盖生效', () => {
+  setState({ ...structuredClone(fixture), config: { deepseekProvider: 'relay-deepseek' } })
+  assert.equal(mod.deepseekMemberProvider({}), 'relay-deepseek', 'config.deepseekProvider 应覆盖默认值')
   return `provider=${mod.deepseekMemberProvider({})}`
 })
 
-await check('DeepSeek③：迁移不再覆盖显式 apiclaude 配置', async () => {
+await check('DeepSeek③：迁移不再覆盖显式 relay 配置', async () => {
   setState({
     roles: [
       { id: 'r_old_legacy', name: '旧deepseek', kind: 'deepseek', model: 'deepseek-chat' }, // 旧模型，应迁移
-      { id: 'r_apiclaude', name: 'apiclaude配置', kind: 'deepseek', model: 'deepseek-chat', provider: 'apiclaude-deepseek' }, // 旧模型，但有 apiclaude provider
+      { id: 'r_relay', name: 'relay配置', kind: 'deepseek', model: 'deepseek-chat', provider: 'relay-deepseek' }, // 旧模型，但有 relay provider
     ],
     members: [
       { id: 'm_old_legacy', name: '旧deepseek成员', kind: 'deepseek', model: 'deepseek-reasoner' }, // 旧模型，应迁移
-      { id: 'm_apiclaude', name: 'apiclaude成员', kind: 'deepseek', model: 'deepseek-reasoner', provider: 'apiclaude-deepseek' }, // 显式 apiclaude，不应迁移
+      { id: 'm_relay', name: 'relay成员', kind: 'deepseek', model: 'deepseek-reasoner', provider: 'relay-deepseek' }, // 显式 relay，不应迁移
       { id: 'm_official', name: '官方成员', kind: 'deepseek', model: 'deepseek-reasoner', provider: 'deepseek-official' }, // 显式官方，应迁移
     ],
     groups: [], usage: {}, runs: [],
@@ -276,10 +276,10 @@ await check('DeepSeek③：迁移不再覆盖显式 apiclaude 配置', async () 
   const oldLegacy = mod.state.members.find((m) => m.id === 'm_old_legacy')
   assert.equal(oldLegacy.model, 'deepseek-flash', '旧模型（无 provider）应迁移到 deepseek-flash')
 
-  // 验证显式 apiclaude 配置的成员不被迁移
-  const apiclaude = mod.state.members.find((m) => m.id === 'm_apiclaude')
-  assert.equal(apiclaude.provider, 'apiclaude-deepseek', 'apiclaude provider 应保持不变')
-  assert.equal(apiclaude.model, 'deepseek-reasoner', '显式 apiclaude 配置的旧模型不应被迁移')
+  // 验证显式 relay 配置的成员不被迁移
+  const relay = mod.state.members.find((m) => m.id === 'm_relay')
+  assert.equal(relay.provider, 'relay-deepseek', 'relay provider 应保持不变')
+  assert.equal(relay.model, 'deepseek-reasoner', '显式 relay 配置的旧模型不应被迁移')
 
   // 验证显式 official provider 的成员被迁移
   const official = mod.state.members.find((m) => m.id === 'm_official')
@@ -289,7 +289,7 @@ await check('DeepSeek③：迁移不再覆盖显式 apiclaude 配置', async () 
   assert.equal(result.members, 2, '应迁移 2 个成员（m_old_legacy + m_official），实际：' + result.members)
   assert.equal(result.roles, 1, '应迁移 1 个职位（r_old_legacy），实际：' + result.roles)
 
-  return `迁移 ${result.members} 成员 + ${result.roles} 职位 · apiclaude 成员保持 ${apiclaude.model}`
+  return `迁移 ${result.members} 成员 + ${result.roles} 职位 · relay 成员保持 ${relay.model}`
 })
 
 await check('rosterText 每个职位后带 默认框架/默认模型', () => {
@@ -3349,36 +3349,36 @@ try {
     }
   })
 
-  /* ── deepseek 成员走 apiclaude 中转（小组专用；主会话仍走官方） ─────────── */
-  await check('deepseek 链路①：默认识别 apiclaude-deepseek / deepseek-v4.1-flash，provider 不在 profile 时回退官方', () => {
+  /* ── deepseek 成员走 relay 中转（小组专用；主会话仍走官方） ─────────── */
+  await check('deepseek 链路①：默认识别 relay-deepseek / deepseek-v4.1-flash，provider 不在 profile 时回退官方', () => {
     setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
     assert.equal(mod.deepseekMemberProvider({}), 'deepseek-official', '默认 provider 必须是 deepseek-official')
     assert.equal(mod.deepseekMemberProvider(), 'deepseek-official', '不传 config 也必须是 deepseek-official')
-    assert.equal(mod.deepseekMemberModel({}, {}, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 默认模型必须是 deepseek-v4.1-flash')
-    assert.equal(mod.deepseekMemberModel({}, { model: '' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 空 model 也要回落默认值')
+    assert.equal(mod.deepseekMemberModel({}, {}, 'relay-deepseek'), 'deepseek-v4.1-flash', 'relay 默认模型必须是 deepseek-v4.1-flash')
+    assert.equal(mod.deepseekMemberModel({}, { model: '' }, 'relay-deepseek'), 'deepseek-v4.1-flash', 'relay 空 model 也要回落默认值')
     assert.equal(mod.deepseekMemberModel({}, {}, 'deepseek-official'), 'deepseek-flash', 'official 必须固定返回 deepseek-flash')
     assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 时即使显式 v4.1-flash 也返回 deepseek-flash')
     // config 覆盖
     assert.equal(mod.deepseekMemberProvider({ deepseekProvider: 'deepseek-official' }), 'deepseek-official', 'config.deepseekProvider 必须能覆盖默认值')
-    assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}, 'apiclaude-deepseek'), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
+    assert.equal(mod.deepseekMemberModel({ deepseekModel: 'deepseek-custom' }, {}, 'relay-deepseek'), 'deepseek-custom', 'config.deepseekModel 必须能覆盖默认值')
     // 去掉了预检逻辑：直接返回配置值，不再根据 listProviders 回退
     assert.equal(mod.deepseekMemberProvider({}, { get: () => undefined }), 'deepseek-official', '不再预检，直接返回配置值')
     assert.equal(mod.deepseekMemberProvider({}, { get: () => ({ listProviders: () => [] }) }), 'deepseek-official', '不再预检，直接返回配置值')
-    return 'deepseek-official / deepseek-flash（apiclaude 需显式配置）'
+    return 'deepseek-official / deepseek-flash（relay 需显式配置）'
   })
 
   await check('deepseek 链路②：旧值 deepseek-flash / deepseek-v4-pro 映射到 deepseek-v4.1-flash，其它显式模型尊重；seam 真把 provider/model 传下去（含启动失败回退）', async () => {
     setState({ roles: [], members: [], groups: [], usage: {}, runs: [] })
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下 deepseek-flash 必须映射到新模型')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4-pro' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下 deepseek-v4-pro 必须映射到新模型')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'apiclaude-deepseek'), 'deepseek-v4.1-flash', 'apiclaude 下新值保持新值')
-    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-reasoner' }, 'apiclaude-deepseek'), 'deepseek-reasoner', 'apiclaude 下其它显式模型必须尊重')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }, 'relay-deepseek'), 'deepseek-v4.1-flash', 'relay 下 deepseek-flash 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4-pro' }, 'relay-deepseek'), 'deepseek-v4.1-flash', 'relay 下 deepseek-v4-pro 必须映射到新模型')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'relay-deepseek'), 'deepseek-v4.1-flash', 'relay 下新值保持新值')
+    assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-reasoner' }, 'relay-deepseek'), 'deepseek-reasoner', 'relay 下其它显式模型必须尊重')
     assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 固定返回 deepseek-flash（忽略旧值映射）')
     assert.equal(mod.deepseekMemberModel({}, { model: 'deepseek-v4.1-flash' }, 'deepseek-official'), 'deepseek-flash', 'official 时即使显式 v4.1-flash 也返回 deepseek-flash')
     assert.ok(mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-flash') && mod.DEEPSEEK_LEGACY_MODELS.has('deepseek-v4-pro'))
 
     const seen = []
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3407,15 +3407,15 @@ try {
     const flaky = async (opts) => {
       calls += 1
       seen.push(opts.request.agentOptions)
-      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      if (calls === 1) throw new Error('provider "relay-deepseek" is not registered')
       return {
         childId: null,
         dispose: async () => {},
         result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
       }
     }
-    // 成员显式 provider = apiclaude 时，seam 启动失败会重开官方（显式 provider 优先于默认解析）
-    const explicitMember = { id: 'm_ds_seam2', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    // 成员显式 provider = relay 时，seam 启动失败会重开官方（显式 provider 优先于默认解析）
+    const explicitMember = { id: 'm_ds_seam2', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const fallback = await mod.runDeepseekViaSeam(makeCtx(flaky, [{ id: 'deepseek-official' }]), explicitMember, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
     assert.equal(calls, 2, '首选 provider 启动失败时应重开一次官方，实际 ' + calls + ' 次')
@@ -3433,7 +3433,7 @@ try {
       members: [
         { id: 'm_ds_old', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'deepseek-official' },
         { id: 'm_ds_pro', name: '代码2', kind: 'deepseek', model: 'deepseek-v4-pro' },
-        { id: 'm_ds_new', name: '代码3', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'apiclaude-deepseek' },
+        { id: 'm_ds_new', name: '代码3', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'relay-deepseek' },
         { id: 'm_claude', name: '审校', kind: 'claude', model: 'claude-sonnet-5', provider: 'claude-code' },
         { id: 'm_codex', name: '指挥', kind: 'codex', model: 'gpt-6.1-sol' },
         { id: 'm_image', name: '画师', kind: 'image', model: 'gpt-image-2.6-flare' },
@@ -3469,9 +3469,9 @@ try {
     const tool = registered.council_delegate
     assert.ok(tool && tool.output && typeof tool.output.render === 'function', 'council_delegate 还没注册')
     const text = tool.output.render({}, {
-      members: [{ name: '代码', kind: 'deepseek', provider: 'apiclaude-deepseek', model: 'deepseek-v4.1-flash', ok: true, text: '改好了', accepted: true, acceptance: 'none' }],
+      members: [{ name: '代码', kind: 'deepseek', provider: 'relay-deepseek', model: 'deepseek-v4.1-flash', ok: true, text: '改好了', accepted: true, acceptance: 'none' }],
     })[0].text
-    assert.match(text, /## 代码（deepseek \/ apiclaude-deepseek \/ deepseek-v4\.1-flash）/, '回执成员行必须带 provider/model，实际：' + text.split('\n')[0])
+    assert.match(text, /## 代码（deepseek \/ relay-deepseek \/ deepseek-v4\.1-flash）/, '回执成员行必须带 provider/model，实际：' + text.split('\n')[0])
     const claude = tool.output.render({}, {
       members: [{ name: '审校', kind: 'claude', provider: 'claude-code', model: 'claude-sonnet-5', ok: true, text: 'ok', accepted: true, acceptance: 'none' }],
     })[0].text
@@ -3479,8 +3479,8 @@ try {
     return 'deepseek 行带 provider/model · claude 行不变'
   })
 
-  await check('deepseek 链路⑤：apiclaude-deepseek 不传 reasoningEffort（只有 deepseek-official 才传）', async () => {
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+  await check('deepseek 链路⑤：relay-deepseek 不传 reasoningEffort（只有 deepseek-official 才传）', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3489,7 +3489,7 @@ try {
     })
     const seen = []
     const parent = { id: 'session-b8888888-8888-4888-8888-888888888888' }
-    const member = { id: 'm_ds_apiclaude', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const member = { id: 'm_ds_relay', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const okActivation = async (opts) => {
       seen.push(opts.request.agentOptions)
       return {
@@ -3498,11 +3498,11 @@ try {
         result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
       }
     }
-    // minimal preset（审核位）+ apiclaude-deepseek → 不该有 reasoningEffort
-    const apiclaude = await mod.runDeepseekViaSeam(makeCtx(okActivation), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
-    assert.ok(apiclaude.ok, 'apiclaude 审核应成功：' + JSON.stringify(apiclaude))
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', 'provider 必须是 apiclaude-deepseek')
-    assert.equal(seen[0].reasoningEffort, undefined, 'apiclaude-deepseek 不该传 reasoningEffort，实际：' + seen[0].reasoningEffort)
+    // minimal preset（审核位）+ relay-deepseek → 不该有 reasoningEffort
+    const relay = await mod.runDeepseekViaSeam(makeCtx(okActivation), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    assert.ok(relay.ok, 'relay 审核应成功：' + JSON.stringify(relay))
+    assert.equal(seen[0].provider, 'relay-deepseek', 'provider 必须是 relay-deepseek')
+    assert.equal(seen[0].reasoningEffort, undefined, 'relay-deepseek 不该传 reasoningEffort，实际：' + seen[0].reasoningEffort)
 
     // minimal preset + deepseek-official → 该有 reasoningEffort: low
     const officialMember = { id: 'm_ds_official', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', provider: 'deepseek-official' }
@@ -3517,11 +3517,11 @@ try {
     assert.equal(seen[2].provider, 'deepseek-official', 'provider 必须是 deepseek-official')
     assert.equal(seen[2].reasoningEffort, undefined, 'deepseek-official 非审核位不该传 reasoningEffort，实际：' + seen[2].reasoningEffort)
 
-    return 'apiclaude 无 effort · official minimal 有 effort:low · official 工作无 effort'
+    return 'relay 无 effort · official minimal 有 effort:low · official 工作无 effort'
   })
 
   await check('deepseek 链路⑥：回退 deepseek-official 时同步换 model 为 deepseek-flash', async () => {
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3531,11 +3531,11 @@ try {
     const seen = []
     let calls = 0
     const parent = { id: 'session-c9999999-9999-4999-8999-999999999999' }
-    const member = { id: 'm_ds_fallback', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const member = { id: 'm_ds_fallback', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const flaky = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
-      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      if (calls === 1) throw new Error('provider "relay-deepseek" is not registered')
       return {
         childId: null,
         dispose: async () => {},
@@ -3545,7 +3545,7 @@ try {
     const fallback = await mod.runDeepseekViaSeam(makeCtx(flaky, [{ id: 'deepseek-official' }]), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
     assert.equal(calls, 2, '首选 provider 启动失败时应重开一次官方，实际 ' + calls + ' 次')
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次必须用 apiclaude-deepseek')
+    assert.equal(seen[0].provider, 'relay-deepseek', '第一次必须用 relay-deepseek')
     assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次 model 映射为 deepseek-v4.1-flash')
     assert.equal(seen[1].provider, 'deepseek-official', '回退必须用 deepseek-official')
     assert.equal(seen[1].model, 'deepseek-flash', '回退到 deepseek-official 必须同步换 model 为 deepseek-flash，实际：' + seen[1].model)
@@ -3555,7 +3555,7 @@ try {
   })
 
   await check('deepseek 链路⑦：UNSUPPORTED_REASONING_EFFORT 错误 → 去掉 reasoningEffort 重试一次', async () => {
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3589,7 +3589,7 @@ try {
   })
 
   await check('deepseek 链路⑧：UNSUPPORTED_REASONING_EFFORT 重试仍失败 → 回退 deepseek-official', async () => {
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3599,14 +3599,14 @@ try {
     const seen = []
     let calls = 0
     const parent = { id: 'session-e1111111-1111-4111-8111-111111111111' }
-    const member = { id: 'm_ds_fallback2', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const member = { id: 'm_ds_fallback2', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const flakyProvider = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model, hasEffort: 'reasoningEffort' in opts.request.agentOptions })
-      // 第一次：apiclaude-deepseek + reasoningEffort → UNSUPPORTED_REASONING_EFFORT
+      // 第一次：relay-deepseek + reasoningEffort → UNSUPPORTED_REASONING_EFFORT
       if (calls === 1) throw new Error('UNSUPPORTED_REASONING_EFFORT: this provider does not support reasoningEffort')
-      // 第二次：apiclaude-deepseek 无 reasoningEffort → 仍失败（provider 本身有问题）
-      if (calls === 2) throw new Error('provider "apiclaude-deepseek" connection failed')
+      // 第二次：relay-deepseek 无 reasoningEffort → 仍失败（provider 本身有问题）
+      if (calls === 2) throw new Error('provider "relay-deepseek" connection failed')
       // 第三次：deepseek-official → 成功
       return {
         childId: null,
@@ -3614,12 +3614,12 @@ try {
         result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
       }
     }
-    const fallback = await mod.runDeepseekViaSeam(makeCtx(flakyProvider, [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }]), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
+    const fallback = await mod.runDeepseekViaSeam(makeCtx(flakyProvider, [{ id: 'relay-deepseek' }, { id: 'deepseek-official' }]), member, '审核', {}, parent, undefined, 'minimal', undefined, undefined, undefined)
     assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
     assert.equal(calls, 3, 'UNSUPPORTED_REASONING_EFFORT 重试失败应再回退官方，实际 ' + calls + ' 次')
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
-    assert.equal(seen[0].hasEffort, false, '第一次：apiclaude-deepseek 不传 reasoningEffort（非 deepseek-official）')
-    assert.equal(seen[1].provider, 'apiclaude-deepseek', '第二次：重试仍用 apiclaude-deepseek')
+    assert.equal(seen[0].provider, 'relay-deepseek', '第一次：relay-deepseek')
+    assert.equal(seen[0].hasEffort, false, '第一次：relay-deepseek 不传 reasoningEffort（非 deepseek-official）')
+    assert.equal(seen[1].provider, 'relay-deepseek', '第二次：重试仍用 relay-deepseek')
     assert.equal(seen[1].hasEffort, false, '第二次：仍无 reasoningEffort')
     assert.equal(seen[2].provider, 'deepseek-official', '第三次：回退到 deepseek-official')
     assert.equal(seen[2].model, 'deepseek-flash', '第三次：model 同步换成 deepseek-flash')
@@ -3628,8 +3628,8 @@ try {
     return '两次失败（effort + 无effort）→ 回退官方 · model 同步换'
   })
 
-  await check('deepseek 链路⑨：apiclaude-deepseek 直接失败 → 回退 official + model 同步换', async () => {
-    const makeCtx = (startActivation, providers = [{ id: 'apiclaude-deepseek' }]) => ({
+  await check('deepseek 链路⑨：relay-deepseek 直接失败 → 回退 official + model 同步换', async () => {
+    const makeCtx = (startActivation, providers = [{ id: 'relay-deepseek' }]) => ({
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
@@ -3639,13 +3639,13 @@ try {
     const seen = []
     let calls = 0
     const parent = { id: 'session-f2222222-2222-4222-8222-222222222222' }
-    // 成员没有显式 provider，使用默认 apiclaude-deepseek
-    const member = { id: 'm_ds_default', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    // 成员没有显式 provider，使用默认 relay-deepseek
+    const member = { id: 'm_ds_default', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const directFail = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
-      // 第一次：apiclaude-deepseek → 直接失败（连接错误、不是 UNSUPPORTED_REASONING_EFFORT）
-      if (calls === 1) throw new Error('provider "apiclaude-deepseek" is not registered')
+      // 第一次：relay-deepseek → 直接失败（连接错误、不是 UNSUPPORTED_REASONING_EFFORT）
+      if (calls === 1) throw new Error('provider "relay-deepseek" is not registered')
       // 第二次：deepseek-official → 成功
       return {
         childId: null,
@@ -3655,14 +3655,14 @@ try {
     }
     const fallback = await mod.runDeepseekViaSeam(makeCtx(directFail, [{ id: 'deepseek-official' }]), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(fallback.ok, '回退后应成功：' + JSON.stringify(fallback))
-    assert.equal(calls, 2, 'apiclaude 失败应立即回退官方，实际 ' + calls + ' 次')
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：默认 apiclaude-deepseek')
-    assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次：apiclaude 对应 deepseek-v4.1-flash')
+    assert.equal(calls, 2, 'relay 失败应立即回退官方，实际 ' + calls + ' 次')
+    assert.equal(seen[0].provider, 'relay-deepseek', '第一次：默认 relay-deepseek')
+    assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次：relay 对应 deepseek-v4.1-flash')
     assert.equal(seen[1].provider, 'deepseek-official', '第二次：回退到 deepseek-official')
     assert.equal(seen[1].model, 'deepseek-flash', '第二次：model 必须同步换成 deepseek-flash（不能用 v4.1-flash）')
     assert.equal(fallback.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(fallback.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
-    return 'apiclaude 直接失败 → 回退 official · model 同步换 deepseek-flash'
+    return 'relay 直接失败 → 回退 official · model 同步换 deepseek-flash'
   })
 
   await check('deepseek 链路⑩：stopReason=error + exhausted → 自动降级 official 重跑', async () => {
@@ -3670,17 +3670,17 @@ try {
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
-          ? { listProviders: () => [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          ? { listProviders: () => [{ id: 'relay-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
           : undefined),
     })
     const seen = []
     let calls = 0
     const parent = { id: 'session-g3333333-3333-4333-8333-333333333333' }
-    const member = { id: 'm_ds_degrade', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'apiclaude-deepseek' }
+    const member = { id: 'm_ds_degrade', name: '代码', kind: 'deepseek', model: 'deepseek-flash', provider: 'relay-deepseek' }
     const exhausted = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
-      // 第一次：apiclaude-deepseek → stopReason=error + exhausted
+      // 第一次：relay-deepseek → stopReason=error + exhausted
       if (calls === 1) {
         return {
           childId: 'child-exhausted-1',
@@ -3701,18 +3701,18 @@ try {
     const degrade = await mod.runDeepseekViaSeam(makeCtx(exhausted), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(degrade.ok, '降级后应成功：' + JSON.stringify(degrade))
     assert.equal(calls, 2, 'exhausted 应触发降级重跑，实际 ' + calls + ' 次')
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
+    assert.equal(seen[0].provider, 'relay-deepseek', '第一次：relay-deepseek')
     assert.equal(seen[0].model, 'deepseek-v4.1-flash', '第一次：model 是 v4.1-flash')
     assert.equal(seen[1].provider, 'deepseek-official', '第二次：降级到 deepseek-official')
     assert.equal(seen[1].model, 'deepseek-flash', '第二次：model 同步换成 deepseek-flash')
     assert.equal(degrade.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(degrade.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
     assert.ok(degrade.degraded, '结果必须包含 degraded 字段')
-    assert.match(degrade.degraded, /apiclaude.*不可用/, 'degraded 必须说明 apiclaude 不可用')
+    assert.match(degrade.degraded, /relay.*不可用/, 'degraded 必须说明 relay 不可用')
     assert.match(degrade.degraded, /本次已改用官方 deepseek-flash/, 'degraded 必须说明本次改用官方')
     assert.equal(degrade.text, '改好了', '降级后的文本必须是官方返回的')
     // 成员配置不应被修改
-    assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
+    assert.equal(member.provider, 'relay-deepseek', '成员配置不应被降级修改')
     assert.equal(member.model, 'deepseek-flash', '成员 model 不应被修改')
     return 'stopReason=error + exhausted → 降级 official · 回执含说明 · 成员配置不变'
   })
@@ -3722,17 +3722,17 @@ try {
       get: (name) => (name === 'subagents'
         ? { getProvider: () => ({ id: 'spawn' }), startActivation }
         : name === 'llm'
-          ? { listProviders: () => [{ id: 'apiclaude-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
+          ? { listProviders: () => [{ id: 'relay-deepseek' }, { id: 'deepseek-official' }], listModels: async () => [{ id: 'deepseek-v4.1-flash' }] }
           : undefined),
     })
     const seen = []
     let calls = 0
     const parent = { id: 'session-empty-text' }
-    const member = { id: 'm_empty', name: '建模', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'apiclaude-deepseek' }
+    const member = { id: 'm_empty', name: '建模', kind: 'deepseek', model: 'deepseek-v4.1-flash', provider: 'relay-deepseek' }
     const emptyText = async (opts) => {
       calls += 1
       seen.push({ provider: opts.request.agentOptions.provider, model: opts.request.agentOptions.model })
-      // 第一次：apiclaude-deepseek → stopReason=error，text 为空，有 diagnostic
+      // 第一次：relay-deepseek → stopReason=error，text 为空，有 diagnostic
       if (calls === 1) {
         return {
           childId: 'child-empty-1',
@@ -3754,16 +3754,16 @@ try {
     const result = await mod.runDeepseekViaSeam(makeCtx(emptyText), member, '任务', {}, parent, undefined, undefined, undefined, undefined, undefined)
     assert.ok(result.ok, '降级后应成功：' + JSON.stringify(result))
     assert.equal(calls, 2, 'text 为空时仍应触发降级，实际 ' + calls + ' 次')
-    assert.equal(seen[0].provider, 'apiclaude-deepseek', '第一次：apiclaude-deepseek')
+    assert.equal(seen[0].provider, 'relay-deepseek', '第一次：relay-deepseek')
     assert.equal(seen[1].provider, 'deepseek-official', '第二次：降级到 deepseek-official')
     assert.equal(result.provider, 'deepseek-official', '结果 provider 必须是 deepseek-official')
     assert.equal(result.model, 'deepseek-flash', '结果 model 必须是 deepseek-flash')
     assert.ok(result.degraded, '结果必须包含 degraded 字段')
-    assert.match(result.degraded, /apiclaude.*不可用/, 'degraded 必须说明 apiclaude 不可用')
+    assert.match(result.degraded, /relay.*不可用/, 'degraded 必须说明 relay 不可用')
     assert.match(result.degraded, /本次已改用官方 deepseek-flash/, 'degraded 必须说明改用官方')
     assert.equal(result.text, '模型已生成', '降级后的文本必须是官方返回的')
     // 成员配置不应被修改
-    assert.equal(member.provider, 'apiclaude-deepseek', '成员配置不应被降级修改')
+    assert.equal(member.provider, 'relay-deepseek', '成员配置不应被降级修改')
     assert.equal(member.model, 'deepseek-v4.1-flash', '成员 model 不应被修改')
     return 'stopReason=error + text 为空 → 降级 official · 回执含"本次已改用官方" · 成员配置不变'
   })
@@ -3858,7 +3858,7 @@ try {
     } catch (err) {
       return 'SKIP: profile 文件不存在 (' + profilePath + ')'
     }
-    assert.match(content, /apiclaude-deepseek/, 'profile 应包含 apiclaude-deepseek 配置')
+    assert.match(content, /relay-deepseek/, 'profile 应包含 relay-deepseek 配置')
     assert.match(content, /streamIdleTimeoutMs:\s*120000/, 'profile 应包含 streamIdleTimeoutMs: 120000')
     return 'profile 包含 streamIdleTimeoutMs: 120000'
   })

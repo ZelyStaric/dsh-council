@@ -130,7 +130,7 @@ systemctl --user restart dsh-web        # 或重启你起的 dsh web
 
 `deepseek` 成员**默认使用 `deepseek-official`**（官方主对话 API），无需额外配置。
 
-**可选配置**：如果本地 profile 支持 `apiclaude-deepseek`（中转或自建），可通过以下方式覆盖：
+**可选配置**：如果本地 profile 支持 `relay-deepseek`（中转或自建），可通过以下方式覆盖：
 
 1. **全局配置**：在 profile 的 `cordis.patch.yml` 中设置 `config.deepseekProvider`：
    ```yaml
@@ -138,7 +138,7 @@ systemctl --user restart dsh-web        # 或重启你起的 dsh web
        - id: council
          name: '@zelystaric/dsh-council'
          config:
-           deepseekProvider: apiclaude    # 全局改用 apiclaude-deepseek
+           deepseekProvider: 第三方中转    # 全局改用 relay-deepseek
    ```
 
 2. **单个成员配置**：在「小组」页或 profile 中为特定成员设置 `member.provider`：
@@ -146,7 +146,7 @@ systemctl --user restart dsh-web        # 或重启你起的 dsh web
    members:
      - id: coder
        kind: deepseek
-       provider: apiclaude              # 仅此成员用 apiclaude-deepseek
+       provider: 第三方中转              # 仅此成员用 relay-deepseek
        model: deepseek-chat
    ```
 
