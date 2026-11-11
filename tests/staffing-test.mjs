@@ -821,6 +821,78 @@ try {
     }
   })
 
+  await check('验收硬失败①：rejected 时 execute 抛错且错误包含"未通过验收"', async () => {
+    await post('/config', { failOnRejectedAcceptance: true })
+    const tool = registered.council_delegate
+    // mock 成员执行器：返回 rejected 状态
+    mod.__setRunKind(async () => ({
+      ok: true,
+      text: '代码已完成',
+      acceptance: 'rejected',
+      accepted: false,
+      review: { self: { ok: false, reason: '质量不达标' } },
+      usage: null,
+    }))
+    try {
+      let threw = false
+      let errorMessage = ''
+      try {
+        await tool.execute(
+          { assignments: [{ member: '代码', task: '写代码' }] },
+          { callId: 'c-reject-test', agent: { id: 'agent-test' } },
+        )
+      } catch (error) {
+        threw = true
+        errorMessage = String(error.message || error)
+      }
+      assert.ok(threw, 'rejected 状态应该抛错')
+      assert.match(errorMessage, /未通过验收/, '错误消息应包含"未通过验收"')
+      assert.match(errorMessage, /不能作为成果汇报/, '错误消息应包含完整提示')
+      assert.match(errorMessage, /代码已完成/, '错误消息应包含完整回执正文')
+      return '抛错 ✓ · 错误包含回执和提示'
+    } finally {
+      mod.__setRunKind(null)
+      await post('/config', { failOnRejectedAcceptance: false })
+    }
+  })
+
+  await check('验收硬失败③：开关关闭时 rejected 也不抛错', async () => {
+    const tool = registered.council_delegate
+    // 先关闭开关
+    await post('/config', { failOnRejectedAcceptance: false })
+    const config = await (await fetch(base + '/config')).json()
+    assert.equal(config.config.failOnRejectedAcceptance, false, '开关应该关闭')
+    // mock 成员执行器：返回 rejected 状态
+    mod.__setRunKind(async () => ({
+      ok: true,
+      text: '代码已完成',
+      acceptance: 'rejected',
+      accepted: false,
+      review: { self: { ok: false, reason: '质量不达标' } },
+      usage: null,
+    }))
+    try {
+      let threw = false
+      let result
+      try {
+        result = await tool.execute(
+          { assignments: [{ member: '代码', task: '写代码' }] },
+          { callId: 'c-reject-off-test', agent: { id: 'agent-test' } },
+        )
+      } catch (error) {
+        threw = true
+      }
+      assert.ok(!threw, '开关关闭时 rejected 不应该抛错')
+      assert.ok(result, '应该返回结果')
+      assert.equal(result.acceptanceStatus, 'rejected')
+      return '开关关闭 + rejected 不抛错 ✓ · acceptanceStatus=' + result.acceptanceStatus
+    } finally {
+      mod.__setRunKind(null)
+      // 恢复开关到默认值（默认是关闭：开启后会让后续用例的 rejected 抛错）
+      await post('/config', { failOnRejectedAcceptance: false })
+    }
+  })
+
   await check('POST /members/prune：dryRun 只预览，不动 state', async () => {
     mod.state.members.push({ id: 'm_orphan_new', name: '孤儿A', kind: 'deepseek', model: 'deepseek-flash' })
     mod.state.members.push({ id: 'm_orphan_old', name: '孤儿B', kind: 'codex', model: 'gpt-6.1-sol', convId: 'conv-old', updatedAt: Date.now() - 31 * 86400_000 })

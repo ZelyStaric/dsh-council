@@ -91,6 +91,8 @@ let WATCHDOG_TICK_MS = MEMBER_WATCHDOG_TICK_MS
 const MEMBER_KILL_GRACE_MS = 3_000
 /** 出图（HTTP，无流式输出）默认请求超时：240 秒实测够用。 */
 const DEFAULT_IMAGE_TIMEOUT_SECONDS = 240
+/** 验收未通过时是否硬失败（抛错阻止结果被当成交付物）：默认 true。 */
+const DEFAULT_FAIL_ON_REJECTED_ACCEPTANCE = true
 
 /**
  * deepseek 成员被 max-tokens / max-turns 截断时，最多续跑几次（同一个子会话里接着跑）。
@@ -632,6 +634,8 @@ function configView(config, source) {
     imageTimeoutSeconds: imageTimeoutSeconds(config),
     // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
     authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
+    // providerByKind: 各框架默认使用的 provider
+    providerByKind: own.providerByKind || {},
     source,
   }
 }
@@ -1275,11 +1279,12 @@ const DEEPSEEK_MEMBER_MODEL = 'deepseek-flash'
 const DEEPSEEK_LEGACY_MODELS = new Set(['deepseek-flash', 'deepseek-v4-pro'])
 let deepseekProviderWarnedFor = ''
 
-/** 验收未通过时是否“硬失败”（工具抛错）：默认 true，避免把未通过的结果当成交付物。 */
+/** 验收未通过时是否”硬失败”（工具抛错）：默认 true，避免把未通过的结果当成交付物。 */
 function failOnRejectedAcceptance(config) {
   const own = (state && state.config) || {}
-  const raw = own.failOnRejectedAcceptance ?? (config && config.failOnRejectedAcceptance)
-  return raw === undefined || raw === null ? false : Boolean(raw)
+  // 只认显式 true（页面开关/持久配置）；未设置即关闭，避免误伤
+  if (own.failOnRejectedAcceptance !== undefined) return own.failOnRejectedAcceptance === true
+  return Boolean(config && config.failOnRejectedAcceptance === true)
 }
 
 /** 页面 /config 的值优先于 profile 配置，与其它 council 设置一致。 */
@@ -1313,6 +1318,150 @@ function deepseekMemberProvider(config, ctx = ctx0) {
   // 直接返回配置值或默认 deepseek-official，不再预检 listProviders()；
   // 启动失败时由 runDeepseekViaSeam 的回退逻辑处理（已会换成 official + deepseek-flash）。
   return preferred
+}
+
+/**
+ * 从 ctx.llm 或 profile YAML 读取 provider 的 baseURL 和 key。
+ *
+ * 优先级：
+ * 1. ctx.get('llm')?.getProvider?.(id) 获取运行时 provider 信息
+ * 2. 读取 ~/.dsh/profiles/web/cordis.patch.yml 解析 llm-pi-ai.config.providers.<id>
+ *
+ * @param {string} id - provider id
+ * @param {object} [ctx] - DSH context
+ * @returns {Promise<{baseURL: string, key: string} | null>}
+ */
+async function providerEndpoint(id, ctx = ctx0) {
+  if (!id) return null
+
+  // 优先从 ctx.llm 获取
+  try {
+    const llm = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+    if (llm && typeof llm.getProvider === 'function') {
+      const provider = llm.getProvider(id)
+      if (provider) {
+        const baseURL = provider.baseURL || provider.endpoint || provider.url
+        const key = provider.apiKey || provider.key || provider.token
+        if (baseURL && key) {
+          return { baseURL: String(baseURL), key: String(key) }
+        }
+      }
+    }
+  } catch {
+    // ctx.llm 不可用，继续尝试读取 profile
+  }
+
+  // 回退：读取 profile YAML
+  for (const profileDir of PROFILE_CANDIDATES) {
+    if (!profileDir) continue
+    const yamlPath = path.join(profileDir, 'cordis.patch.yml')
+    if (!existsSync(yamlPath)) continue
+
+    try {
+      const content = await readFile(yamlPath, 'utf8')
+      const endpoint = parseProviderFromYaml(content, id)
+      if (endpoint) return endpoint
+    } catch {
+      // 解析失败，继续下一个候选
+    }
+  }
+
+  return null
+}
+
+/**
+ * 简单的 YAML 解析：提取 llm-pi-ai.config.providers.<id> 的 baseURL 和 headers.Authorization。
+ * 不依赖外部库，只处理本用例需要的嵌套路径。
+ *
+ * @param {string} content - YAML 文件内容
+ * @param {string} providerId - provider id
+ * @returns {{baseURL: string, key: string} | null}
+ */
+function parseProviderFromYaml(content, providerId) {
+  try {
+    const lines = content.split('\n')
+    let inProviders = false
+    let inTargetProvider = false
+    let currentIndent = 0
+    let baseURL = null
+    let key = null
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      const trimmed = line.trim()
+
+      // 跳过空行和注释
+      if (!trimmed || trimmed.startsWith('#')) continue
+
+      // 计算缩进级别
+      const indent = line.search(/\S/)
+
+      // 查找 providers: 节点
+      if (trimmed === 'providers:') {
+        inProviders = true
+        currentIndent = indent
+        continue
+      }
+
+      // 在 providers 内查找目标 provider id
+      if (inProviders && !inTargetProvider) {
+        if (indent <= currentIndent && trimmed !== 'providers:') {
+          inProviders = false
+          continue
+        }
+        if (trimmed === `${providerId}:` || trimmed.startsWith(`${providerId}:`)) {
+          inTargetProvider = true
+          currentIndent = indent
+          continue
+        }
+      }
+
+      // 在目标 provider 内提取 baseURL 和 Authorization
+      if (inTargetProvider) {
+        if (indent <= currentIndent) {
+          // 退出当前 provider 块
+          break
+        }
+
+        // 提取 baseURL
+        const baseURLMatch = trimmed.match(/^baseURL:\s*(.+)/)
+        if (baseURLMatch) {
+          baseURL = baseURLMatch[1].replace(/^["']|["']$/g, '').trim()
+        }
+
+        // 提取 headers.Authorization
+        if (trimmed === 'headers:') {
+          // 查找下一行的 Authorization
+          for (let j = i + 1; j < lines.length; j++) {
+            const nextLine = lines[j]
+            const nextTrimmed = nextLine.trim()
+            const nextIndent = nextLine.search(/\S/)
+
+            if (nextIndent <= indent) break
+
+            const authMatch = nextTrimmed.match(/^Authorization:\s*(.+)/)
+            if (authMatch) {
+              let authValue = authMatch[1].replace(/^["']|["']$/g, '').trim()
+              // 移除 "Bearer " 前缀（如果有）
+              if (authValue.startsWith('Bearer ')) {
+                authValue = authValue.slice(7).trim()
+              }
+              key = authValue
+              break
+            }
+          }
+        }
+      }
+    }
+
+    if (baseURL && key) {
+      return { baseURL, key }
+    }
+
+    return null
+  } catch {
+    return null
+  }
 }
 
 function deepseekMemberModel(config, member, provider) {
@@ -2228,7 +2377,9 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
       // 审核调用不插话（__noTools 且 minimal）；工作成员可实时插话
-      steerable: !member.__noTools && !member.__noResume,
+      // claude CLI 的 --input-format stream-json 在 stdin 常开时会等 EOF（实测挂住），
+      // 所以 claude 腿暂不实时插话；deepseek 腿的插话走 seam 的 sendMessage，不受影响。
+      steerable: false,
       callId,
       signal: signalFor(callId, member && member.id),
       timeoutMs: budgetMs,
