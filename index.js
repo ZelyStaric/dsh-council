@@ -397,9 +397,35 @@ function callCancelled(callId) {
  * 显式超时（审校 120s 等）由调用方自己传 `timeoutMs` 给 run()/seam，UI 才能区分
  * 「用户停止」和「到点超时」。
  */
-function signalFor(callId) {
+/** 成员级取消：callId + memberId -> AbortController（“停止”可以只停一个成员） */
+const memberStops = new Map()
+const memberStopKey = (callId, memberId) => String(callId) + '\u0000' + String(memberId)
+
+function memberStopController(callId, memberId) {
+  const key = memberStopKey(callId, memberId)
+  let controller = memberStops.get(key)
+  if (!controller) { controller = new AbortController(); memberStops.set(key, controller) }
+  return controller
+}
+
+/** 停掉一个成员（只影响那一个），返回是否找到目标。 */
+function stopMember(callId, memberId) {
+  const key = memberStopKey(callId, memberId)
+  const controller = memberStops.get(key)
+  if (!controller) return false
+  try { controller.abort() } catch { /* ignore */ }
+  memberStops.delete(key)
+  return true
+}
+
+function signalFor(callId, memberId) {
   const entry = callId && activeCalls.get(callId)
-  return entry && entry.controller ? entry.controller.signal : undefined
+  const callSignal = entry && entry.controller ? entry.controller.signal : undefined
+  if (!memberId) return callSignal
+  const perMember = memberStops.get(memberStopKey(callId, memberId))
+  const memberSignal = perMember ? perMember.signal : undefined
+  if (callSignal && memberSignal) return AbortSignal.any([callSignal, memberSignal])
+  return memberSignal || callSignal
 }
 
 /**
@@ -2179,7 +2205,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       // 审核调用不插话（__noTools 且 minimal）；工作成员可实时插话
       steerable: !member.__noTools && !member.__noResume,
       callId,
-      signal: signalFor(callId),
+      signal: signalFor(callId, member && member.id),
       timeoutMs: budgetMs,
       idleMs,
       hardLimitMs,
@@ -2457,11 +2483,14 @@ function acceptanceBlockedLine(rounds) {
  * 这里补的是「审核 / 子会话直接抛错」那条路径——否则进度条会永远停在中途阶段。
  */
 async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
+  if (callId && member && member.id) memberStopController(callId, member.id)
   try {
     return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
   } catch (error) {
     finishMemberStage(callId, member, onStage, '失败（内部错误：' + (shortStageText(error?.message) || '未知错误') + '）')
     throw error
+  } finally {
+    if (callId && member && member.id) memberStops.delete(memberStopKey(callId, member.id))
   }
 }
 
@@ -3126,6 +3155,20 @@ export function createHandler(ctx, config = {}) {
               console.error('[council] cancel requested at ' + Date.now() + ' running=' + JSON.stringify([...activeCalls.keys()]))
               const target = body.callId || body.id
               const at = Date.now()
+              // 成员级停止：只停那一个成员（UI 每个成员的 ✕ 走这条路）
+              if (body.member) {
+                const memberKey = String(body.member)
+                let hit = 0
+                for (const [id, entry] of activeCalls) {
+                  if (body.callId && id !== body.callId) continue
+                  if (stopMember(id, memberKey)) hit += 1
+                  const progressEntry = progressMap.get(id)
+                  if (progressEntry && progressEntry.members && progressEntry.members[memberKey]) {
+                    progressSet(id, memberKey, { stage: '已停止（用户）', finishedAt: Date.now() })
+                  }
+                }
+                return send(res, 200, { stoppedMembers: hit, at })
+              }
               let stopped = 0
               if (!target || body.all) {
                 for (const [id, entry] of activeCalls) { entry.cancelled = true; try { entry.controller.abort() } catch { /* */ } stopped += 1 }
@@ -3250,7 +3293,7 @@ export function createHandler(ctx, config = {}) {
                 // 阶段时间：新条目有 stageChangedAt；老条目回落 at（旧版 at 就是阶段变化时间）
                 const stageChangedAt = (slot && (slot.stageChangedAt ?? slot.at)) ?? entry.startedAt ?? now
                 const stageAgeMs = slot && slot.finishedAt ? 0 : Math.max(0, now - stageChangedAt)
-                members[memberId] = Object.assign({}, slot, { silentMs, stageChangedAt, stageAgeMs })
+                members[memberId] = Object.assign({ id: memberId }, slot, { silentMs, stageChangedAt, stageAgeMs })
               }
               out[id] = Object.assign({}, entry, {
                 members,
