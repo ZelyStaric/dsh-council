@@ -3328,6 +3328,13 @@ export function createHandler(ctx, config = {}) {
             // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
             return send(res, 200, { progress: out, residentChildren: residentChildren.size })
           }
+          if (req.method === 'GET' && route === '/jobs') {
+            const jobs = [...backgroundJobs.values()].map((job) => ({
+              runId: job.runId, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt,
+              error: job.error || null, sessionId: job.sessionId || null,
+            }))
+            return send(res, 200, { jobs })
+          }
           if (req.method === 'GET' && route === '/agents') {
             const agents = ctx.get('agents')
             const live = agents ? agents.list().map((a) => a.id) : []
