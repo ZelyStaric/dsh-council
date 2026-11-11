@@ -235,6 +235,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState(null)
       const [apiConfig, setApiConfig] = useState(null)
       const [providers, setProviders] = useState(null)
+      const [providersNote, setProvidersNote] = useState('')
       const [error, setError] = useState(null)
       const [busy, setBusy] = useState(null)
       const [balance, setBalance] = useState(null)
@@ -425,8 +426,8 @@ window.__ModuleLoader__.load({
         return live || FALLBACK_MODELS[kind] || []
       }
 
-      function modelSelect(value, kind, onChange) {
-        const list = modelOptions(kind)
+      function modelSelect(value, kind, onChange, explicitList) {
+        const list = explicitList && explicitList.length ? explicitList : modelOptions(kind)
         const options = value && list.indexOf(value) < 0 ? [value].concat(list) : list
         return h('select', {
           style: Object.assign({}, styles.input, { flex: 1 }), defaultValue: value || options[0] || '',
@@ -544,7 +545,11 @@ window.__ModuleLoader__.load({
           providerSelect,
           h(Button, { onClick: () => mutate('/members/delete', { id: member.id }) }, '删')),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-          modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value })),
+          modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value }),
+            (() => {
+              const p = (providers || []).find((x) => x.id === member.provider)
+              return p && p.models && p.models.length ? p.models : null
+            })()),
           roleSelect),
         h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) },
           '职位：' + (role ? role.name : '未分配') + ' · 会话：' + (member.convId ? member.convId.slice(0, 8) : '尚未开始')))
@@ -862,7 +867,16 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '模型与密钥'),
           h('div', { style: styles.muted },
             '提供商与 API Key 统一在 DSH 的「设置 → 模型提供商」里配置；小组成员直接选提供商即可。'
-            + '（出图仍用 profile 里配置的 gpt-image key）')))
+            + '（出图仍用 profile 里配置的 gpt-image key）'),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' } },
+            h(Button, {
+              onClick: () => {
+                call('/providers/refresh', {})
+                  .then((data) => { setProviders(data.providers || []); setProvidersNote('已刷新提供商模型列表') })
+                  .catch((e) => setProvidersNote('刷新失败：' + String(e.message || e)))
+              },
+            }, '刷新模型列表'),
+            h('span', { style: Object.assign({}, styles.muted, { fontSize: 12 }) }, providersNote || '按各提供商的 base/key 重新拉取模型'))))
 
       return h('div', { style: styles.root },
         header,
