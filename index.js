@@ -6062,6 +6062,8 @@ async function listProviders(ctx, config) {
         models = []
       }
 
+      // 没有模型的 provider（例如尚未授权的账号型 provider）不列出来，避免选到空列表
+      if (!models.length) continue
       providers.push({
         id: String(id),
         name: String(name),
