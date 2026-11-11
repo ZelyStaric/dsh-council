@@ -527,6 +527,28 @@ function memberTimeoutMs(config) {
  * `max(10 分钟下限, memberIdleMinutes(config) * 60_000 + 5 分钟)` → 默认 15 分钟。
  * 不再跟旧的 30 分钟总超时联动（总超时已经取消）。
  */
+/** 正在跑、可接收“插话”的成员：callId -> { memberName, kind, write(text) } */
+const steerTargets = new Map()
+
+/** 记录一个可插话目标（成员结束时务必删除）。 */
+function registerSteerTarget(callId, target) {
+  if (!callId) return () => {}
+  steerTargets.set(String(callId), Object.assign({ at: Date.now() }, target))
+  return () => steerTargets.delete(String(callId))
+}
+
+/** 往运行中的成员投递一段“补充说明”；返回 { ok, via, error }。 */
+async function steerRunningMember(callId, text) {
+  const target = steerTargets.get(String(callId))
+  if (!target) return { ok: false, error: '没有正在运行的派活（或该成员不支持插话）' }
+  try {
+    const sent = await target.write(String(text))
+    return { ok: sent !== false, via: target.kind, memberName: target.memberName }
+  } catch (error) {
+    return { ok: false, error: String(error && error.message || error) }
+  }
+}
+
 function progressStaleMs(config) {
   const idleMs = memberIdleMs(config)
   return Math.max(PROGRESS_STALE_MIN_MS, Math.round(idleMs) + PROGRESS_STALE_GRACE_MS)
@@ -839,8 +861,9 @@ function run(bin, args, options = {}) {
       })
       finish({ code, out, err, ...endedBy ? { reason: endedBy } : {}, ...error ? { error } : {} })
     })
-    if (input !== undefined) { child.stdin.write(input); child.stdin.end() }
-    else child.stdin.end()
+    if (typeof options.onSpawn === 'function') { try { options.onSpawn(child) } catch { /* ignore */ } }
+    if (input !== undefined) { child.stdin.write(input); if (!options.keepStdinOpen) child.stdin.end() }
+    else if (!options.keepStdinOpen) child.stdin.end()
   })
 }
 
@@ -924,13 +947,15 @@ let claudeExecOverride = null
  * 「已死/空上下文」的旧会话时，claude 不答题、只回问候（实测日志里 8 次
  * `commander image review unparsed: I'm here and ready to help. What would you like me to do?`）。
  */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
   }
-  const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose',
-    '--permission-mode', 'bypassPermissions']
+  // 可插话模式：用 stream-json 输入（stdin 常开），运行中可以追加 user 消息
+  const args = steerable
+    ? ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
+    : ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   const exec = claudeExecOverride || run
@@ -952,7 +977,24 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   }
 
   try {
-    const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, { cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
+    let steerCleanup = null
+    const input = steerable ? JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n' : undefined
+    const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, {
+      cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName,
+      input,
+      keepStdinOpen: steerable,
+      onSpawn: steerable ? (child) => {
+        steerCleanup = registerSteerTarget(callId, {
+          memberName: memberName || 'claude',
+          kind: 'claude',
+          write: async (text) => {
+            child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: String(text) } }) + '\n')
+            return true
+          },
+        })
+      } : undefined,
+    })
+    if (steerCleanup) { steerCleanup(); steerCleanup = null }
     const events = jsonLines(out)
     const texts = []
     for (const event of events) {
@@ -1496,6 +1538,21 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     childId = activation.childId ?? null
     // 先登记再等结果：即使子会话失败/被取消，本轮清理也要能回收它的目录
     if (childSink && typeof childSink.add === 'function' && activation.childId) childSink.add(activation.childId)
+    // 可插话：把父会话的新指示直接送进这个子会话（deepseek 腿支持实时插话）
+    let steerCleanup = null
+    try {
+      const seamSubagents = ctx && typeof ctx.get === 'function' ? ctx.get('subagents') : undefined
+      if (callId && childId && seamSubagents && typeof seamSubagents.sendMessage === 'function') {
+        steerCleanup = registerSteerTarget(callId, {
+          memberName: member.name,
+          kind: 'deepseek',
+          write: async (text) => {
+            await seamSubagents.sendMessage(parent, childId, [{ type: 'text', text: String(text) }], {})
+            return true
+          },
+        })
+      }
+    } catch { /* ignore */ }
     // 被 max-tokens / max-turns 截断时不能 dispose：续跑要接着这个子会话。
     let keepChild = reuseEnabled
     // 只有「正常拿到结果且决定保留」才登记为驻留（抛错路径不登记，清理交给调用方）
@@ -1574,6 +1631,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       if (timedOut) { keepChild = false; return timeoutResult() }
       throw error
     } finally {
+      if (steerCleanup) { try { steerCleanup() } catch { /* ignore */ } steerCleanup = null }
       // keep the child resident when reuse is enabled (or when it must be continued)
       if (!keepChild) {
         try { await activation.dispose() } catch { /* already gone */ }
@@ -2118,6 +2176,9 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       prompt,
       env: await envFor(member.kind, config),
       noTools: Boolean(member.__noTools),
+      // 审核调用不插话（__noTools 且 minimal）；工作成员可实时插话
+      steerable: !member.__noTools && !member.__noResume,
+      callId,
       signal: signalFor(callId),
       timeoutMs: budgetMs,
       idleMs,
@@ -5022,6 +5083,42 @@ function delegateReceiptText(value) {
           )
         }
         return toolResult(response)
+      },
+    }))
+    disposers.push(agentCtx.tools.register({
+      name: 'council_tell',
+      description: '给正在运行的成员插话（相当于 “/btw”）：把用户的补充说明/纠正实时送进当前派活。deepseek 成员支持实时插话；claude 成员通过流式输入实时插话；codex 成员运行中不支持注入，只能排队到下一轮。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', description: '要转达给成员的话（用户的补充指令/纠正）' },
+          member: { type: 'string', description: '可选：指定成员名字；不填则投给本轮唯一在跑的成员' },
+          callId: { type: 'string', description: '可选：指定派活 id' },
+        },
+        required: ['text'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: { ok: { type: 'boolean' }, via: { type: 'string' }, memberName: { type: 'string' }, error: { type: 'string' } },
+        },
+        render(_args, value) {
+          if (value && value.ok) return [{ type: 'text', text: '已转达给 ' + (value.memberName || '成员') + '（' + (value.via || '') + '）' }]
+          return [{ type: 'text', text: '未能转达：' + String(value && value.error || '未知原因') }]
+        },
+      },
+      async execute(args) {
+        const text = String(args && args.text || '').trim()
+        if (!text) return { ok: false, error: 'text 不能为空' }
+        const sessionId = normalizeSessionId(exec && exec.agent && exec.agent.id)
+        const live = Array.from(progressMap.entries())
+          .filter(([, entry]) => !entry.finishedAt && (!sessionId || normalizeSessionId(entry.sessionId) === sessionId))
+        if (!live.length) return { ok: false, error: '当前没有正在运行的派活' }
+        const targetCallId = args.callId || live[live.length - 1][0]
+        const result = await steerRunningMember(targetCallId, text)
+        return toolResult(result)
       },
     }))
     disposers.push(agentCtx.tools.register({
