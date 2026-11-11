@@ -546,6 +546,7 @@ function configView(config, source) {
     hasImageKey: Boolean(settings.imageKey),
     reuseChildren: Boolean((state.config || {}).reuseChildren),
     strictDelegate: own.strictDelegate !== false,
+    failOnRejectedAcceptance: failOnRejectedAcceptance(config),
     claudeBase: own.claudeBase || '',
     codexBase: own.codexBase || '',
     proxyUrl: own.proxyUrl || '',
@@ -1180,6 +1181,13 @@ const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official'
 const DEEPSEEK_MEMBER_MODEL = 'deepseek-flash'
 const DEEPSEEK_LEGACY_MODELS = new Set(['deepseek-flash', 'deepseek-v4-pro'])
 let deepseekProviderWarnedFor = ''
+
+/** 验收未通过时是否“硬失败”（工具抛错）：默认 true，避免把未通过的结果当成交付物。 */
+function failOnRejectedAcceptance(config) {
+  const own = (state && state.config) || {}
+  const raw = own.failOnRejectedAcceptance ?? (config && config.failOnRejectedAcceptance)
+  return raw === undefined || raw === null ? false : Boolean(raw)
+}
 
 /** 页面 /config 的值优先于 profile 配置，与其它 council 设置一致。 */
 function deepseekMemberSettings(config) {
@@ -3222,6 +3230,7 @@ export function createHandler(ctx, config = {}) {
               }
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
               if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
+              if (typeof body.failOnRejectedAcceptance === 'boolean') next.failOnRejectedAcceptance = body.failOnRejectedAcceptance
               // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
               if (body.memberIdleMinutes !== undefined && Number.isFinite(Number(body.memberIdleMinutes)) && Number(body.memberIdleMinutes) > 0) {
                 next.memberIdleMinutes = Number(body.memberIdleMinutes)
@@ -4573,6 +4582,54 @@ function bindAgent(ctx, config, group, agent) {
       order: 1500,
       text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
     }))
+/** 把 council_delegate 的返回对象渲染成回执文本（render 与“验收硬失败”错误消息共用）。 */
+function delegateReceiptText(value) {
+  const input = value || {}
+  const verdict = (v) => (v ? (v.ok === true ? '通过' : v.ok === false ? '不通过' : '未判定') + (v.reason ? '（' + v.reason + '）' : '') : '无')
+  const summary = summarizeAcceptance(input.members || [])
+  const acceptanceStatus = ACCEPTANCE_STATUSES.includes(input.acceptanceStatus) ? input.acceptanceStatus : summary.acceptanceStatus
+  const acceptanceNote = String(input.acceptanceNote || summary.acceptanceNote || '')
+  const notAccepted = ACCEPTANCE_BLOCKED.has(acceptanceStatus)
+  const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
+  const body = (input.members || []).map((m) => {
+    const link = m.image ? '\n[image] ' + m.image : ''
+    const error = m.error ? '\n失败：' + m.error : ''
+    const text = String(m.text || '').trim()
+    const reviews = [m.review ? '审校：' + verdict(m.review) : '', m.commanderVerdict ? '指挥审核：' + verdict(m.commanderVerdict) : ''].filter(Boolean).join(' · ')
+    const acceptance = m.acceptance ? '\n验收：' + acceptanceStatusOfMember(m) : ''
+    return '## ' + m.name + '（' + m.kind + (m.provider ? ' / ' + m.provider : '') + (m.model ? ' / ' + m.model : '') + '）\n' + (text || error || '（无产出）') + link + (reviews ? '\n' + reviews : '') + acceptance
+  }).join('\n\n')
+  const acceptanceSection = notAccepted
+    ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
+      + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
+    : ''
+  // 补员 / 回收 / 子会话 / 越权拦截 / 越权审计 / 子进程回收（与原 render 一致）
+  const staffing = (input.staffingCreated || []).length
+    ? '\n\n## 补员\n' + input.staffingCreated.map((line) => '- ' + line).join('\n')
+    : ''
+  const pruned = (input.pruned || []).length
+    ? '\n\n## 回收\n已回收：' + input.pruned.map((m) => m.name + '（临时）').join('、')
+    : ''
+  const prunedSessions = Number(input.prunedSessions) > 0
+    ? '\n\n## 子会话\n已清理 ' + input.prunedSessions + ' 个子会话目录'
+    : ''
+  const blockedDetail = String(input.selfWorkBlockedDetail || '')
+  const blocked = Number(input.selfWorkBlocked) > 0
+    ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + input.selfWorkBlocked + ' 次写操作，已拦截' + (blockedDetail ? '（' + blockedDetail + '）' : '')
+    : ''
+  const selfRan = input.selfRan || {}
+  const selfRanTotal = (Number(selfRan.bash) || 0) + (Number(selfRan.readImage) || 0) + (Number(selfRan.read) || 0)
+  const selfRanSection = selfRanTotal > 0
+    ? '\n\n## 越权审计\n- 父会话本次自行执行：bash×' + (Number(selfRan.bash) || 0) + '、read_image×' + (Number(selfRan.readImage) || 0) + '、read×' + (Number(selfRan.read) || 0)
+      + '\n- 提示：这些应在小组内派给成员；如必要请说明理由'
+    : ''
+  const swept = Number(input.sweptChildren) > 0
+    ? '\n\n## 子进程回收\n- 已释放 ' + input.sweptChildren + ' 个驻留子代理'
+    : ''
+  const planLine = input.plan && input.plan.confirmation ? '**指挥确认**：' + String(input.plan.confirmation) : ''
+  return head + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
+}
+
     disposers.push(agentCtx.tools.register({
       name: 'council_delegate',
       description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。一次调用可以派多个成员，它们并发执行。',
@@ -4685,6 +4742,7 @@ function bindAgent(ctx, config, group, agent) {
             return `## ${m.name}（${m.kind}${route}）\n${body}${image}${review}${accept}${noReview}${cont}${watchdog}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
+          const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
           const pruned = value.pruned?.length ? '\n\n## 回收\n已回收：' + value.pruned.join('、') : ''
           const prunedSessions = value.prunedSessions?.length
@@ -4718,7 +4776,6 @@ function bindAgent(ctx, config, group, agent) {
               + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
             : ''
           // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
-          const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
           return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
         },
       },
@@ -4957,6 +5014,13 @@ function bindAgent(ctx, config, group, agent) {
         const acceptanceSummary = summarizeAcceptance(response.members)
         response.acceptanceStatus = acceptanceSummary.acceptanceStatus
         response.acceptanceNote = acceptanceSummary.acceptanceNote
+        if (ACCEPTANCE_BLOCKED.has(acceptanceSummary.acceptanceStatus) && failOnRejectedAcceptance()) {
+          const receipt = delegateReceiptText(response)
+          throw new Error(
+            acceptanceBlockedLine(acceptanceSummary.acceptanceRounds) + '\n\n' + receipt
+            + '\n\n【硬性规则】验收未通过 ≠ 交付：本轮结果不能作为成果汇报；必须继续派返工（最多 maxRework 次），或如实告知用户失败原因。',
+          )
+        }
         return toolResult(response)
       },
     }))
