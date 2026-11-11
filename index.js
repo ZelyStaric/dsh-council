@@ -1545,10 +1545,28 @@ function parseProviderFromYaml(content, providerId) {
             const authMatch = nextTrimmed.match(/^Authorization:\s*(.+)/)
             if (authMatch) {
               let authValue = authMatch[1].replace(/^["']|["']$/g, '').trim()
+              // 折行写法：`Authorization: Bearer` 下一行缩进更深的 `sk-xxx`。
+              // YAML 层这是两个 token（key 会变成空/`Bearer`）→ 请求 401，所以这里自己向下拼一行。
+              if (authValue === 'Bearer') {
+                let folded = ''
+                for (let k = j + 1; k < lines.length; k++) {
+                  const contLine = lines[k]
+                  const contTrimmed = contLine.trim()
+                  const contIndent = contLine.search(/\S/)
+                  if (contIndent < 0 || !contTrimmed || contTrimmed.startsWith('#')) continue
+                  // 只有缩进更深（continuation）才拼；否则放弃，避免把下一个字段当成 key（如 `compat:`）
+                  if (contIndent > nextIndent) folded = contTrimmed.replace(/^["']|["']$/g, '')
+                  break
+                }
+                // 折行 token 不能再含 `:`（那是下一个 YAML 字段，不是 key）
+                if (folded && !folded.includes(':')) authValue = 'Bearer ' + folded
+              }
               // 移除 "Bearer " 前缀（如果有）
               if (authValue.startsWith('Bearer ')) {
                 authValue = authValue.slice(7).trim()
               }
+              // 只剩 "Bearer"（折行但没拼到 token）= 没有 key，别让下游拼出 `Bearer Bearer`
+              if (authValue === 'Bearer') authValue = ''
               key = authValue
               break
             }

@@ -2,6 +2,19 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.57] - 2026-11-11
+
+### 修复
+- **provider 解析器支持 `Authorization` 折行写法**（`parseProviderFromYaml`）：当
+  `Authorization: Bearer` 的值只有 `Bearer`（YAML 折行时下一行缩进更深的 key 会被当成第二个 token）
+  时，向下看一行缩进更深的行，拼成 `Bearer <token>` 再剥前缀。
+  - 只在缩进**更深**时才拼，否则放弃（避免把下一个字段 `compat:` 当成 key）；
+  - 折行 token 里含 `:` 视为字段而非 key，同样放弃；
+  - 只有 `Bearer` 而没拼到 token 时返回 `null`（原来会得到字符串 `Bearer`，下游会拼出 `Bearer Bearer`）。
+  - 效果：这类写错的 profile 不再静默 401（只剩静态 3 个模型），探模型恢复正常。
+- **profile `~/.dsh/profiles/web/cordis.patch.yml`**：`relay-claude` / `relay-gpt` / `relay-deepseek` /
+  `relay-image` 四处 `Authorization: Bearer` + 下一行 key 合并为单行（key 未改动）。
+
 ## [0.2.56] - 2026-11-11
 
 ### 新增
