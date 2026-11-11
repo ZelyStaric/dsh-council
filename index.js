@@ -2458,9 +2458,12 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
     result = await runDeepseekWithContinuation(ctx, member, prompt, config, parent, budgetMs, callId, childSink, undefined, onActivity)
   } else {
     if (member.kind === 'claude') {
+      const endpoint = await memberEndpoint(member, config).catch(() => null)
       const cfgCheck = apiSettings(config)
-      if (!cfgCheck.claudeBase || !cfgCheck.claudeKey) {
-        return { ok: false, text: '', error: '未配置 claude 的 API 地址或密钥（在「小组」页 ① 里填 claude base URL + key）' }
+      const hasBase = Boolean(endpoint && endpoint.baseURL) || Boolean(cfgCheck.claudeBase)
+      const hasKey = Boolean(endpoint && endpoint.key) || Boolean(cfgCheck.claudeKey)
+      if (!hasBase || !hasKey) {
+        return { ok: false, text: '', error: '未配置 claude 的 API 地址或密钥（在「小组」页 ① 选一个 provider，或填 claude base URL + key）' }
       }
     }
     const runner = member.kind === 'claude' ? runClaude : runCodex
