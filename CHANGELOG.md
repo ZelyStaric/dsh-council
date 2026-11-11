@@ -2,6 +2,22 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.58] - 2026-11-11
+
+### 新增
+- **模型定位表 `MODEL_GUIDE`**：给每个模型 id 写一句定位（擅长什么 + 代价），指挥（拆解者）不再只看到
+  「有哪些 id」，可以按能力选模型。覆盖 claude / gpt-6 系 / deepseek / 出图。
+- `catalogText()` 在模型清单之后追加 **「## 模型定位速查」** 段落，逐行 `- <model>：<描述>`；
+  该段同时进主对话系统提示（`council:catalog` section）与 `planWithCommander` 的拆解提示词。
+
+### 变更
+- 指挥拆解提示词追加一句选模型约束：补员/换模型时按「模型定位速查」选、不凭旧印象；
+  一个任务只用一种主力模型；没把握时优先 `gpt-6.1-sol` / `deepseek-v4.1-flash`（`MODEL_GUIDE_TIEBREAK`）。
+- `catalogText()` 仍为**同步**函数（`systemPrompt.section.text` 要求字符串，不能是 Promise）。
+
+### 说明
+- `MODEL_GUIDE` 内容来自用户经验，**不是官方基准、未做线上核实**。
+
 ## [0.2.57] - 2026-11-11
 
 ### 修复
