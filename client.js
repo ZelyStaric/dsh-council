@@ -1491,10 +1491,18 @@ window.__ModuleLoader__.load({
       h('span', { style: { fontWeight: 600 } }, '小组'),
       h('span', { style: styles.muted }, total === null ? '' : total + 's'),
       members.length
-        ? members.map((m, i) => h('span', { key: i, style: styles.chip },
+        ? members.map((m, i) => h('span', { key: i, style: Object.assign({}, styles.chip, { display: 'inline-flex', alignItems: 'center', gap: 4 }) },
           (m.name || '成员') + ' · ' + (m.stage || '…')
           + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))
-          + silenceSuffix(m)))
+          + silenceSuffix(m),
+          m.finishedAt ? null : h('span', {
+            title: '只停这个成员',
+            onClick: async (event) => {
+              event.stopPropagation()
+              try { await call('/runs/cancel', { member: m.id || m.memberId, callId: entry.callId }) } catch { /* ignore */ }
+            },
+            style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 2px' },
+          }, '✕')))
         : h('span', { style: styles.muted }, idleText),
       h('span', { style: { flex: 1 } }),
       h('span', {
