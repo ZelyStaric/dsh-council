@@ -2,6 +2,26 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.59] - 2026-11-11
+
+### 变更
+- **`MODEL_GUIDE` 精简到 8 条**（17 → 8）：只留实测在用的
+  `claude-opus-5-5`、`claude-fable-5-2`、`gpt-6-astra`、`gpt-6.1-sol`、`deepseek-flash`、
+  `deepseek-v4.1-flash`、`gpt-image-2.6-flare`、`gpt-image-2.6-sunburst`，描述各一句话。
+
+### 移除
+- 旧模型条目：`claude-sonnet-5`、`claude-sonnet-5-5`、`gpt-6-sol`、`gpt-6-luna`、`gpt-6.1-terra`、
+  `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` —— 不再出现在定位表里（指挥不会再按旧印象选）。
+- `deepseek-v4-pro`（已被 flash 全面胜出）。注：它作为**历史配置值**仍留在
+  `DEEPSEEK_LEGACY_MODELS` 迁移集合里，用来把老成员换到新模型，与定位表无关。
+
+### 说明
+- 两个 deepseek 名字合并成同一条模型的两种叫法：`deepseek-flash` = 官方 API 名（即 V4.1-Flash-1017），
+  `deepseek-v4.1-flash` = 中转站 `relay-deepseek` 的名字，**价格约 3 折 → 能走中转就走中转**。
+- `MODEL_GUIDE_TIEBREAK` 未改（`gpt-6.1-sol` / `deepseek-v4.1-flash` 都还在表内，无悬空引用）。
+- `catalogText()` 输出格式不变（仍是同步字符串、同一标题行、同一行格式），
+  `tests/staffing-test.mjs` 的定位表用例同步改成断言「8 条 + 旧 9 个名字不得出现 + 中转 3 折/官方名的措辞」。
+
 ## [0.2.58] - 2026-11-11
 
 ### 新增
