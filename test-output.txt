@@ -1,0 +1,187 @@
+ok   catalogText 无缓存时用框架默认模型兜底，四组齐全 — 四组 + 说明行
+ok   catalogText 优先读 modelCatalog() 缓存 — 缓存命中
+ok   出图目录①：保留中转返回的全部 gpt-image-*，按返回顺序原样输出（含 2.5 和 2.6） — gpt-image-2.5-flare、gpt-image-2、gpt-image-2.6-sunburst、gpt-image-2.5-sunburst、gpt-image-2.6-flare
+ok   出图目录②：空列表使用硬编码兜底（gpt-image-2.6-flare） — 兜底 gpt-image-2.6-flare、gpt-image-2.6-sunburst
+ok   出图迁移③：已停用自动迁移（用户手选的 2.5 不会被改成 2.6） — migrateImageModels 函数保留但不再自动调用（让用户自己选模型）
+ok   出图默认值④：新建 image 成员 / 职位默认模型都是 gpt-image-2.6-flare — 出图 / gpt-image-2.6-flare
+ok   DeepSeek①：默认解析为 deepseek-official + deepseek-flash — provider=deepseek-official model=deepseek-flash
+ok   DeepSeek②：config.deepseekProvider=relay-deepseek 时覆盖生效 — provider=relay-deepseek
+ok   DeepSeek③：迁移不再覆盖显式 relay 配置 — 迁移 2 成员 + 1 职位 · relay 成员保持 deepseek-reasoner
+ok   rosterText 每个职位后带 默认框架/默认模型 — 逐职位注入
+ok   ensureStaffing：组内已有该职位 → 不改人、不产出变更 — 复用、零变更
+ok   ensureStaffing：显式 kind/model 不同 → 更新该成员并丢 convId — - 调整 代码（代码）→ codex / gpt-6.1-sol
+ok   ensureStaffing：只给 kind 且与现状相同 → 不动模型 — 无变更
+ok   ensureStaffing：换 kind 未给 model → 用新框架默认，而不是旧模型 — kind=claude / model=claude-sonnet-5
+ok   ensureStaffing：同名成员在别的组 → 拉进本组，不新建 — - 复用已有成员 代码，加入本组
+ok   ensureStaffing：别的组已有该职位的人 → 直接拉进本组（不新建） — - 复用已有成员 画师，加入本组
+ok   ensureStaffing：同名但未绑职位的成员也复用并补上职位（不新建） — - 指派 3D建模 → 职位 3D建模 / - 复用已有成员 3D建模，加入本组
+ok   ensureStaffing：本组缺人且别组无同名 → 新建 name=职位名，按职位默认 — - 新建 配乐（claude / claude-sonnet-5） · created=m_b7cf97b4
+ok   ensureStaffing：staffing 显式值 > 职位默认 — image / gpt-image-2.5-flare
+ok   ensureStaffing：kind/model 传空串 = 用默认（不跳过） — - 新建 配乐（claude / claude-sonnet-5）
+ok   ensureStaffing：未知职位/非法框架/空 role → 跳过并记录，不抛错 — - 跳过：职位「不存在」不存在 / - 跳过：职位「代码」的框架「ruby」未知 / - 跳过：staffing 项缺少 role
+ok   ensureStaffing：同一职位重复声明只生效一次（不重复造人） — 只新建 1 人
+ok   回收④：仍被其他组引用 → 只移出本组，不删成员 — 共享临时（临时，仍被其他组引用）
+ok   resolveMember：按 id / 职位名 / 成员名都能命中 — id/职位名/成员名
+ok   POST /roles 新建带 kind/model 的职位，读回一致 — 自测职位: codex / gpt-6.1-sol
+ok   POST /roles 更新 kind/model 并读回 — claude / claude-opus-5-5
+ok   POST /roles 换 kind 未给 model → 清掉旧模型 — 旧模型已清空
+ok   POST /roles 非法 kind → 400 — HTTP 400
+ok   GET/POST /config 暴露 strictDelegate（默认 true，可关可开） — GET true → POST false → GET false → POST true
+ok   GET/POST /config 暴露 memberIdleMinutes（10）与 memberMaxMinutes（60），可改可读回 — GET 10/60 → POST 6/0 → GET 6/0 → 恢复 10/60
+ok   GET/POST /config 暴露 authoritativeReviewer（默认 any，可切 commander） — GET any → POST commander → GET commander → 恢复 any
+ok   Provider②：providerEndpoint 能从临时 profile 夹具解析 base/key — test-provider: https://api.test.com/v1 / test-key... · another-provider: https://another.api.com
+ok   Provider③：providerByKind 指定的 provider 优先于旧 key — deepseek=relay-deepseek · claude=relay-claude
+ok   Provider④：GET /providers 返回非空且每项有 id/name — 返回空数组（测试环境无 llm 服务，符合降级行为）
+ok   GET /state?sessionId=… 绑定会话并注册 council_delegate — tool registered
+ok   council_delegate：assignments 写职位名可解析（不报 member not found） — resolved → DSH subagent seam unavailable (no parent agent)
+ok   council_delegate：staffing 自动补员 + 回执末尾 ## 补员 — ## 补员 → ## 回收
+ok   council_delegate：无补员变更时回执不输出 ## 补员 — 无补员段
+ok   losslessToolResult：丢掉 undefined / 非枚举数组属性 / Set / Date，而不是抛错 — undefined/Date/Set/非枚举属性全部丢弃，BigInt/函数不抛错
+ok   council_delegate：返回纯 JSON（stringify→parse deep-equal，staffingCreated/pruned 为字符串数组） — JSON round-trip deep-equal ✓ · staffingCreated=["m_9f80de3d"] · pruned=["配乐（临时）"]
+ok   回收①：staffing 新建的临时成员在派活结束后被删除 — - 新建 配乐（deepseek / deepseek-flash） → 已删除
+ok   回收②：复用的已有成员不被回收 — m_code 仍在组内，无回收段
+ok   回收③：autoPrune=false 时保留临时成员 — 保留 配乐（ephemeral=true）
+ok   回收⑤：staffing persistent:true 新建的成员在派活结束后仍在组内（持久） — - 新建 配乐（deepseek / deepseek-flash）（持久） · 仍在组内 · prune 预览不含它
+ok   回收⑥：默认 persistent:false 的临时成员仍被回收（与 ⑤ 对照） — - 新建 配乐（deepseek / deepseek-flash） → 配乐（临时）
+ok   council_member create：默认持久，显式 persistent:false → 临时标记 — 默认 persistent=true / 显式 false → ephemeral=true
+[council] selfReview 输出无法解析，换新会话（无 resume）重试 · 首次原文="代码已完成"
+[council] selfReview 重试仍失败 · 重试原文="代码已完成"
+[council] selfReview 输出无法解析，换新会话（无 resume）重试 · 首次原文="代码已完成"
+[council] selfReview 重试仍失败 · 重试原文="代码已完成"
+ok   验收硬失败①：rejected 时 execute 抛错且错误包含"未通过验收" — 抛错 ✓ · 错误包含回执和提示
+ok   验收硬失败②：passed 时不触发硬失败 — passed 不触发硬失败 ✓ · ACCEPTANCE_BLOCKED 不含 passed
+[council] selfReview 输出无法解析，换新会话（无 resume）重试 · 首次原文="代码已完成"
+[council] selfReview 重试仍失败 · 重试原文="代码已完成"
+[council] selfReview 输出无法解析，换新会话（无 resume）重试 · 首次原文="代码已完成"
+[council] selfReview 重试仍失败 · 重试原文="代码已完成"
+ok   验收硬失败③：开关关闭时 rejected 也不抛错 — 开关关闭 + rejected 不抛错 ✓ · acceptanceStatus=rejected
+ok   POST /members/prune：dryRun 只预览，不动 state — 可清理 5 个，清理后剩余 2
+ok   POST /members/prune：真删孤儿，保留在组成员与最近活跃成员 — 删除 5 个，剩余 3
+ok   /members/prune：显式 persistent:true 的成员即使不在组内也不清（防御） — dryRun 与真删都跳过 persistent 成员
+ok   council_member prune：action 返回同一结构（dryRun） — removed=0 kept=2
+ok   council_role：list 返回 kind/model 与默认值 — kind/model + 默认值
+ok   lossless①：council_member list 在成员缺 model/roleName/cwd 时不产 undefined（JSON 往返全等） — m_bare = {"id":"m_bare","name":"裸成员","kind":"codex","model":null,"roleId":null,"roleName":null,"cwd":null} · update.model=null
+ok   lossless②：council_role list / council_policy get 同样无 undefined（JSON 往返全等） — 裸职位 = {"id":"r_bare","name":"裸职位","prompt":null,"color":null,"kind":null,"model":null,"defaultKind":"claude","defaultModel":"claude-sonnet-5"} · policy.maxRework=1
+ok   lossless③：递归检查器能拒 undefined/函数/Symbol/循环/NaN，三个工具返回值全部通过 — 检查器拒绝 5 类非法值 · 三工具返回值 + toolResult 全部通过
+ok   清理：删除自测职位 — 已删除
+ok   归档同步①：会话已归档 → 对应组 archived=true + archivedAt — g5 archived=true · archivedAt=1794393131791 · changed=1
+ok   归档同步②：取消归档 → archived / archivedAt 被清除 — g5 取消归档 · changed=1
+ok   归档同步②b：归档 → 取消 → 再归档，archivedAt 变大（保留期重新计时） — archivedAt 1794393131792 → 取消清空 → 1794393131793（+1ms）
+ok   归档同步③：无 sessionId 的组不受影响 — g1/g2 无 sessionId → 字段完全没被写
+ok   GET /state 会顺带同步归档（归档 / 取消归档都能反映） — /state 一次触发归档、一次触发取消归档
+ok   POST /groups 新建 → 显式 archived=false — 新建组 g_629639cf archived=false（已删）
+ok   session-stop 归档①：archived=true 但 sessionId 仍在（内存 + 落盘），且不算「当前组」 — g5 archived=true · sessionId=session-g5 · 绑定 1→0 · groupForSession=null
+ok   session-stop 归档②：取消归档 → archived 清除，sessionId 仍可用（groupForSession 能重新命中） — archived 已清 · sessionId=session-g5 · 重新命中 ✓
+ok   session-stop 归档③：已归档会话不再惰性补绑 council_* 工具，取消归档后才补 — 归档时 +0 绑定 · 取消归档后 +1（0 → 1）
+ok   POST /groups/prune-archived ①：归档 40 天前的组被删（连名册成员与 usage） — removed=g_old · g_old / m_old / usage 均已清
+ok   POST /groups/prune-archived ②：归档 6 天前的组在 keepDays=30 下保留（阈值内） — keepDays=30 保留 · keepDays=5 可清理 · kept=2
+ok   POST /groups/prune-archived ②b：默认 keepDays=7（归档 8 天前可删、6 天前不可删） — 默认 7 天：g_8d removed · g_6d kept=1 · host/client 常量都是 7
+ok   POST /groups/prune-archived ③：未归档组保留（成员/usage 不动） — g_live 保留 · 成员 m_live+m_live_spare 未动
+ok   POST /groups/prune-archived ④：归档但缺 archivedAt 的组保留（判不出时长就保守） — g_noat（archived=true，无 archivedAt）保留 · kept=2
+ok   POST /groups/prune-archived ⑤：dryRun 只预览不动盘（state 与 council.json 都不变） — dryRun removed=1 kept=2 未动盘 → 真删 kept=2
+ok   路由一致性：前端 ARCHIVED_PRUNE_PATH === 后端 ARCHIVED_PRUNE_ROUTE（/groups/prune-archived） — client /groups/prune-archived === host /groups/prune-archived · 子会话清理无 UI 入口
+ok   POST /sessions/prune：保留集合内的目录不删（组 sessionId / 成员 convId / 指挥 convId） — removed=0 kept=3
+ok   POST /sessions/prune：过期且不在保留集合的目录被删（返回 id/sizeMb/mtime） — 44444444-4444-4444-8444-444444444444 sizeMb=0.3 mtime=2026-10-22T10:32:11.811Z
+ok   POST /sessions/prune：keepDays 内不删（2 天前 + keepDays=7 保留，keepDays=1 才可清理） — keepDays=7 kept · keepDays=1 removable=1
+ok   POST /sessions/prune：dryRun 只预览不动盘，真删后目录消失 — dryRun removed=1 kept=0 → 真删后 kept=0
+ok   POST /sessions/prune：路径白名单（不跟随符号链接、不动非 uuid 目录与符号链接桶） — removed=0 · 符号链接/非 uuid 目录均未动
+ok   路由一致性：前端 SESSIONS_PRUNE_PATH === 后端 SESSIONS_PRUNE_ROUTE（/sessions/prune） — client /sessions/prune === host /sessions/prune
+ok   pruneChildSessionDirs：本轮清理排除所有成员 convId / 组 sessionId / 指挥 convId / 活跃 agent — removed=[bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb] · 成员/组/指挥/活跃目录全保留
+ok   dispose 之后子会话目录消失（父会话对得上才删；成员 convId / 别人的子会话一律不动） — disposed=1 · a2222222-2222-4222-8222-222222222222 目录已删 · 别人的/成员 convId/reuse 的都还在
+ok   POST /sessions/prune-children：只删「父会话=本会话 + 超过 keepMinutes + 不在驻留表」的；当前会话自身与成员 convId 保留 — removed=[b4444444-4444-4444-8444-444444444444] kept=3 · 成员/驻留/新目录/当前会话全保留
+ok   prune-children：dryRun 不动盘 + 路径白名单（符号链接 / 非 uuid / 符号链接桶都不动） — dryRun 未动盘 · removed=[d2222222-2222-4222-8222-222222222222] · 链接/非 uuid/链接桶均未动
+ok   GET /state 新增 subagentSessions（多帧 zstd 计数）与 childDirs（磁盘目录数） — subagentSessions=3 childDirs=3
+ok   council_delegate 本轮清理（端到端，假 seam）：重试多出来的子会话被删，成员 convId 指向的保住 · 审核子会话不再顶替成员 convId — prunedSessions=[c1111111-1111-4111-8111-111111111111] · 成员 convId=c2222222-2222-4222-8222-222222222222（不是审核子会话）· 清扫 1 个 review
+ok   /progress 自愈：默认静默 15 分钟标 stale · 14 分钟不动 · 跑 40 分钟但刚有活动也不动 · 完成项超 24h 删除 — 14min 不动 · 16min→stale+finishedAt · 9min 不动 · 40min 但 30s 前有活动→不动 · 25h 删除 · 陈旧项 5 分钟后移除
+ok   /progress 自愈：memberIdleMinutes=30 → 阈值 35 分钟（36 标 stale、34 不动） — memberIdleMinutes=30 → 36min 标 stale · 34min 保留（阈值 = idle + 5 分钟）
+ok   /progress 自愈：activeCalls 里的 callId 跑 40 分钟也不标 stale、不删除 — activeCalls 40min → 不标 stale/不删，runningMs≈40min；摘掉后立刻按 15 分钟静默阈值收尾
+ok   /progress 成员条目带 silentMs（now - 最后活动）：刚活动≈0，静默 4 分钟 ≥ 240000 — fresh≈0 · 4min → 240000ms
+ok   进度心跳①：stdout 每 2 秒一行 → silentMs 一直 < 3 秒（不再被「上次阶段变化」冻住） — 20 行 × 2s：silentMs 最大 2000ms · stageAgeMs=40000ms
+ok   进度心跳②：停止输出 30 秒 → silentMs ≥ 30 秒（心跳停了就真的算静默） — 停 30s → silentMs=30500ms（节流：1s 内第二次输出不写）
+ok   /progress 新增 stageChangedAt / stageAgeMs：阶段刚变≈0，只来输出（心跳）时阶段时间不动 — stageChangedAt=1794393131861 · 5min 心跳后 stageAgeMs=300000 · 换阶段归零
+ok   /progress sessionId 过滤①：带 sessionId 只返回该会话条目（带/不带 session- 前缀都行） — 带前缀 1 条 · 不带前缀 1 条 · entry 不带前缀也能匹配
+ok   /progress sessionId 过滤②：无参数返回全部未完成条目 — 无参数返回全部 · 至少 2 条
+ok   /progress sessionId 过滤③：已 finished 默认不返回，includeFinished=1 才返回 — 默认 1 条（未完成）· includeFinished=1 返回 2 条
+[council] cancel requested at 1794393131867 running=[]
+[council] cancel requested at 1794393131868 running=[]
+[council] cancel requested at 1794393131868 running=[]
+ok   POST /runs/cancel：{all} 把未完成 progress 标结束（clearedProgress=1），带 callId 只清那一条 — all→clearedProgress=1（再次 0）· callId→1
+ok   council_delegate：开工立刻有 __stage__「拆解中」→「派活中」→ 结束删除并写 finishedAt — 拆解中 → 派活中 → 完成（finishedAt 已写、__stage__ 已删、activeCalls 已清）
+ok   成员终态①：正常完成 → stage=完成、progress 有 finishedAt、silentMs=0（不再永远停在「终审（指挥）」） — stage=完成 · finishedAt=number · silentMs=0（lastActivity=-100min）
+ok   成员终态②：成员失败（重试仍失败）→ stage=失败（原因）、finishedAt 有值 — stage=失败（爆炸了） · 调用 2 次
+ok   成员终态③：静默超时 → stage=静默超时、finishedAt 有值、不重试 — stage=静默超时 · 调用 1 次
+ok   验收①：rejected → 回执**首行**是 ⛔ 提示，acceptanceStatus=rejected — 首行 ⛔ + status=rejected + note=代码未通过验收（返工 0 次后仍不通过）
+ok   验收②：passed → 回执没有 ⛔ 提示，acceptanceStatus=passed — 无 ⛔ · status=passed · 首行=## 代码（deepseek / deepseek-official / deepseek-flash）
+ok   验收③：authoritativeReviewer=commander（审校 reject + 指挥 pass）判 passed；any 判 rejected — commander→passed / any→rejected
+ok   验收④：mandate 提示词含「验收未通过 ≠ 交付」硬规则句 — mandate 含验收硬规则
+ok   验收⑤：三种未通过状态（rejected/rework-failed/unverified）回执都带 ⛔，passed/none 不带 — rejected/rework-failed/unverified → ⛔ · passed/none → 无
+ok   审核 prompt 传完整产出（不再截到 4000 字，全文含结尾标记） — 2 条审核 prompt 均含 6036 字符全文 + 结尾标记
+ok   真实 /proc 读数：readProcCpuMs(本进程) 是数字、忙循环后变大、无效 pid → null — 290ms → 440ms（+150ms）
+ok   看门狗参数：idle 默认 10 / max 默认 60 / 页面优先 / 旧的 memberTimeoutMinutes 只读不生效 — idle 10 / max 60（0=不限）· 页面优先 · 旧字段只读
+ok   看门狗①：持续有输出的进程跑过 40 分钟不被杀（没有总时长超时） — 40 分钟持续输出 → 0 次 kill（默认 idle 10 / hard 360）
+[council] watchdog kill member reason=idle-timeout silent=660
+ok   看门狗②：静默 11 分钟（idle=10）→ SIGTERM，reason=idle-timeout 且带中文原因 — 静默 11min → SIGTERM · reason=idle-timeout · error=「成员静默超过 10 分钟，已终止（看门狗）」
+[council] watchdog kill member reason=idle-timeout silent=180
+ok   看门狗③：memberIdleMinutes=2 时静默 3 分钟就被杀 — idle=2 → 静默 3min 被杀 · error=「成员静默超过 2 分钟，已终止（看门狗）」
+ok   看门狗④：memberMaxMinutes=0 时 6 小时也不硬杀（只按静默） — hard=0 → 370 分钟持续输出仍 0 次 kill
+[council] watchdog kill 材质 reason=idle-timeout silent=660
+ok   看门狗②b（Bug 2 回归）：只往 stderr 刷日志、stdout 静默 → 11 分钟必须被杀（stderr 不续命） — stderr 每分钟刷一行 + stdout 静默 11min → SIGTERM · reason=idle-timeout
+ok   看门狗②c（Bug 2 对照）：只写 stdout 心跳的进程跑 40 分钟不被杀 — stdout 每分钟心跳 40 分钟 → 0 次 kill
+ok   看门狗④b（Bug 2 保险）：CPU 时间不推进 + stdout 静默 → reason=stalled-no-progress 且打日志 — [council] watchdog kill 材质 reason=stalled-no-progress silent=660
+ok   看门狗④c：CPU 仍在推进（stdout 静默）→ 不标 stalled，按 idle-timeout 收尾 — CPU 推进 + stdout 静默 → reason=idle-timeout（不误标 stalled）
+ok   显式预算仍生效：审校等有界调用传 timeoutMs 到点 → reason=timeout（不是 idle-timeout） — timeoutMs 到点 → SIGTERM · reason=timeout
+[council] watchdog kill member reason=idle-timeout silent=120
+ok   看门狗：SIGTERM 后宽限 3 秒仍不退出 → SIGKILL（默认 MEMBER_KILL_GRACE_MS=3000） — SIGTERM → (宽限) → SIGKILL · reason=idle-timeout
+[council] watchdog kill member reason=idle-timeout silent=120
+ok   看门狗⑤：terminate / hardKill 必须停掉整个 scope（只杀 systemd-run 客户端会留孤儿进程/空 scope） — terminate → stop · hardKill → stop · finish → stop（共 3 次）
+ok   scope 启动前清理：scopeUnitExists 对不存在的 unit=false；同名已存在时先 stop 再 spawn — exists=false → 不 stop · exists=true → 同步 stop 后仍 spawn systemd-run
+ok   深寻 seam：不再设总时长 AbortSignal.timeout；静默超过 idle 才 abort 并标 idle-timeout — 无 AbortSignal.timeout · 1.2s 静默 → abort · reason=idle-timeout · disposed
+ok   审核/拆解调用不再带 __reuse：selfReview / prelimReview / commanderReview / planWithCommander 传给 seam 的 member 都没有 __reuse — 4 次调用全部无 __reuse
+ok   审核结束：reuseAgents=false → 子代理立即 dispose；reuseAgents=true → 保留并登记为驻留 — false → dispose·不登记；true → 保留·登记 kind=work；复用路径补登记 + drainChildren 释放
+ok   清扫器：11 分钟 review 释放 / 9 分钟不动 / 成员 convId 指向的 work 不动 / 失联 work 释放 / dispose 抛错静默 — released=2 · 留下 3 个 · /state+/progress 均暴露 · 回执节按需出现
+ok   看门狗回执：被静默终止的成员写「静默超时终止」、不重试、不进普通失败文案 — 1 次调用（不重试）· 回执「静默超时终止（看门狗…）」
+ok   truncated 续跑：同一子会话连续续跑直到完成（continued=2 且最终 ok）；上限 5 次 — 首跑+2 次续跑→completed（continued=2）· 上限 5 · 超限 ok=false
+ok   硬拦截①：edit 被拒绝，理由是中文并指向 council_delegate — 小组模式：不要自己执行写操作。用 council_delegate 派给成员；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。
+ok   硬拦截②：只读工具与 bash 放行（bash 只计审计数、不拦） — 10 个只读工具 + bash 全部放行 · bash/readImage/read 分别计数
+ok   硬拦截③：strictDelegate=false → edit 放行；改回 true 重新拦截 — strictDelegate=false → edit/blender_render 放行 · 改回 true → 再次拦截
+ok   硬拦截④：最后一条用户消息含「你自己做」→ 本轮放行，换轮后重新拦截 — 含「你自己做」放行 · 换轮后重新拦截
+ok   硬拦截⑤：5 次拒绝（edit×3 + blender_render×2）→ 回执「越权拦截」计数正确，/progress 也带数 — 5 次拒绝 → 回执 edit×3、blender_render×2 · /progress=5 · N=0 不输出
+ok   越权审计①（水位线）：先守卫放行 3×bash + 2×read_image + 4×只读，再调 delegate → 回执「## 越权审计」3/2/4 — 先跑后派：3×bash + 2×read_image + 4×只读 → 回执审计节 3/2/4
+ok   越权审计②（水位线）：报过之后紧接着再派一次（期间无新调用）→ 不再出现该节，selfRan 全 0 — 先跑 1×bash + 1×read_image → 第一次报 1/1；紧接着再派 → 全 0、不出该节
+ok   越权审计③（水位线）：报过之后再跑 1×bash → 下一次只报 bash×1（旧账不重复报） — 报过 bash×2 后再跑 1×bash → 只报 bash×1 · 与越权拦截并存（拦截在前）
+ok   越权审计④：没有任何自行调用 → 不出现该节，selfRan 全 0（不是 undefined） — selfRan 全 0 · 无「## 越权审计」· 缺字段也不误报
+ok   审核①：selfReview / prelimReview / commanderReview（文本 + 看图）传给 claude 的 argv 里没有 --resume — 5 次审核调用（含看图）均无 --resume / 旧 convId
+ok   审核②：looksLikeGreeting 对 3 种问候命中、对正常 JSON / 长文本不命中 — 3 种问候命中 · 3 种 JSON + 长文本 + 空值不命中
+[council] commanderReview 疑似问候/空炮（旧会话不答题），换新会话（无 resume）重试 · 首次原文="I'm here and ready to help. What would you like me to do?"
+[council] commanderReview 重试成功 · 重试原文="{\"ok\":false,\"reason\":\"缺验收标准\"}"
+ok   审核③：首次回问候 → 只重试一次（无 resume）· 第二次回 JSON → 按第二次结果判 — 问候 → 1 次重试 → 按第二次 JSON 判（缺验收标准）
+[council] selfReview 输出无法解析，换新会话（无 resume）重试 · 首次原文="完全无关的胡言乱语（第 1 次），没有任何 JSON 结论"
+[council] selfReview 重试仍失败 · 重试原文="完全无关的胡言乱语（第 2 次），没有任何 JSON 结论"
+ok   审核④：两次都乱码 → verdict ok:false 且 reason 含「已重试」，绝不是 unverified/未判定 — 两次乱码 → {"ok":false,"reason":"审核输出无法解析（已重试）","by":"代码"}
+ok   审核⑤：调用本身失败（ok:false）→ reason 带真实错误，且同样不是「未判定」 — 调用失败 → ok:false · reason=claude exited 1: no such session
+ok   deepseek 链路①：默认识别 relay-deepseek / deepseek-v4.1-flash，provider 不在 profile 时回退官方 — deepseek-official / deepseek-flash（relay 需显式配置）
+[council] seam fallback: relay-deepseek deepseek-v4.1-flash provider "relay-deepseek" is not registered
+ok   deepseek 链路②：旧值 deepseek-flash / deepseek-v4-pro 映射到 deepseek-v4.1-flash，其它显式模型尊重；seam 真把 provider/model 传下去（含启动失败回退） — 映射 2 条 + seam 传参 + 启动失败回退（默认官方）
+ok   deepseek 链路③：迁移幂等、只动 deepseek 成员（其它框架/职位不动）、写盘 — migrated 1 → 再跑 0 · 其它框架/职位不动
+ok   deepseek 链路④：回执成员行写明实际 provider / model（非 deepseek 行保持原样） — deepseek 行带 provider/model · claude 行不变
+ok   deepseek 链路⑤：relay-deepseek 不传 reasoningEffort（只有 deepseek-official 才传） — relay 无 effort · official minimal 有 effort:low · official 工作无 effort
+[council] seam fallback: relay-deepseek deepseek-v4.1-flash provider "relay-deepseek" is not registered
+ok   deepseek 链路⑥：回退 deepseek-official 时同步换 model 为 deepseek-flash — 回退时 provider + model 都换 · 结果带回实际链路
+[council] seam retry-without-effort: deepseek-official deepseek-flash UNSUPPORTED_REASONING_EFFORT: this provider does not support reasoningEffort
+ok   deepseek 链路⑦：UNSUPPORTED_REASONING_EFFORT 错误 → 去掉 reasoningEffort 重试一次 — UNSUPPORTED_REASONING_EFFORT → 去 effort 重试 · 同 provider/model
+[council] seam retry-without-effort: relay-deepseek deepseek-v4.1-flash UNSUPPORTED_REASONING_EFFORT: this provider does not support reasoningEffort
+[council] seam fallback: relay-deepseek deepseek-v4.1-flash provider "relay-deepseek" connection failed
+ok   deepseek 链路⑧：UNSUPPORTED_REASONING_EFFORT 重试仍失败 → 回退 deepseek-official — 两次失败（effort + 无effort）→ 回退官方 · model 同步换
+[council] seam fallback: relay-deepseek deepseek-v4.1-flash provider "relay-deepseek" is not registered
+ok   deepseek 链路⑨：relay-deepseek 直接失败 → 回退 official + model 同步换 — relay 直接失败 → 回退 official · model 同步换 deepseek-flash
+[council] seam degrade: relay-deepseek deepseek-v4.1-flash error":{"message":"All available accounts exhausted"
+ok   deepseek 链路⑩：stopReason=error + exhausted → 自动降级 official 重跑 — stopReason=error + exhausted → 降级 official · 回执含说明 · 成员配置不变
+[council] seam degrade: relay-deepseek deepseek-v4.1-flash All available accounts exhausted
+ok   deepseek 链路⑪：stopReason=error 且 text 为空 → 仍降级并重跑官方 — stopReason=error + text 为空 → 降级 official · 回执含"本次已改用官方" · 成员配置不变
+ok   Bug 修复①：只有状态变化、无消息 → 心跳不刷新，idle 到期后被杀 — 只有 status 变化、无 assistant 消息 → idle 超时杀死
+ok   Bug 修复②：memberMaxMinutes=1 时 61 秒被杀且 reason=max-duration — memberMaxMinutes=1 → 61s 被杀 · reason=max-duration
+ok   Bug 修复③：profile 里 streamIdleTimeoutMs=120000 能被读到 — profile 包含 streamIdleTimeoutMs: 120000
+ok   Bug 2②：council_delegate finally 块确保 finishedAt 总是被写入 — finally 块已实现（index.js:4706-4738）· 所有成员槽在异常路径也设置 finishedAt
+ok   Bug 3：重复 bind 两次不抛错 — 重复 bind 两次不抛错 · 旧 disposer 被正确清理
+
+all 157 checks passed
