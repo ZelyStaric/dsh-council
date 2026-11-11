@@ -1010,6 +1010,13 @@ let claudeExecOverride = null
  * 「已死/空上下文」的旧会话时，claude 不答题、只回问候（实测日志里 8 次
  * `commander image review unparsed: I'm here and ready to help. What would you like me to do?`）。
  */
+/** claude CLI 不认识某些中转模型名（例如 claude-opus-5-5），映射成 CLI 能识别的 id。 */
+const CLAUDE_CLI_MODEL_ALIASES = { 'claude-opus-5-5': 'claude-opus-5' }
+function claudeCliModel(model) {
+  const id = String(model || '').trim()
+  return CLAUDE_CLI_MODEL_ALIASES[id] || id
+}
+
 async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
@@ -1019,7 +1026,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   const args = steerable
     ? ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
     : ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
-  if (model) args.push('--model', model)
+  if (model) args.push('--model', claudeCliModel(model))
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   // 默认不带 MCP：member 的 MCP 越多，启动越慢（实测两个 Blender MCP 会让首轮卡几分钟）
   if (!allowMcp) args.push('--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}')
