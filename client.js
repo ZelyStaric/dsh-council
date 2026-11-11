@@ -502,7 +502,8 @@ window.__ModuleLoader__.load({
           if (models.some((m) => /^claude/i.test(m))) return 'claude'
           if (models.some((m) => /^gpt-|^o\d/i.test(m))) return 'codex'
           if (models.some((m) => /deepseek/i.test(m))) return 'deepseek'
-          return member.kind || 'claude'
+          // 其它 OpenAI 兼容提供商（如本地 vLLM）走 codex 腿
+          return 'codex'
         }
         const providerValue = member.kind === 'image' ? '__image__' : (member.provider || '')
         const providerSelect = h('select', {
