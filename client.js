@@ -748,6 +748,17 @@ window.__ModuleLoader__.load({
                 defaultChecked: group.requireCommander ?? true,
               }),
               h('span', { style: styles.muted }, '需要指挥审核')),
+            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
+                id: 'policy-failOnRejected',
+                defaultChecked: Boolean(apiConfig && apiConfig.failOnRejectedAcceptance),
+                onChange: (event) => {
+                  mutate('/config', { failOnRejectedAcceptance: event.target.checked })
+                    .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
+                },
+              }),
+              h('span', { style: styles.muted }, '验收未通过就不返回（工具报错）')),
             h(Button, {
               onClick: () => {
                 const maxRework = parseInt(document.getElementById('policy-maxRework').value, 10)
