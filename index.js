@@ -1112,13 +1112,39 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
 
 /** One image-generation turn against the relay; stores a PNG the page can show. */
 async function runImage(member, prompt, config, options = {}) {
-  const token = apiSettings(config).imageKey
+  const settings = apiSettings(config)
+  // 成员选了 provider → 只认该 provider 的 baseURL/key（relay-image 之类）；
+  // 没选 → 沿用页面里配置的 imageKey / codexBase（旧行为不变）。
+  // ⚠️ provider 存在但解析不到时直接报错，**不**静默回落到 imageKey/codexBase：
+  // 否则会拿着 A 的 key 去打 B 的地址，出图花了钱还找不到是哪条腿。
+  let token = ''
+  let base = ''
+  if (member && member.provider) {
+    let endpoint = null
+    let reason = ''
+    try {
+      endpoint = await providerEndpoint(member.provider)
+    } catch (error) {
+      reason = String(error && error.message || error)
+    }
+    if (!endpoint || !endpoint.baseURL || !endpoint.key) {
+      return {
+        ok: false, text: '', usage: null,
+        error: `出图 provider「${member.provider}」未取到 baseURL/key（${reason || 'provider 未注册或缺少 Authorization'}）`,
+      }
+    }
+    // base 去掉结尾 /v1，下面统一拼 /v1/images/generations|edits
+    token = endpoint.key
+    base = rootUrl(endpoint.baseURL)
+  } else {
+    token = settings.imageKey
+    base = rootUrl(settings.codexBase || defaultBase('openai', settings.imageKey))
+  }
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.6-flare'
   // 出图是普通 HTTP 请求、没有流式输出，没法用「静默看门狗」；
   // 保留一个宽松的请求超时（默认 240s，config.imageTimeoutSeconds 可改）。
   const imageTimeoutMs = imageTimeoutSeconds(config) * 1000
-  const base = rootUrl(apiSettings(config).codexBase || defaultBase('openai', apiSettings(config).imageKey))
   // 有参考图 → 走 /v1/images/edits（multipart），让模型以这张图为参考重绘
   const reference = options && options.reference
   if (reference) {

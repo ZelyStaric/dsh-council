@@ -2,6 +2,25 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.56] - 2026-11-11
+
+### 新增
+- **出图纳入 DSH provider 体系**（Host 半 `runImage`）：成员 `provider` 非空时走
+  `providerEndpoint(member.provider)` 取该 provider 的 baseURL/key（base 用 `rootUrl()` 去掉结尾 `/v1`），
+  再拼 `/v1/images/generations`（有参考图仍是 `/v1/images/edits`）；`provider` 为空时保持旧行为
+  （`config.imageKey` + `config.codexBase`）。provider 解析失败**直接报错**，不再静默回落去花 imageKey 的钱。
+- **profile 新增 `relay-image` provider**（`gpt-image-2.6-flare` / `gpt-image-2.6-sunburst`，
+  `api: openai-completions`，key 取 `council.json` 的 `config.imageKey`），插在 `relay-deepseek` 之前。
+- 顺手修掉 profile 里 `relay-deepseek:` 少两个空格的缩进（原来落在 `config` 级、不是 `providers` 下的 provider）。
+
+### 变更
+- **小组页只留一个「+ 添加成员」按钮**（原来 codex/claude/deepseek/image 四个）：默认建 `deepseek` 成员，
+  建完在成员卡里选提供商即可。
+- **提供商下拉按模型推断 kind**（顺序固定）：含 `claude` → `claude`；含 `gpt-image` → `image`；
+  含 `gpt-` / `o<数字>` → `codex`；含 `deepseek` → `deepseek`；否则 `codex`。
+  选到出图类 provider 时 `mutate('/members', …)` **同时写真实 `provider`**（不再写 `''`）。
+- **成员卡模型下拉**：image 成员绑了 provider 就用该 provider 的模型列表；没绑时回退 `modelOptions('image')`。
+
 ## [Unreleased]（2026-11-05，未提交、未改版本号）
 
 ### 修复

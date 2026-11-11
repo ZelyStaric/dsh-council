@@ -501,17 +501,21 @@ window.__ModuleLoader__.load({
           const p = (providers || []).find((x) => x.id === providerId)
           const models = (p && p.models) || []
           if (models.some((m) => /^claude/i.test(m))) return 'claude'
+          // 出图 provider（relay-image 之类）整体模型都是 gpt-image-* —— 必须在 gpt- 之前判
+          if (models.some((m) => /^gpt-image/i.test(m))) return 'image'
           if (models.some((m) => /^gpt-|^o\d/i.test(m))) return 'codex'
           if (models.some((m) => /deepseek/i.test(m))) return 'deepseek'
           // 其它 OpenAI 兼容提供商（如本地 vLLM）走 codex 腿
           return 'codex'
         }
-        const providerValue = member.kind === 'image' ? '__image__' : (member.provider || '')
+        // image 成员同样用真实 provider：选了 relay-image 就是它，没选才是 sentinel
+        const providerValue = member.provider || (member.kind === 'image' ? '__image__' : '')
         const providerSelect = h('select', {
           style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
             const value = event.target.value
             if (value === '__image__') {
+              // 只切到「出图」但不绑定 provider：沿用页面里的 imageKey
               const list = modelOptions('image')
               const next = list.indexOf(member.model) >= 0 ? member.model : (list[0] || '')
               mutate('/members', { id: member.id, kind: 'image', provider: '', model: next })
@@ -521,6 +525,7 @@ window.__ModuleLoader__.load({
             const p = (providers || []).find((x) => x.id === value)
             const list = (p && p.models && p.models.length) ? p.models : modelOptions(kind)
             const next = list.indexOf(member.model) >= 0 ? member.model : (list[0] || '')
+            // 出图 provider 也写真实 provider（出图走它的 baseURL/key），不再写 ''
             mutate('/members', { id: member.id, provider: value, kind: kind, model: next })
           },
         }, [
@@ -552,7 +557,9 @@ window.__ModuleLoader__.load({
             : modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value }),
               (() => {
                 const p = (providers || []).find((x) => x.id === member.provider)
-                return p && p.models && p.models.length ? p.models : null
+                if (p && p.models && p.models.length) return p.models
+                // image 成员没绑 provider → 退回本地出图模型表
+                return member.kind === 'image' ? modelOptions('image') : null
               })()),
           roleSelect),
         h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) },
@@ -773,10 +780,7 @@ window.__ModuleLoader__.load({
           '成员（拖到左侧职位即可分配；聊天在「对话」页底部的群聊框里）'),
         members.map(memberCard),
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'codex', groupId: group.id }) }, '+ 成员（codex）'),
-          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'claude', groupId: group.id }) }, '+ 成员（claude）'),
-          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 成员（deepseek）'),
-          h(Button, { onClick: () => mutate('/members', { name: '画师', kind: 'image', groupId: group.id }) }, '+ 成员（image）')),
+          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 添加成员')),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '验收策略'),
           h('div', { style: { display: 'flex', gap: 12, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
