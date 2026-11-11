@@ -6032,6 +6032,10 @@ async function deepseekBalance(ctx, config) {
  * - listProviders() 失败：返回空数组
  * - listModels() 失败：该 provider 的 models 为空数组
  */
+/** provider 模型列表缓存：id -> { at, models }（默认 5 分钟；refresh 强制重探） */
+const providerModelCache = new Map()
+const PROVIDER_MODELS_TTL_MS = 5 * 60_000
+
 async function listProviders(ctx, config, options = {}) {
   const providers = []
 
@@ -6052,6 +6056,11 @@ async function listProviders(ctx, config, options = {}) {
 
       if (!id) continue
 
+      const cached = providerModelCache.get(String(id))
+      if (!options.refresh && cached && Date.now() - cached.at < PROVIDER_MODELS_TTL_MS) {
+        providers.push({ id: String(id), name: String(name), models: cached.models })
+        continue
+      }
       let models = []
       // 尝试获取该 provider 的模型列表
       try {
@@ -6064,8 +6073,8 @@ async function listProviders(ctx, config, options = {}) {
       } catch {
         models = []
       }
-      // 刷新模式：直接用该 provider 的 base/key 去问 /v1/models（拿得到就以远程为准）
-      if (options && options.refresh) {
+      // 刷新模式或没有缓存（冷启动）：用该 provider 的 base/key 去问 /v1/models
+      if (!cached || options.refresh) {
         try {
           const endpoint = await providerEndpoint(id, ctx)
           if (endpoint && endpoint.baseURL) {
@@ -6081,6 +6090,7 @@ async function listProviders(ctx, config, options = {}) {
         } catch { /* 探测失败就沿用已有列表 */ }
       }
 
+      if (models.length) providerModelCache.set(String(id), { at: Date.now(), models })
       // 没有模型的 provider（例如尚未授权的账号型 provider）不列出来，避免选到空列表
       if (!models.length) continue
       providers.push({
