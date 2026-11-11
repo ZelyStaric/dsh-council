@@ -1104,15 +1104,48 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
 }
 
 /** One image-generation turn against the relay; stores a PNG the page can show. */
-async function runImage(member, prompt, config) {
+async function runImage(member, prompt, config, options = {}) {
   const token = apiSettings(config).imageKey
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.6-flare'
   // 出图是普通 HTTP 请求、没有流式输出，没法用「静默看门狗」；
   // 保留一个宽松的请求超时（默认 240s，config.imageTimeoutSeconds 可改）。
   const imageTimeoutMs = imageTimeoutSeconds(config) * 1000
+  const base = rootUrl(apiSettings(config).codexBase || defaultBase('openai', apiSettings(config).imageKey))
+  // 有参考图 → 走 /v1/images/edits（multipart），让模型以这张图为参考重绘
+  const reference = options && options.reference
+  if (reference) {
+    try {
+      const { readFile } = await import('node:fs/promises')
+      const bytes = await readFile(reference)
+      const form = new FormData()
+      form.append('model', model)
+      form.append('prompt', prompt)
+      form.append('n', '1')
+      form.append('size', '1024x1024')
+      form.append('image', new Blob([bytes], { type: 'image/png' }), 'reference.png')
+      const response = await fetch(base + '/v1/images/edits', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + token },
+        body: form,
+        signal: AbortSignal.timeout(imageTimeoutMs),
+      })
+      const data = await response.json()
+      const b64 = data?.data?.[0]?.b64_json
+      if (response.ok && b64) {
+        const name = randomUUID() + '.png'
+        await mkdir(IMAGE_DIR, { recursive: true })
+        const file = path.join(IMAGE_DIR, name)
+        await writeFile(file, Buffer.from(b64, 'base64'))
+        return { ok: true, text: '已按参考图重绘（' + model + '）', image: '/council/api/image/' + name, file, usage: { input: 0, output: 0, costUsd: 0 } }
+      }
+      console.error('[council] images/edits failed, fallback to generations:', JSON.stringify(data).slice(0, 200))
+    } catch (error) {
+      console.error('[council] images/edits error, fallback:', String(error && error.message || error))
+    }
+  }
   try {
-    const response = await fetch(rootUrl(apiSettings(config).codexBase || defaultBase('openai', apiSettings(config).imageKey)) + '/v1/images/generations', {
+    const response = await fetch(base + '/v1/images/generations', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' }),
@@ -2036,7 +2069,7 @@ async function reviewImage(ctx, group, result, config, styleOverride, callId) {
     '只输出一个 JSON 对象，不要其它文字：',
     '{"ok":true 或 false,"reason":"不超过 80 字的中文理由"}',
   ].join('\n')
-  const env = await envFor('claude', config)
+  const env = await envFor(reviewer || { kind: 'claude' }, config)
   // 审核看图也是旁路：`noResume: true` → 绝不追加 --resume（旧会话已死时只会拿到问候）
   const ask = (text) => runClaude({
     cwd: group.workspacePath || config.defaultWorkspace || process.cwd(),
@@ -2154,10 +2187,10 @@ function rootUrl(value) {
 
 
 /** 用插件配置里的 base/key 生成一个独立 CODEX_HOME，官方 OpenAI 与中转站都能直接登录。 */
-async function ensureCodexHome(config) {
+async function ensureCodexHome(config, override) {
   const settings = apiSettings(config)
-  const key = settings.codexToken || await codexToken()
-  const base = rootUrl(settings.codexBase) || rootUrl(await codexCliBase())
+  const key = (override && override.key) || settings.codexToken || await codexToken()
+  const base = rootUrl((override && override.base) || settings.codexBase) || rootUrl(await codexCliBase())
   if (!key && !base) return config.codexHome || undefined   // 完全没配 → 用用户自己的 ~/.codex
   const dir = path.join(os.homedir(), '.dsh', 'storages', 'council-codex')
   const wire = String(config.codexWireApi || 'responses')
@@ -2186,7 +2219,34 @@ async function ensureCodexHome(config) {
   return dir
 }
 
-async function envFor(kind, config) {
+/** 成员默认 provider（页面配置的 providerByKind[kind] 或成员自带）。 */
+function providerIdFor(member) {
+  const byKind = (state.config && state.config.providerByKind) || {}
+  return (member && (member.provider || byKind[member.kind])) || ''
+}
+
+/** 成员 provider 对应的 base/key（来自 DSH 设置/ profile）；没有 provider 时返回 null。 */
+async function memberEndpoint(member, config) {
+  const id = providerIdFor(member)
+  if (!id) return null
+  const endpoint = await providerEndpoint(id)
+  return endpoint ? Object.assign({ provider: id }, endpoint) : null
+}
+
+async function envFor(kindOrMember, config) {
+  const member = kindOrMember && typeof kindOrMember === 'object' ? kindOrMember : { kind: kindOrMember }
+  const endpoint = await memberEndpoint(member, config).catch(() => null)
+  if (endpoint && member.kind === 'claude') {
+    return Object.assign({ ANTHROPIC_BASE_URL: rootUrl(endpoint.baseURL) || undefined, ANTHROPIC_API_KEY: endpoint.key || undefined }, proxyEnv(config))
+  }
+  if (endpoint && member.kind === 'codex') {
+    const home = await ensureCodexHome(config, { base: endpoint.baseURL, key: endpoint.key })
+    return Object.assign({}, home ? { CODEX_HOME: home } : {}, proxyEnv(config))
+  }
+  return envForLegacy(member.kind, config)
+}
+
+async function envForLegacy(kind, config) {
   if (kind === 'claude') {
     const settings = apiSettings(config)
     return Object.assign({
@@ -2392,7 +2452,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
   if (member.kind === 'image') {
     const style = String(styleOverride || (group && group.style) || '')
     const imagePrompt = style ? `[统一风格规范]\n${style}\n\n[画面]\n${prompt}` : prompt
-    result = await runImage(member, imagePrompt, config)
+    result = await runImage(member, imagePrompt, config, { reference: member.__reference })
   } else if (member.kind === 'deepseek') {
     // max-tokens / max-turns 截断时在同一个子会话里续跑（最多 MEMBER_CONTINUE_LIMIT 次）
     result = await runDeepseekWithContinuation(ctx, member, prompt, config, parent, budgetMs, callId, childSink, undefined, onActivity)
@@ -2411,7 +2471,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       resume: member.__noResume ? undefined : (member.convId || undefined),
       noResume: Boolean(member.__noResume),
       prompt,
-      env: await envFor(member.kind, config),
+      env: await envFor(member, config),
       noTools: Boolean(member.__noTools),
       // 审核调用不插话（__noTools 且 minimal）；工作成员可实时插话
       // claude CLI 的 --input-format stream-json 在 stdin 常开时会等 EOF（实测挂住），
@@ -2937,7 +2997,7 @@ async function commanderTurn(group, text, config, sessionKey) {
     model: group.commander?.model || undefined,
     resume: resumeId || undefined,
     prompt,
-    env: await envFor(group.commander?.kind === 'claude' ? 'claude' : 'codex', config),
+    env: await envFor(Object.assign({ kind: group.commander?.kind === 'claude' ? 'claude' : 'codex' }, group.commander || {}), config),
   })
   if (result.convId) {
     if (sessionKey) sessions[sessionKey] = result.convId
@@ -4992,6 +5052,7 @@ function delegateReceiptText(value) {
                 member: { type: 'string', description: '成员名字、id 或职位名' },
                 task: { type: 'string', description: '给这个成员的任务' },
                 style: { type: 'string', description: '可选：覆盖本组默认的统一风格（用于这次任务的画面风格）' },
+                reference: { type: 'string', description: '可选：参考图路径（仅 image 成员）；给了就按这张图重绘' },
               },
               required: ['member', 'task'],
             },
@@ -5241,6 +5302,7 @@ function delegateReceiptText(value) {
             if (signal.aborted) handler()
             else signal.addEventListener('abort', handler, { once: true })
           })
+          if (item && item.reference && member.kind === 'image') member.__reference = String(item.reference)
           const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage }),
             (work) => {
