@@ -545,11 +545,15 @@ window.__ModuleLoader__.load({
           providerSelect,
           h(Button, { onClick: () => mutate('/members/delete', { id: member.id }) }, '删')),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-          modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value }),
-            (() => {
-              const p = (providers || []).find((x) => x.id === member.provider)
-              return p && p.models && p.models.length ? p.models : null
-            })()),
+          (member.kind !== 'image' && !member.provider)
+            ? h('select', {
+              style: Object.assign({}, styles.input, { flex: 1 }), disabled: true,
+            }, [h('option', { key: 'none', value: '' }, '先选择提供商')])
+            : modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value }),
+              (() => {
+                const p = (providers || []).find((x) => x.id === member.provider)
+                return p && p.models && p.models.length ? p.models : null
+              })()),
           roleSelect),
         h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) },
           '职位：' + (role ? role.name : '未分配') + ' · 会话：' + (member.convId ? member.convId.slice(0, 8) : '尚未开始')))
