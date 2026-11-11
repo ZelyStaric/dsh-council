@@ -234,6 +234,7 @@ window.__ModuleLoader__.load({
       const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
       const [state, setState] = useState(null)
       const [apiConfig, setApiConfig] = useState(null)
+      const [providers, setProviders] = useState(null)
       const [error, setError] = useState(null)
       const [busy, setBusy] = useState(null)
       const [balance, setBalance] = useState(null)
@@ -258,6 +259,7 @@ window.__ModuleLoader__.load({
         call('/usage').then(setKeyUsage).catch(() => setKeyUsage(null))
         call('/models').then(setModels).catch(() => setModels(null))
         call('/config').then((data) => setApiConfig(data.config)).catch(() => setApiConfig(null))
+        call('/providers').then((data) => setProviders(data.providers || [])).catch(() => setProviders(null))
         call('/groups/prune', {}).then(applyData).catch(() => {})
       }, [applyData])
 
@@ -544,6 +546,13 @@ window.__ModuleLoader__.load({
             const value = read(id)
             if (value) body[key] = value
           }
+          // provider 选择：每个框架选一个 DSH 设置里的 provider（空 = 不指定，回落到 key/base）
+          const providerByKind = {}
+          for (const kind of ['claude', 'codex', 'deepseek', 'image']) {
+            const value = read('provider-' + kind)
+            if (value) providerByKind[kind] = value
+          }
+          if (Object.keys(providerByKind).length) body.providerByKind = providerByKind
           if (!Object.keys(body).length) return
           mutate('/config', body)
             .then(() => refreshModels())
@@ -574,6 +583,19 @@ window.__ModuleLoader__.load({
               ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 12 }) },
                 '这些模型已不在新列表里（不会自动改）：' + note.stale.join('、'))
               : null),
+          (providers && providers.length
+            ? h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+              ['claude', 'codex', 'deepseek', 'image'].map((kind) => h('label', { key: kind, style: { display: 'flex', gap: 4, alignItems: 'center', fontSize: 12 } },
+                h('span', { style: styles.muted }, kind),
+                h('select', {
+                  id: 'provider-' + kind,
+                  style: Object.assign({}, styles.input, { width: 170 }),
+                  defaultValue: (info.providerByKind && info.providerByKind[kind]) || '',
+                }, [h('option', { key: '', value: '' }, '（默认/不指定）')].concat(
+                  providers.map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id)),
+                )))))
+            : h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6, fontSize: 12 }) },
+              '未能读取 DSH 设置里的 provider 列表（会在保存时尝试）')),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('input', { id: 'council-codex-token', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt key（codex 用）' + (info.hasCodexToken ? ' · 已配置' : '') }),
             h(Button, { onClick: () => clearKey('codexToken') }, '清空'),
