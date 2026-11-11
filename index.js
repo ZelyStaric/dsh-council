@@ -5109,6 +5109,9 @@ function delegateReceiptText(value) {
               + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
             : ''
           // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
+          if (value && value.background) {
+            return [{ type: 'text', text: '已在后台派活（' + value.runId + '）：成员在后台跑，你随时可以继续说话；完成后用 council_collect 收结果。' }]
+          }
           return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
         },
       },
@@ -5408,7 +5411,7 @@ function delegateReceiptText(value) {
             new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000)),
           ])
         }
-        if (job.status === 'done') return toolResult(Object.assign({ runId: job.runId }, job.response))
+        if (job.status === 'done') return toolResult(Object.assign({ runId: job.runId, status: 'done' }, job.response))
         if (job.status === 'failed') return { status: 'failed', runId: job.runId, error: job.error }
         return { status: 'running', runId: job.runId, message: '成员还在跑，稍后再收（或加 waitSeconds 等待）' }
       },
