@@ -3684,7 +3684,11 @@ export function createHandler(ctx, config = {}) {
             return send(res, 200, await deepseekBalance(ctx, config))
           }
           if (req.method === 'GET' && route === '/providers') {
-            return send(res, 200, await listProviders(ctx, config))
+            const refresh = /(?:^|&)refresh=1(?:&|$)/.test(String(req.url || '').split('?')[1] || '')
+            return send(res, 200, await listProviders(ctx, config, { refresh }))
+          }
+          if (req.method === 'POST' && route === '/providers/refresh') {
+            return send(res, 200, await listProviders(ctx, config, { refresh: true }))
           }
           return send(res, 404, { error: `no route ${req.method} ${route}` })
         } catch (error) {
@@ -6028,7 +6032,7 @@ async function deepseekBalance(ctx, config) {
  * - listProviders() 失败：返回空数组
  * - listModels() 失败：该 provider 的 models 为空数组
  */
-async function listProviders(ctx, config) {
+async function listProviders(ctx, config, options = {}) {
   const providers = []
 
   try {
@@ -6058,8 +6062,23 @@ async function listProviders(ctx, config) {
           }
         }
       } catch {
-        // 获取模型列表失败，使用空数组
         models = []
+      }
+      // 刷新模式：直接用该 provider 的 base/key 去问 /v1/models（拿得到就以远程为准）
+      if (options && options.refresh) {
+        try {
+          const endpoint = await providerEndpoint(id, ctx)
+          if (endpoint && endpoint.baseURL) {
+            const url = rootUrl(endpoint.baseURL) + '/v1/models'
+            const response = await fetch(url, { headers: endpoint.key ? { authorization: 'Bearer ' + endpoint.key } : {} })
+            if (response.ok) {
+              const data = await response.json()
+              const ids = (data.data ?? []).map((m) => m && (m.id || m.name)).filter(Boolean)
+              const remote = ids.filter((x) => !String(x).startsWith('gpt-image'))
+              if (remote.length) models = remote
+            }
+          }
+        } catch { /* 探测失败就沿用已有列表 */ }
       }
 
       // 没有模型的 provider（例如尚未授权的账号型 provider）不列出来，避免选到空列表
