@@ -25,6 +25,7 @@ const normalizeSessionId = (value) => String(value || '').replace(/^session-/, '
 let archivedIdsCache = { at: 0, ids: null }
 const PROFILE_CANDIDATES = [
   process.env.DSH_PROFILE_DIR,
+  path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'profiles', 'web'),
   path.join(os.homedir(), '.dsh', 'profiles', 'web'),
 ].filter(Boolean)
 const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
@@ -1002,7 +1003,7 @@ let claudeExecOverride = null
  * 「已死/空上下文」的旧会话时，claude 不答题、只回问候（实测日志里 8 次
  * `commander image review unparsed: I'm here and ready to help. What would you like me to do?`）。
  */
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -1013,6 +1014,8 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
     : ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
   if (model) args.push('--model', model)
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
+  // 默认不带 MCP：member 的 MCP 越多，启动越慢（实测两个 Blender MCP 会让首轮卡几分钟）
+  if (!allowMcp) args.push('--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}')
   const exec = claudeExecOverride || run
   if (resume && !noResume) args.push('--resume', resume)
 
@@ -1380,9 +1383,12 @@ async function providerEndpoint(id, ctx = ctx0) {
 function parseProviderFromYaml(content, providerId) {
   try {
     const lines = content.split('\n')
+    let inConfig = false
     let inProviders = false
     let inTargetProvider = false
-    let currentIndent = 0
+    let configIndent = -1
+    let providersIndent = -1
+    let targetProviderIndent = -1
     let baseURL = null
     let key = null
 
@@ -1395,31 +1401,49 @@ function parseProviderFromYaml(content, providerId) {
 
       // 计算缩进级别
       const indent = line.search(/\S/)
+      if (indent < 0) continue
 
-      // 查找 providers: 节点
-      if (trimmed === 'providers:') {
-        inProviders = true
-        currentIndent = indent
+      // 查找 config: 节点（任意缩进层级）
+      if (!inConfig && (trimmed === 'config:' || trimmed.startsWith('config:'))) {
+        inConfig = true
+        configIndent = indent
         continue
+      }
+
+      // 在 config 内查找 providers:
+      if (inConfig && !inProviders) {
+        // 如果缩进小于等于 config 缩进且不是 providers，说明已退出 config 块
+        if (indent <= configIndent && trimmed !== 'config:' && trimmed !== 'providers:') {
+          inConfig = false
+          continue
+        }
+
+        if (trimmed === 'providers:' || trimmed.startsWith('providers:')) {
+          inProviders = true
+          providersIndent = indent
+          continue
+        }
       }
 
       // 在 providers 内查找目标 provider id
       if (inProviders && !inTargetProvider) {
-        if (indent <= currentIndent && trimmed !== 'providers:') {
+        // 如果缩进小于等于 providers 缩进，退出 providers 块
+        if (indent <= providersIndent) {
           inProviders = false
           continue
         }
+
         if (trimmed === `${providerId}:` || trimmed.startsWith(`${providerId}:`)) {
           inTargetProvider = true
-          currentIndent = indent
+          targetProviderIndent = indent
           continue
         }
       }
 
       // 在目标 provider 内提取 baseURL 和 Authorization
       if (inTargetProvider) {
-        if (indent <= currentIndent) {
-          // 退出当前 provider 块
+        // 如果缩进小于等于 provider 缩进，退出当前 provider
+        if (indent <= targetProviderIndent) {
           break
         }
 
@@ -1427,17 +1451,23 @@ function parseProviderFromYaml(content, providerId) {
         const baseURLMatch = trimmed.match(/^baseURL:\s*(.+)/)
         if (baseURLMatch) {
           baseURL = baseURLMatch[1].replace(/^["']|["']$/g, '').trim()
+          continue
         }
 
-        // 提取 headers.Authorization
-        if (trimmed === 'headers:') {
-          // 查找下一行的 Authorization
+        // 检测 headers: 块
+        if (trimmed === 'headers:' || trimmed.startsWith('headers:')) {
+          const headersIndent = indent
+
+          // 查找后续行的 Authorization
           for (let j = i + 1; j < lines.length; j++) {
             const nextLine = lines[j]
             const nextTrimmed = nextLine.trim()
             const nextIndent = nextLine.search(/\S/)
 
-            if (nextIndent <= indent) break
+            if (nextIndent < 0 || !nextTrimmed || nextTrimmed.startsWith('#')) continue
+
+            // 如果缩进小于等于 headers，退出 headers 块
+            if (nextIndent <= headersIndent) break
 
             const authMatch = nextTrimmed.match(/^Authorization:\s*(.+)/)
             if (authMatch) {
@@ -1635,9 +1665,9 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       try { controller.abort() } catch { /* ignore */ }
     }
   }, WATCHDOG_TICK_MS)
-  // 成员该用哪个 provider/model：成员显式 provider 优先；没写就按小组默认
-  // （relay-deepseek），旧模型名映射到 deepseek-v4.1-flash。
-  let provider = member.provider || deepseekMemberProvider(config, ctx)
+  // 成员该用哪个 provider/model：优先级 = member.provider → providerByKind[kind] → 旧 key 字段 → 默认
+  const providerByKind = (state.config && state.config.providerByKind) || {}
+  let provider = member.provider || providerByKind[member.kind] || deepseekMemberProvider(config, ctx)
   let model = deepseekMemberModel(config, member, provider)
   // 回执/日志要能看出**实际**走的是哪条链路（主会话与小组不是同一个 provider）。
   try { ctx0?.logger?.('council')?.info?.(`deepseek member "${member.name}" → ${provider} / ${model}`) } catch { /* ignore */ }
@@ -2379,6 +2409,8 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       // 审核调用不插话（__noTools 且 minimal）；工作成员可实时插话
       // claude CLI 的 --input-format stream-json 在 stdin 常开时会等 EOF（实测挂住），
       // 所以 claude 腿暂不实时插话；deepseek 腿的插话走 seam 的 sendMessage，不受影响。
+      // 3D/建模类成员保留 MCP（要 Blender 工具）；其它成员关闭 MCP，避免工具表膨胀/启动卡住
+      allowMcp: /建模|材质|3D/i.test(String(member.name || '') + ' ' + String((roleOf(member) || {}).name || '')),
       steerable: false,
       callId,
       signal: signalFor(callId, member && member.id),
@@ -3539,6 +3571,16 @@ export function createHandler(ctx, config = {}) {
                 if (body.authoritativeReviewer === 'any') delete next.authoritativeReviewer
                 else next.authoritativeReviewer = 'commander'
               }
+              // providerByKind: 各框架默认使用的 provider
+              if (body.providerByKind && typeof body.providerByKind === 'object') {
+                next.providerByKind = {}
+                for (const kind of ['claude', 'codex', 'deepseek', 'image']) {
+                  if (typeof body.providerByKind[kind] === 'string' && body.providerByKind[kind]) {
+                    next.providerByKind[kind] = body.providerByKind[kind]
+                  }
+                }
+                if (Object.keys(next.providerByKind).length === 0) delete next.providerByKind
+              }
               state.config = Object.keys(next).length ? next : undefined
               usageCache = null
               catalog = null
@@ -3563,6 +3605,9 @@ export function createHandler(ctx, config = {}) {
           }
           if (req.method === 'GET' && route === '/balance') {
             return send(res, 200, await deepseekBalance(ctx, config))
+          }
+          if (req.method === 'GET' && route === '/providers') {
+            return send(res, 200, await listProviders(ctx, config))
           }
           return send(res, 404, { error: `no route ${req.method} ${route}` })
         } catch (error) {
@@ -5873,6 +5918,66 @@ async function deepseekBalance(ctx, config) {
     return { deepseek: { wallets, threshold: config.lowBalanceThreshold ?? 20 } }
   } catch (error) {
     return { deepseek: null, reason: String(error?.message ?? error) }
+  }
+}
+
+/**
+ * GET /providers: 返回可用的 provider 列表，优先从 ctx.llm 获取，失败则返回空数组。
+ *
+ * 返回格式：{ providers: [{ id, name, models }] }
+ * - 优先使用 ctx.get('llm')?.listProviders() 获取 provider 列表
+ * - 对每个 provider，尝试用 llm.listModels(providerId) 获取模型列表
+ * - 如果获取失败，models 返回空数组（不影响其他 provider）
+ *
+ * 降级行为：
+ * - 无 ctx.llm：返回空数组
+ * - listProviders() 失败：返回空数组
+ * - listModels() 失败：该 provider 的 models 为空数组
+ */
+async function listProviders(ctx, config) {
+  const providers = []
+
+  try {
+    const llm = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+    if (!llm || typeof llm.listProviders !== 'function') {
+      return { providers: [] }
+    }
+
+    const providerList = llm.listProviders()
+    if (!Array.isArray(providerList) || providerList.length === 0) {
+      return { providers: [] }
+    }
+
+    for (const provider of providerList) {
+      const id = provider?.id || provider?.provider?.id
+      const name = provider?.name || provider?.provider?.name || id
+
+      if (!id) continue
+
+      let models = []
+      // 尝试获取该 provider 的模型列表
+      try {
+        if (typeof llm.listModels === 'function') {
+          const modelList = await llm.listModels(id)
+          if (Array.isArray(modelList)) {
+            models = modelList.map(m => typeof m === 'string' ? m : (m?.id || m?.name || String(m)))
+          }
+        }
+      } catch {
+        // 获取模型列表失败，使用空数组
+        models = []
+      }
+
+      providers.push({
+        id: String(id),
+        name: String(name),
+        models,
+      })
+    }
+
+    return { providers }
+  } catch {
+    return { providers: [] }
   }
 }
 
