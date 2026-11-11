@@ -584,16 +584,23 @@ function sessionIdOf(exec) {
 const steerTargets = new Map()
 
 /** 记录一个可插话目标（成员结束时务必删除）。 */
-function registerSteerTarget(callId, target) {
+function registerSteerTarget(callId, memberId, target) {
   if (!callId) return () => {}
-  steerTargets.set(String(callId), Object.assign({ at: Date.now() }, target))
-  return () => steerTargets.delete(String(callId))
+  const key = String(callId) + '\u0000' + String(memberId || '*')
+  steerTargets.set(key, Object.assign({ at: Date.now() }, target))
+  return () => steerTargets.delete(key)
 }
 
 /** 往运行中的成员投递一段“补充说明”；返回 { ok, via, error }。 */
-async function steerRunningMember(callId, text) {
-  const target = steerTargets.get(String(callId))
-  if (!target) return { ok: false, error: '没有正在运行的派活（或该成员不支持插话）' }
+async function steerRunningMember(callId, text, memberId) {
+  let target = memberId ? steerTargets.get(String(callId) + '\u0000' + String(memberId)) : undefined
+  if (!target) {
+    // 没指定成员 / 没精确命中：取这个 callId 下的任意一个可插话目标
+    for (const [key, value] of steerTargets) {
+      if (key.startsWith(String(callId) + '\u0000')) { target = value; break }
+    }
+  }
+  if (!target) return { ok: false, error: '没有可插话的运行中成员（claude / codex 成员暂不支持实时插话）' }
   try {
     const sent = await target.write(String(text))
     return { ok: sent !== false, via: target.kind, memberName: target.memberName }
@@ -1042,7 +1049,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
       input,
       keepStdinOpen: steerable,
       onSpawn: steerable ? (child) => {
-        steerCleanup = registerSteerTarget(callId, {
+        steerCleanup = registerSteerTarget(callId, member.name, {
           memberName: memberName || 'claude',
           kind: 'claude',
           write: async (text) => {
@@ -1773,7 +1780,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     try {
       const seamSubagents = ctx && typeof ctx.get === 'function' ? ctx.get('subagents') : undefined
       if (callId && childId && seamSubagents && typeof seamSubagents.sendMessage === 'function') {
-        steerCleanup = registerSteerTarget(callId, {
+        steerCleanup = registerSteerTarget(callId, member.id || member.name, {
           memberName: member.name,
           kind: 'deepseek',
           write: async (text) => {
@@ -5448,7 +5455,19 @@ function delegateReceiptText(value) {
           .filter(([, entry]) => !entry.finishedAt && (!sessionId || normalizeSessionId(entry.sessionId) === sessionId))
         if (!live.length) return { ok: false, error: '当前没有正在运行的派活' }
         const targetCallId = args.callId || live[live.length - 1][0]
-        const result = await steerRunningMember(targetCallId, text)
+        // member 可以是成员名 / 成员 id：从进度条目里找出对应 slot
+        let memberKey
+        if (args.member) {
+          const wanted = String(args.member)
+          const entry = progressMap.get(targetCallId)
+          const slots = entry && entry.members ? entry.members : {}
+          for (const [id, slot] of Object.entries(slots)) {
+            if (id === '__stage__') continue
+            if (id === wanted || (slot && slot.name === wanted)) { memberKey = id; break }
+          }
+          if (!memberKey) memberKey = wanted
+        }
+        const result = await steerRunningMember(targetCallId, text, memberKey)
         return toolResult(result)
       },
     }))
