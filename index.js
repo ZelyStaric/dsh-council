@@ -2679,6 +2679,7 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     '你是这个小组的指挥。把用户的要求拆成给成员的自包含任务。',
     rosterText(group),
     catalogText(),
+    `补员/换模型时按「模型定位速查」选；一个任务只用一个主力模型；${MODEL_GUIDE_TIEBREAK}。`,
     '',
     '只输出一个 JSON 对象，不要其它文字：',
     '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务，含背景/目标/验收标准"}]}',
@@ -4124,6 +4125,49 @@ const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek
 const STAFF_KINDS = Object.keys(STAFF_MODELS)
 
 /**
+ * 「模型定位速查」表：模型 id → 定位（**来源是用户经验，不是官方基准，未做线上核实**）。
+ *
+ * 为什么要有它：`catalogText()` 原来只列「各框架有哪些 id」，指挥（拆解者）不知道它们擅长什么，
+ * 只能凭旧印象选模型 → 过时。这张表随 `catalogText()` 一起进系统提示与拆解提示词。
+ *
+ * 维护约定：键 = 模型 id（小写、精确匹配）；描述按用户原话写，别在这里加"核实结论"
+ * （要核实另开一轮，核实结果放 docs，不放提示词）。
+ */
+const MODEL_GUIDE = [
+  ['claude-opus-5-5', '代码顶尖（理论最强；有可能降智，长任务要复核）'],
+  ['claude-fable-5-2', '审美 + 代码顶尖（贵；也可能降智，重活优先但控制次数）'],
+  ['claude-sonnet-5', '均衡、快，适合普通实现与审校'],
+  ['claude-sonnet-5-5', '均衡、快，适合普通实现与审校'],
+  ['gpt-6-astra', '操作电脑/工具编排顶尖（多步 GUI/CLI、长流程）'],
+  ['gpt-6.1-sol', '性价比高，接近 6-astra 水平（多数编码/执行任务的默认选择）'],
+  ['gpt-6-sol', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['gpt-6-luna', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['gpt-6.1-terra', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['gpt-5.6-sol', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['gpt-5.6-terra', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['gpt-5.6-luna', '同系较旧/较弱，仅在指定或兼容性需要时选'],
+  ['deepseek-v4.1-flash', '性价比顶尖（1017 版），特别适合编程/批量改动'],
+  ['deepseek-flash', '官方线，稳定、便宜'],
+  ['deepseek-v4-pro', '官方线，稳定、便宜'],
+  ['gpt-image-2.6-flare', '性价比出图（默认）'],
+  ['gpt-image-2.6-sunburst', '旗舰出图（质量优先、贵）'],
+]
+
+/** 选模型没把握时的兜底（目录说明与拆解提示词共用，避免两处漂移）。 */
+const MODEL_GUIDE_TIEBREAK = '不确定就选 gpt-6.1-sol 或 deepseek-v4.1-flash'
+
+/**
+ * 传给指挥的「模型定位速查」整段。
+ * 纯同步字符串拼接（systemPrompt 的 section.text 不能是 Promise）。
+ */
+function modelGuideText() {
+  return [
+    '## 模型定位速查（来源：用户经验，不是官方基准；选模型时优先看这里，不要凭旧印象）',
+    ...MODEL_GUIDE.map(([id, desc]) => `- ${id}：${desc}`),
+  ].join('\n')
+}
+
+/**
  * 出图模型换代（2.5 / gpt-image-2 → 2.6 flare/sunburst）：
  * 中转现在同时列 2.5 与 2.6，页面与默认值**只用 2.6**，老的等启动迁移换掉。
  */
@@ -4181,6 +4225,8 @@ function catalogText() {
     }),
     'assignments[].member 可写职位名；缺人时按职位默认自动补员。需要补员或调整模型时在 staffing 中声明 {role, kind?, model?}。',
     '需要长期保留的成员：在 staffing 里写 `persistent:true`（默认用完即回收）。',
+    '',
+    modelGuideText(),
   ].join('\n')
 }
 

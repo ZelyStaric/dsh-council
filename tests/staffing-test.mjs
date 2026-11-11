@@ -138,6 +138,23 @@ await check('catalogText 优先读 modelCatalog() 缓存', () => {
   return '缓存命中'
 })
 
+await check('catalogText 模型清单之后追加「模型定位速查」，逐行 - <model>：<描述>', () => {
+  mod.__setCatalog(null)
+  const text = mod.catalogText()
+  const at = text.indexOf('## 模型定位速查')
+  assert.ok(at > text.indexOf('- image:'), '定位速查应在四组模型清单之后')
+  // 标题必须标来源，避免把用户经验当官方基准
+  assert.match(text, /^## 模型定位速查（来源：用户经验，不是官方基准；选模型时优先看这里，不要凭旧印象）$/m)
+  for (const model of ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5', 'claude-sonnet-5-5',
+    'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-terra',
+    'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+    'deepseek-v4.1-flash', 'deepseek-flash', 'deepseek-v4-pro', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
+    assert.match(text, new RegExp(`^- ${model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}：\\S`, 'm'), `缺定位：${model}`)
+  }
+  assert.equal(typeof text, 'string', 'catalogText 必须同步返回字符串（systemPrompt.section.text 需要）')
+  return '17 条定位 + 来源标注 + 同步字符串'
+})
+
 /* ── 出图模型换代：2.5 / gpt-image-2 → 2.6 flare/sunburst ─────────────────── */
 /** 用假 relay 跑一次真实 modelCatalog：/v1/models 只回给定的 gpt-image 列表。 */
 async function catalogWithImageModels(ids) {
