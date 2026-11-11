@@ -495,15 +495,36 @@ window.__ModuleLoader__.load({
 
       function memberCard(member) {
         const role = roles.find((r) => r.id === member.roleId)
-        const kindSelect = h('select', {
-          style: Object.assign({}, styles.input, { width: 110 }), defaultValue: member.kind,
+        // 提供商下拉：来自 DSH 设置里的 provider（截图那种列表）+ 「出图（image）」
+        const inferKind = (providerId) => {
+          const p = (providers || []).find((x) => x.id === providerId)
+          const models = (p && p.models) || []
+          if (models.some((m) => /^claude/i.test(m))) return 'claude'
+          if (models.some((m) => /^gpt-|^o\d/i.test(m))) return 'codex'
+          if (models.some((m) => /deepseek/i.test(m))) return 'deepseek'
+          return member.kind || 'claude'
+        }
+        const providerValue = member.kind === 'image' ? '__image__' : (member.provider || '')
+        const providerSelect = h('select', {
+          style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
-            const kind = event.target.value
-            const list = modelOptions(kind)
-            const next = member.model && list.indexOf(member.model) >= 0 ? member.model : (list[0] || '')
-            mutate('/members', { id: member.id, kind: kind, model: next })
+            const value = event.target.value
+            if (value === '__image__') {
+              const list = modelOptions('image')
+              const next = list.indexOf(member.model) >= 0 ? member.model : (list[0] || '')
+              mutate('/members', { id: member.id, kind: 'image', provider: '', model: next })
+              return
+            }
+            const kind = inferKind(value)
+            const p = (providers || []).find((x) => x.id === value)
+            const list = (p && p.models && p.models.length) ? p.models : modelOptions(kind)
+            const next = list.indexOf(member.model) >= 0 ? member.model : (list[0] || '')
+            mutate('/members', { id: member.id, provider: value, kind: kind, model: next })
           },
-        }, ['codex', 'claude', 'deepseek', 'image'].map((kind) => h('option', { key: kind, value: kind }, kind)))
+        }, [
+          h('option', { key: '__none__', value: '' }, '（未选择提供商）'),
+          h('option', { key: '__image__', value: '__image__' }, 'image（出图）'),
+        ].concat((providers || []).map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id))))
         const roleOptions = [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
           roles.map((r) => h('option', { key: r.id, value: r.id }, r.name)))
         const roleSelect = h('select', {
@@ -519,7 +540,7 @@ window.__ModuleLoader__.load({
             style: Object.assign({}, styles.input, { flex: 1 }), defaultValue: member.name,
             onBlur: (event) => { if (event.target.value !== member.name) mutate('/members', { id: member.id, name: event.target.value }) },
           }),
-          kindSelect,
+          providerSelect,
           h(Button, { onClick: () => mutate('/members/delete', { id: member.id }) }, '删')),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
           modelSelect(member.model, member.kind, (value) => mutate('/members', { id: member.id, model: value })),
@@ -836,8 +857,11 @@ window.__ModuleLoader__.load({
               onChange: (event) => mutate('/groups', { id: group.id, reviewerId: event.target.value || undefined }),
             }, [h('option', { key: 'auto', value: '' }, '自动（第一个 claude）')].concat(
               members.filter((m) => m.kind === 'claude').map((m) => h('option', { key: m.id, value: m.id }, m.name)))))),
-        apiCard(),
-        usagePanel())
+        h('div', { style: Object.assign({}, styles.card) },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '模型与密钥'),
+          h('div', { style: styles.muted },
+            '提供商与 API Key 统一在 DSH 的「设置 → 模型提供商」里配置；小组成员直接选提供商即可。'
+            + '（出图仍用 profile 里配置的 gpt-image key）')))
 
       return h('div', { style: styles.root },
         header,
