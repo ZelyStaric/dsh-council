@@ -553,6 +553,30 @@ function memberTimeoutMs(config) {
  * `max(10 分钟下限, memberIdleMinutes(config) * 60_000 + 5 分钟)` → 默认 15 分钟。
  * 不再跟旧的 30 分钟总超时联动（总超时已经取消）。
  */
+/** 后台派活：runId -> { runId, status, promise, response, error, sessionId, startedAt, finishedAt } */
+const backgroundJobs = new Map()
+
+/** 是否默认后台派活（默认 false；页面开关 config.backgroundDelegations 可打开）。 */
+function backgroundDelegations() {
+  const own = (state && state.config) || {}
+  const raw = own.backgroundDelegations
+  return raw === undefined || raw === null ? false : Boolean(raw)
+}
+
+/** 取出当前会话最近一个后台任务。 */
+function latestBackgroundJob(sessionId) {
+  let best = null
+  for (const job of backgroundJobs.values()) {
+    if (sessionId && job.sessionId && job.sessionId !== sessionId) continue
+    if (!best || job.startedAt > best.startedAt) best = job
+  }
+  return best
+}
+
+function sessionIdOf(exec) {
+  return normalizeSessionId(exec && exec.agent && exec.agent.id)
+}
+
 /** 正在跑、可接收“插话”的成员：callId -> { memberName, kind, write(text) } */
 const steerTargets = new Map()
 
@@ -595,6 +619,7 @@ function configView(config, source) {
     reuseChildren: Boolean((state.config || {}).reuseChildren),
     strictDelegate: own.strictDelegate !== false,
     failOnRejectedAcceptance: failOnRejectedAcceptance(config),
+    backgroundDelegations: backgroundDelegations(),
     claudeBase: own.claudeBase || '',
     codexBase: own.codexBase || '',
     proxyUrl: own.proxyUrl || '',
@@ -3335,6 +3360,7 @@ export function createHandler(ctx, config = {}) {
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
               if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
               if (typeof body.failOnRejectedAcceptance === 'boolean') next.failOnRejectedAcceptance = body.failOnRejectedAcceptance
+              if (typeof body.backgroundDelegations === 'boolean') next.backgroundDelegations = body.backgroundDelegations
               // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
               if (body.memberIdleMinutes !== undefined && Number.isFinite(Number(body.memberIdleMinutes)) && Number(body.memberIdleMinutes) > 0) {
                 next.memberIdleMinutes = Number(body.memberIdleMinutes)
@@ -4884,6 +4910,9 @@ function delegateReceiptText(value) {
         },
       },
       async execute(args, exec) {
+        const background = args && args.background !== undefined ? Boolean(args.background) : backgroundDelegations()
+        const runId = 'job_' + randomUUID().slice(0, 8)
+        const runOnce = async () => {
         const live = state.groups.find((g) => g.id === group.id) || group
         // 本次派活新建的临时成员：成功 / 失败 / 取消都在 finally 里回收
         const ephemeral = []
@@ -5125,7 +5154,60 @@ function delegateReceiptText(value) {
             + '\n\n【硬性规则】验收未通过 ≠ 交付：本轮结果不能作为成果汇报；必须继续派返工（最多 maxRework 次），或如实告知用户失败原因。',
           )
         }
-        return toolResult(response)
+          return response
+        }
+        if (!background) return toolResult(await runOnce())
+        const job = { runId, startedAt: Date.now(), status: 'running', sessionId: sessionIdOf(exec), promise: null, response: null, error: null }
+        backgroundJobs.set(runId, job)
+        job.promise = runOnce().then((value) => {
+          job.status = 'done'; job.response = value; job.finishedAt = Date.now(); return value
+        }).catch((error) => {
+          job.status = 'failed'; job.error = String(error && error.message || error); job.finishedAt = Date.now(); throw error
+        })
+        if (job.promise && typeof job.promise.catch === 'function') job.promise.catch(() => {})
+        return toolResult({ background: true, runId, status: 'running', members: [] })
+      },
+    }))
+    disposers.push(agentCtx.tools.register({
+      name: 'council_collect',
+      description: '取回后台派活的结果：council_delegate 以 background 模式派活时会立刻返回 runId，成员在后台跑；完成后用这个工具收结果（可带等待秒数）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          runId: { type: 'string', description: '派活返回的 runId；不填则取本会话最近一个后台任务' },
+          waitSeconds: { type: 'number', description: '最多等待多少秒（默认 0 = 只查状态）' },
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: { status: { type: 'string' }, runId: { type: 'string' }, error: { type: 'string' }, members: { type: 'array', items: { type: 'object', additionalProperties: true } }, acceptanceStatus: { type: 'string' } },
+        },
+        render(_args, value) {
+          if (!value || !value.runId) return [{ type: 'text', text: '没有后台派活记录' }]
+          if (value.status === 'failed') return [{ type: 'text', text: '后台派活失败：' + String(value.error || '') }]
+          if (value.status !== 'done') {
+            return [{ type: 'text', text: '后台派活仍在进行（' + String(value.runId) + '）：' + (value.message || '') }]
+          }
+          return [{ type: 'text', text: delegateReceiptText(value) }]
+        },
+      },
+      async execute(args, exec) {
+        const sessionId = sessionIdOf(exec)
+        const job = args && args.runId ? backgroundJobs.get(String(args.runId)) : latestBackgroundJob(sessionId)
+        if (!job) return { status: 'none', error: '没有后台派活记录' }
+        const waitSeconds = Math.max(0, Math.min(600, Number(args && args.waitSeconds) || 0))
+        if (waitSeconds > 0 && job.promise) {
+          await Promise.race([
+            job.promise.catch(() => {}),
+            new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000)),
+          ])
+        }
+        if (job.status === 'done') return toolResult(Object.assign({ runId: job.runId }, job.response))
+        if (job.status === 'failed') return { status: 'failed', runId: job.runId, error: job.error }
+        return { status: 'running', runId: job.runId, message: '成员还在跑，稍后再收（或加 waitSeconds 等待）' }
       },
     }))
     disposers.push(agentCtx.tools.register({

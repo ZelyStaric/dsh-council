@@ -751,6 +751,17 @@ window.__ModuleLoader__.load({
             h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
               h('input', {
                 type: 'checkbox',
+                id: 'policy-background',
+                defaultChecked: Boolean(apiConfig && apiConfig.backgroundDelegations),
+                onChange: (event) => {
+                  mutate('/config', { backgroundDelegations: event.target.checked })
+                    .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
+                },
+              }),
+              h('span', { style: styles.muted }, '后台派活（跑着也能插话）')),
+            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox',
                 id: 'policy-failOnRejected',
                 defaultChecked: Boolean(apiConfig && apiConfig.failOnRejectedAcceptance),
                 onChange: (event) => {
