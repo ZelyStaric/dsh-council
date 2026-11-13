@@ -2,6 +2,23 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.60] - 2026-11-13
+
+### 修复
+
+- **后台派活完成后主动唤醒主会话**：`backgroundDelegations=true` 时 `council_delegate` 立刻返回 runId，
+  成员跑完只写进后台任务表、**没有任何推送** —— 主会话一直闲着，用户看不到回执
+  （实测 session-34e6de19… 就是这样：成员全跑完了，主会话毫无反应）。
+  现在后台任务 `then`/`catch` 都会调 `notifyParentJobDone(ctx, job)`，把
+  `[后台派活完成] runId=… · 状态=done|failed · 用时=Ns` + 回执正文作为一条 **user 消息**推进主会话
+  （`agent.followup(msg)`，没有则退回 `agent.steer(msg)`）。
+  - 每个任务**只推一次**：`job.notified` 幂等；`council_collect` 成功取走结果时也会置位，避免重复。
+  - 前台阻塞模式（`backgroundDelegations=false`）不推。
+  - 回执截断到 8000 字符；失败任务用 `job.error`；推送异常全部吞掉，绝不影响派活主流程。
+- 顺带把 `delegateReceiptText` 从 `bindAgent` 函数体里挪出来（原本被误嵌在里面、外层取不到），
+  现在与 `notifyParentJobDone` 相邻，都是顶层函数。
+- 测试：`tests/staffing-test.mjs` 新增 1 项（共 159 项）覆盖 推送一次 / 重复拦截 / 失败任务带 error / 开关关闭不推 / 无 agent 不抛错。
+
 ## [0.2.59] - 2026-11-11
 
 ### 变更

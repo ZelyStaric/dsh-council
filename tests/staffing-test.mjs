@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4117,6 +4117,59 @@ try {
     assert.ok(tool, 'council_delegate 工具应该存在')
 
     return '重复 bind 两次不抛错 · 旧 disposer 被正确清理'
+  })
+
+  /* ── 后台派活完成 → 主动唤醒主会话 ─────────────────────────────────── */
+  await check('notifyParentJobDone：后台任务完成即推一条 user 消息唤醒主会话（只推一次）', async () => {
+    const pushes = []
+    const fakeAgent = {
+      id: 'session-parent',
+      followup(msg) { pushes.push(msg) },
+      steer() { throw new Error('不该走 steer') },
+    }
+    const ctx = { get: (name) => (name === 'agents' ? { get: () => fakeAgent, list: () => [] } : undefined) }
+    const saved = mod.state
+    mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { backgroundDelegations: true }) }))
+    try {
+      const job = {
+        runId: 'job_abc12345',
+        status: 'done',
+        startedAt: Date.now() - 4200,
+        finishedAt: Date.now(),
+        sessionId: 'session-parent',
+        notified: false,
+        background: true,
+        response: { members: [{ name: '代码', kind: 'deepseek', model: 'deepseek-flash', text: '改完了' }], staffing: [] },
+      }
+      assert.equal(mod.notifyParentJobDone(ctx, job), true, '首次推送应成功')
+      assert.equal(pushes.length, 1, '应恰好推一条')
+      const msg = pushes[0]
+      assert.equal(msg.role, 'user', 'role 必须是 user')
+      assert.equal(msg.content[0].type, 'text', 'content[0] 必须是 text')
+      assert.match(msg.content[0].text, /job_abc12345/, '文本应含 runId')
+      assert.match(msg.content[0].text, /状态=done/, '文本应含状态')
+      assert.match(msg.content[0].text, /代码/, '文本应含成员名')
+      assert.ok(job.notified, '应标记 notified')
+      // 第二次：已经推过，不再重复
+      assert.equal(mod.notifyParentJobDone(ctx, job), false, '重复推送应被拦下')
+      assert.equal(pushes.length, 1, '仍只有一条')
+      // 失败任务：用 job.error 而不是回执
+      const failedJob = { runId: 'job_fail001', status: 'failed', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'session-parent', response: null, error: '成员超时', notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(ctx, failedJob), true, '失败任务也要推送')
+      assert.match(pushes[1].content[0].text, /成员超时/, '失败任务应带 error 文本')
+      // 关掉后台派活 → 不推
+      mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { backgroundDelegations: false }) }))
+      const offJob = { runId: 'job_off0001', status: 'done', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'session-parent', response: { members: [] }, notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(ctx, offJob), false, 'backgroundDelegations=false 时不推')
+      assert.equal(pushes.length, 2, '不应新增推送')
+      // 拿不到 agent 时不抛错
+      const noAgentCtx = { get: () => undefined }
+      const orphan = { runId: 'job_orphan1', status: 'done', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'session-missing', response: { members: [] }, notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(noAgentCtx, orphan), false, '没有 agent 时返回 false 不抛错')
+      return '首次推 1 条 user 文本（含 runId/状态/回执）· 重复推被拦 · 失败任务推 error · 开关关闭不推'
+    } finally {
+      mod.__setState(saved)
+    }
   })
 
 } finally {
