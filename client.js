@@ -1476,7 +1476,8 @@ window.__ModuleLoader__.load({
     /* 输入框上方的实时状态条：谁在干什么 */
     function CouncilProgress(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
-      const [entry, setEntry] = useState(null)
+      // 并行的多次 delegate 会有多条进行中的进度条目 —— 全部渲染，别只留最后一条
+      const [entries, setEntries] = useState([])
       const [now, setNow] = useState(Date.now())
       useEffect(() => {
         let alive = true
@@ -1506,7 +1507,7 @@ window.__ModuleLoader__.load({
                 }
                 return true
               })
-            setEntry(list.length ? list[list.length - 1] : null)
+            setEntries(list)
             setNow(Date.now())
           }).catch(() => {})
         }
@@ -1544,9 +1545,20 @@ window.__ModuleLoader__.load({
           color: 'var(--dsw-alias-label-primary)',
         },
       }, '回到最新 ↓') : null
-      if (!entry) return jumpChip ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip) : null
+      if (!entries.length) return jumpChip ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip) : null
 
+      // 每条进行中的派活一行（并行的多次 delegate 各占一行），互相独立
+      const rows = entries.map((entry, idx) => progressRow(entry, now, idx))
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, rows, jumpChip
+        ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip)
+        : null)
+    }
 
+    /** 一条进度行：小组 + 秒数 + 成员芯片（带任务摘要）+ 停止。 */
+    function progressRow(entry, now, rowIndex) {
+      const setRowStopped = (value) => {
+        setEntries((prev) => prev.map((e) => (e === entry ? Object.assign({}, e, { stoppedAt: value }) : e)))
+      }
       const stageEntry = entry.members ? entry.members.__stage__ : null
       const members = Object.keys(entry.members || {}).filter((id) => id !== '__stage__').map((id) => entry.members[id])
       const total = entry.startedAt ? Math.round((now - entry.startedAt) / 1000) : null
@@ -1562,6 +1574,7 @@ window.__ModuleLoader__.load({
         : (waiting ? '等待成员…（' + waited + 's）' : '准备中…'))
         + (longTask ? '（长任务，成员仅在结束时回报）' : '')
       return h('div', {
+        key: entry.callId || rowIndex,
         style: {
           display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 8px 6px',
           padding: '6px 10px', borderRadius: 10, fontSize: 12,
@@ -1573,6 +1586,7 @@ window.__ModuleLoader__.load({
       members.length
         ? members.map((m, i) => h('span', { key: i, style: Object.assign({}, styles.chip, { display: 'inline-flex', alignItems: 'center', gap: 4 }) },
           (m.name || '成员') + ' · ' + (m.stage || '…')
+          + taskSuffix(m)
           + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))
           + silenceSuffix(m),
           m.finishedAt ? null : h('span', {
@@ -1588,13 +1602,11 @@ window.__ModuleLoader__.load({
       h('span', {
         onClick: async () => {
           if (entry.stoppedAt) return
-          setEntry((prev) => (prev ? Object.assign({}, prev, { stoppedAt: Date.now() }) : prev))
+          setRowStopped(Date.now())
           try {
             const result = await call('/runs/cancel', { all: true })
             // 即使 stopped=0 也本地置灰，反馈"已请求取消"
-            if (!result || !result.stopped) {
-              setEntry((prev) => (prev && prev.stoppedAt ? prev : (prev ? Object.assign({}, prev, { stoppedAt: Date.now() }) : prev)))
-            }
+            if (!result || !result.stopped) setRowStopped(Date.now())
           } catch { /* ignore */ }
         },
         title: entry.stoppedAt ? '已发送停止请求，正在终止…' : '停止本轮所有成员（立即终止进行中的 CLI / 子代理）',
@@ -1603,8 +1615,14 @@ window.__ModuleLoader__.load({
           color: '#fff', background: entry.stoppedAt ? '#8a5a5a' : '#e5484d', border: '1px solid #c93a3f',
           opacity: entry.stoppedAt ? 0.7 : 1,
         },
-      }, entry.stoppedAt ? '取消中…' : '停止'),
-      jumpChip)
+      }, entry.stoppedAt ? '取消中…' : '停止'))
+    }
+
+    /** 成员芯片上的「正在做什么」：取服务端下发的 task（已压成一行、60 字内），只显示前 24 字。 */
+    function taskSuffix(member) {
+      const task = member && typeof member.task === 'string' ? member.task.trim() : ''
+      if (!task) return ''
+      return ' · ' + (task.length > 24 ? task.slice(0, 24) + '…' : task)
     }
 
 

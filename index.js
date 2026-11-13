@@ -5445,9 +5445,11 @@ function bindAgent(ctx, config, group, agent) {
             briefParts.push('指挥的分工：' + assignments.map((a, i) => `${i + 1}. ${a.member}：${String(a.task || '').slice(0, 160)}`).join(' / '))
           }
           const brief = briefParts.join('\n')
-          progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '排队中' })
+          // 进度条要显示「这个成员正在做什么」：压成一行、截 60 字，随进度条目下发
+          const shortTask = String(item.task || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+          progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '排队中', task: shortTask })
           if (callCancelled(callId)) {
-            progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '已停止' })
+            progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '已停止', task: shortTask })
             return { name: member.name, kind: member.kind, ok: false, text: '', error: '已被用户停止', accepted: false, acceptance: 'cancelled' }
           }
           // 放弃等待兜底：取消后 2 秒内强制结束，避免永久挂起
@@ -5465,7 +5467,7 @@ function bindAgent(ctx, config, group, agent) {
           })
           if (item && item.reference && member.kind === 'image') member.__reference = String(item.reference)
           const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
-            (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage }),
+            (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage, task: shortTask }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
               const body = work.ok
