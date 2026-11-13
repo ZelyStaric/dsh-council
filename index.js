@@ -515,8 +515,11 @@ function memberIdleMs(config) {
  * `member.__reuse` 是强制语义——仅当显式关闭时才按它回落到原行为。
  */
 function reuseChildrenFor(member, config) {
-  const explicitOff = (state.config && state.config.reuseAgents) === false || (config && config.reuseAgents) === false
-  return explicitOff ? Boolean(member && member.__reuse) : true
+  // 默认**不复用**：只有显式打开 reuseAgents，或调用方强制 __reuse 时才复用。
+  // 插话命中「尚未交付的成员」的复用走 runningMembers 快路径（见 steerRunningMember），
+  // 不依赖这里的默认值。
+  const explicitOn = (state.config && state.config.reuseAgents) === true || (config && config.reuseAgents) === true
+  return explicitOn || Boolean(member && member.__reuse)
 }
 
 /**
@@ -734,46 +737,98 @@ async function steerRunningMember(callId, text, memberId) {
 }
 
 /**
- * 正在跑的成员登记：callId+memberId -> { convId, memberName, kind, promise, startedAt }。
- * `steerTargets` 只管「往已有会话里塞一句话」；这里额外回答「这个成员还在跑吗、它的子会话是哪个」，
- * 供 council_tell / council_delegate 复用同一条腿（而不是新开一个子会话）。
+ * 在跑成员登记表：`sessionId\u0000memberId` -> `{ sessionId, memberId, name, convId, startedAt }`。
+ * 由 `callMember` 进入/退出时维护；`tellRunningMember` 只读它。
+ * 与 `steerTargets` 的区别：这里**所有 kind 都登记**（claude / codex 也有 convId），
+ * 所以 steer 失败时还能按 convId 把话直接塞进正在跑的子会话，不用新开一条腿。
  */
 const runningMembers = new Map()
 
-function runningMemberKey(callId, memberId) {
-  return String(callId) + '\u0000' + String(memberId)
+/** `runningMembers` 的键：会话 id + 成员 id。 */
+function runningMemberKey(sessionId, memberId) {
+  return String(normalizeSessionId(sessionId) || '') + '\u0000' + String(memberId || '')
 }
 
-/** 按成员名/id 找一个正在跑的成员（不传 callId 时取最近启动的那个）。 */
-function findRunningMember(nameOrId, callId) {
-  const wanted = String(nameOrId || '')
-  let best = null
-  for (const entry of runningMembers.values()) {
-    if (callId && String(entry.callId) !== String(callId)) continue
-    if (wanted && String(entry.memberName) !== wanted && String(entry.memberId) !== wanted) continue
-    if (!best || entry.startedAt > best.startedAt) best = entry
+/** 测试钩子：整体替换登记表，返回替换后的条数。 */
+function __setRunningMembers(entries) {
+  runningMembers.clear()
+  for (const entry of entries || []) {
+    if (!entry) continue
+    runningMembers.set(runningMemberKey(entry.sessionId, entry.memberId), Object.assign({ startedAt: Date.now() }, entry))
   }
-  return best
+  return runningMembers.size
+}
+
+/** 按成员名/id 找本会话正在跑的成员（不传成员名时取最近启动的那个）。 */
+function findRunningMember(sessionId, nameOrId) {
+  const session = String(normalizeSessionId(sessionId) || '')
+  const wanted = nameOrId && typeof nameOrId === 'object'
+    ? String(nameOrId.id || nameOrId.name || '')
+    : String(nameOrId || '')
+  if (!session) return null
+  let newest = null
+  for (const entry of runningMembers.values()) {
+    if (!entry) continue
+    if (String(normalizeSessionId(entry.sessionId) || '') !== session) continue
+    if (wanted && String(entry.name) !== wanted && String(entry.memberId) !== wanted) continue
+    if (!newest || (entry.startedAt || 0) > (newest.startedAt || 0)) newest = entry
+  }
+  return newest
 }
 
 /**
- * 把一段话插进正在跑的成员（复用，不新开子会话）。
- * 走现有插话通道：deepseek 腿 = seam 的 sendMessage；claude / codex 腿是一次性的 → unsupported。
+ * 把一段话追加到**正在跑**的成员子会话里（复用，不新开腿）。
+ *
+ * 返回：
+ * - 成功 `{ ok:true, via:'append', memberName, convId }`
+ * - `{ ok:false, reason:'not-running' }` —— 本会话里没有该成员在跑（调用方走正常派活路径）
+ * - `{ ok:false, reason:'empty-text' }`  —— 空文本，什么都不发
+ * - `{ ok:false, reason:'unsupported', error }` —— claude / codex 是一次性 CLI，**绝不偷偷新开**
+ * - `{ ok:false, reason:'no-conv' | 'no-subagents' }` —— 环境缺件
+ * 发送抛错 → `{ ok:false, error }`。
  */
-async function appendToRunningMember(member, text, callId) {
-  const entry = findRunningMember(member && (member.name || member.id), callId)
-  if (!entry) return { ok: false, reason: 'not-running', error: '没有正在跑的成员可并入' }
-  const steered = await steerRunningMember(entry.callId, text, entry.memberId)
-  if (!steered.ok) {
-    return {
-      ok: false,
-      reason: entry.kind === 'deepseek' ? 'failed' : 'unsupported',
-      error: steered.error,
-      memberName: entry.memberName,
-      callId: entry.callId,
-    }
+async function appendToRunningMember(member, text, options = {}) {
+  const body = String(text || '').trim()
+  if (!body) return { ok: false, reason: 'empty-text' }
+  const entry = options.entry || findRunningMember(options.sessionId, (member && (member.id || member.name)) || '')
+  if (!entry) return { ok: false, reason: 'not-running' }
+  const kind = String((member && member.kind) || entry.kind || '')
+  // 顺手把成员名/kind 递进登记表（findRunningMember 用得上），但不动已登记的 convId。
+  if (member && entry.name === undefined) entry.name = member.name
+  if (kind && kind !== 'deepseek') {
+    return { ok: false, reason: 'unsupported', error: '该成员（' + kind + '）是一次性 CLI，不支持追加消息' }
   }
-  return { ok: true, via: steered.via, memberName: entry.memberName, callId: entry.callId }
+  const convId = entry.convId
+  if (!convId) return { ok: false, reason: 'no-conv' }
+  const subagents = options.subagents || (options.ctx && typeof options.ctx.get === 'function' ? options.ctx.get('subagents') : null)
+  const parent = options.parent
+  if (!parent || !subagents || typeof subagents.sendMessage !== 'function') return { ok: false, reason: 'no-subagents' }
+  try {
+    await subagents.sendMessage(parent, String(convId), [{ type: 'text', text: body }], {})
+    return { ok: true, via: 'append', memberName: entry.name, convId: String(convId) }
+  } catch (error) {
+    return { ok: false, error: String((error && error.message) || error) }
+  }
+}
+
+/**
+ * 兜底复用：把一段话直接送进**正在跑**的成员子会话（convId），不新开腿、不重启。
+ * 成功 `{ ok:true, via:'running-member', memberName }`；找不到 / 没 convId / 发送失败 → `null`。
+ */
+async function tellRunningMember(ctx, sessionId, nameOrId, parent, text) {
+  const subagents = ctx && typeof ctx.get === 'function' ? ctx.get('subagents') : null
+  if (!parent || !subagents || typeof subagents.sendMessage !== 'function') return null
+  const entry = findRunningMember(sessionId, nameOrId)
+  if (!entry || !entry.convId) return null
+  if (String(entry.kind || '') && String(entry.kind) !== 'deepseek') {
+    return { ok: false, error: '该成员（' + entry.name + '）是一次性 CLI，不支持追加消息' }
+  }
+  try {
+    await subagents.sendMessage(parent, String(entry.convId), [{ type: 'text', text: String(text) }], {})
+    return { ok: true, via: 'running-member', memberName: entry.name }
+  } catch (error) {
+    return null
+  }
 }
 
 function progressStaleMs(config) {
@@ -2982,29 +3037,31 @@ function acceptanceBlockedLine(rounds) {
  */
 async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   if (callId && member && member.id) memberStopController(callId, member.id)
-  const runningKey = callId && member && member.id ? runningMemberKey(callId, member.id) : null
-  // 登记「正在跑的成员」：convId 由子会话建立后补写（deepseek 腿的 childSink.add），
-  // 用来回答 council_tell / council_delegate 的「这个成员还在跑吗」。
-  const runningEntry = runningKey
-    ? { callId: String(callId), memberId: String(member.id), memberName: member.name, kind: member.kind, convId: member.convId || null, promise: null, startedAt: Date.now() }
-    : null
+  // 登记「正在跑」的成员：插话时找不到 steerTargets 也能按 convId 直接续聊它。
+  // convId 只有子会话建好后才知道，从 childSink.add 回填（包一层，不挡原调用）。
+  const runningSession = sessionIdOf(parent)
+  const runningKey = member && member.id ? runningMemberKey(runningSession, member.id) : null
+  let runningEntry = null
   if (runningKey) {
+    runningEntry = { sessionId: runningSession, memberId: String(member.id), name: member.name, convId: member.convId || null, startedAt: Date.now() }
     runningMembers.set(runningKey, runningEntry)
-    if (childSink && typeof childSink.add === 'function') {
+    if (childSink && typeof childSink.add === 'function' && !childSink.__councilConvTap) {
       const addChild = childSink.add.bind(childSink)
-      childSink.add = (id) => { try { runningEntry.convId = String(id) } catch { /* ignore */ } return addChild(id) }
+      childSink.__councilConvTap = true
+      childSink.add = (id, ...rest) => {
+        try { if (!runningEntry.convId) runningEntry.convId = String(id) } catch { /* ignore */ }
+        return addChild(id, ...rest)
+      }
     }
   }
   try {
-    const promise = callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
-    if (runningEntry) runningEntry.promise = promise
-    return await promise
+    return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
   } catch (error) {
     finishMemberStage(callId, member, onStage, '失败（内部错误：' + (shortStageText(error?.message) || '未知错误') + '）')
     throw error
   } finally {
-    if (runningKey) runningMembers.delete(runningKey)
     if (callId && member && member.id) memberStops.delete(memberStopKey(callId, member.id))
+    if (runningKey && runningMembers.get(runningKey) === runningEntry) runningMembers.delete(runningKey)
   }
 }
 
@@ -3815,7 +3872,7 @@ export function createHandler(ctx, config = {}) {
               })
             }
             // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
-            return send(res, 200, { progress: out, residentChildren: residentChildren.size })
+            return send(res, 200, { progress: out, residentChildren: residentChildren.size, runningMembers: runningMembers.size })
           }
           if (req.method === 'GET' && route === '/jobs') {
             const jobs = [...backgroundJobs.values()].map((job) => ({
@@ -5758,18 +5815,28 @@ function bindAgent(ctx, config, group, agent) {
         const live = Array.from(progressMap.entries())
           .filter(([, entry]) => !entry.finishedAt && (!sessionId || normalizeSessionId(entry.sessionId) === sessionId))
         if (!live.length) return { ok: false, error: '当前没有正在运行的派活' }
-        const targetCallId = args.callId || live[live.length - 1][0]
-        // member 可以是成员名 / 成员 id：从进度条目里找出对应 slot
+        // 目标 callId：显式 > 按 member 名在**所有** live 条目里找 > 最近一条
+        let targetCallId = args.callId
         let memberKey
         if (args.member) {
           const wanted = String(args.member)
-          const entry = progressMap.get(targetCallId)
-          const slots = entry && entry.members ? entry.members : {}
-          for (const [id, slot] of Object.entries(slots)) {
-            if (id === '__stage__') continue
-            if (id === wanted || (slot && slot.name === wanted)) { memberKey = id; break }
+          for (const [id, entry] of live) {
+            const slots = entry.members || {}
+            for (const [mid, slot] of Object.entries(slots)) {
+              if (mid === '__stage__' || !slot) continue
+              if (mid === wanted || slot.name === wanted) { targetCallId = targetCallId || id; memberKey = mid; break }
+            }
+            if (memberKey) break
           }
           if (!memberKey) memberKey = wanted
+        }
+        targetCallId = targetCallId || live[live.length - 1][0]
+        // 规则：只有当该成员「正在跑且尚未交付」、且这次插话确实点名/指向它时，才复用它；
+        // 其余情况不算复用（新任务照旧新开）。
+        if (args.member && sessionId) {
+          const reused = await tellRunningMember(ctx, sessionId, String(args.member), exec && exec.agent, text)
+          if (reused && reused.ok) return toolResult(reused)
+          if (reused && reused.error) return toolResult(reused)
         }
         const result = await steerRunningMember(targetCallId, text, memberKey)
         return toolResult(result)

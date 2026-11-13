@@ -24,6 +24,13 @@ window.__ModuleLoader__.load({
     /** 与 Host 半 `ARCHIVED_KEEP_DAYS` 一致：只清理归档超过 7 天的小组。 */
     const ARCHIVED_KEEP_DAYS = 7
 
+    /**
+     * 子智能体目录清理路由（内层路径）：实际请求 = `POST /council/api/sessions/prune-children`。
+     * 与 Host 半 `index.js` 的 `PRUNE_CHILDREN_ROUTE` 逐字相同（测试会断言两半一致）。
+     * 只删「本会话名下、已结束、没在跑、也不属于任何成员会话」的子会话目录。
+     */
+    const SESSIONS_PRUNE_CHILDREN_PATH = '/sessions/prune-children'
+
     /** Both halves live in this module, so a tiny listener set keeps them in sync. */
     const councilListeners = new Set()
     function notifyCouncilChange() {
@@ -251,6 +258,8 @@ window.__ModuleLoader__.load({
       const [sessionPruneNote, setSessionPruneNote] = useState(null)
       const [archivedPrune, setArchivedPrune] = useState(null)
       const [archivedPruneNote, setArchivedPruneNote] = useState(null)
+      const [childrenPrune, setChildrenPrune] = useState(null)
+      const [childrenPruneNote, setChildrenPruneNote] = useState(null)
 
       const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
 
@@ -411,6 +420,31 @@ window.__ModuleLoader__.load({
             await refresh()
           }
         } catch (e) { setError(String(e.message || e)); setArchivedPrune(null) }
+        finally { setBusy(null) }
+      }
+
+      /**
+       * 清理本会话的子智能体目录（两次点击：先预览，再确认删除）。
+       * 路由已排除「驻留 / 正在跑 / 成员会话」的目录，这里只做展示。
+       */
+      async function pruneChildAgents() {
+        const sessionId = (group && group.sessionId) || null
+        if (!sessionId) { setError('当前小组没有绑定会话，无法清理子智能体'); return }
+        const preview = childrenPrune && (childrenPrune.removed || []).length
+        const dryRun = !preview
+        setBusy('children'); setError(null)
+        try {
+          const data = await call(SESSIONS_PRUNE_CHILDREN_PATH, { sessionId: sessionId, dryRun: dryRun })
+          const count = (data.removed || []).length
+          if (dryRun) {
+            setChildrenPrune(data)
+            setChildrenPruneNote(count ? ('可清理 ' + count + ' 个子智能体') : '没有可清理的子智能体')
+          } else {
+            setChildrenPrune(null)
+            setChildrenPruneNote('已清理 ' + count + ' 个，保留 ' + (data.kept ?? 0) + ' 个')
+            await refresh()
+          }
+        } catch (e) { setError(String(e.message || e)); setChildrenPrune(null) }
         finally { setBusy(null) }
       }
 
@@ -734,6 +768,22 @@ window.__ModuleLoader__.load({
             ? '确认清理 ' + archivedPrune.removed.length + ' 个组'
             : '重新检查归档组')),
         archivedPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, archivedPruneNote) : null,
+        // 子智能体目录清理：只删「已结束 + 没在跑 + 不属于任何成员会话」的子会话目录。
+        h('button', {
+          disabled: busy === 'children',
+          onClick: pruneChildAgents,
+          style: busy === 'children'
+            ? Object.assign({}, styles.linkButton, { cursor: 'default', opacity: 0.4 })
+            : styles.linkButton,
+          title: childrenPrune
+            ? '再点一次确认删除（共 ' + (childrenPrune.removed || []).length + ' 个）'
+            : '先预览：只清理本会话名下已结束、没在跑、也不属于任何成员的子智能体目录',
+        }, !childrenPrune
+          ? '清理子智能体'
+          : ((childrenPrune.removed || []).length
+            ? '确认清理 ' + childrenPrune.removed.length + ' 个'
+            : '重新检查子智能体')),
+        childrenPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, childrenPruneNote) : null,
         h('span', { style: styles.muted }, group.workspacePath || ''),
         h('span', { style: { flex: 1 } }),
         h('span', { style: styles.chip }, balanceLabel),

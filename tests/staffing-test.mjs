@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, reuseChildrenFor, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -74,7 +74,7 @@ export function __setProgressClock(fn) { progressClock = fn ? () => fn() : () =>
 const moduleFile = path.join(HOME, 'index.exposed.mjs')
 await writeFile(moduleFile, exposed)
 const mod = await import(pathToFileURL(moduleFile).href)
-const { STAFF_MODELS } = mod
+const { STAFF_MODELS, reuseChildrenFor } = mod
 
 const results = []
 async function check(name, fn) {
@@ -1764,8 +1764,6 @@ try {
       get: (name) => (name === 'subagents' ? fakeSubagents : name === 'agents' ? { get: () => undefined, list: () => [] } : undefined),
     }
     try {
-      // 复用现在**默认开**：显式 reuseAgents:false 才是「用完删目录」那一档
-      setState({ ...structuredClone(fixture), config: { reuseAgents: false } })
       const out = await mod.runDeepseekViaSeam(
         fakeCtx,
         { id: 'm_child', name: '深寻', kind: 'deepseek', convId: memberConv },
@@ -4121,31 +4119,98 @@ try {
     return '重复 bind 两次不抛错 · 旧 disposer 被正确清理'
   })
 
-  /* ── 子会话复用默认开（reuseChildrenFor） ───────────────────────────── */
-  await check('reuseChildrenFor：reuseAgents 未设 → 默认复用（true）', async () => {
-    const saved = mod.state
-    try {
-      mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { reuseAgents: undefined }) }))
-      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, {}), true, '未设时应默认复用')
-      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, { reuseAgents: undefined }), true, 'config 未设也应默认复用')
-      return 'reuseAgents 未设 → true'
-    } finally {
-      mod.__setState(saved)
-    }
+  /* ── 子会话复用默认开（reuseChildrenFor） ── */
+  await check('reuseChildrenFor：reuseAgents 未设 → 默认不复用（false，符合“只有插话才复用”）', async () => {
+    setState(structuredClone(fixture))
+    assert.equal(reuseChildrenFor({ id: 'm1' }, {}), false)
+    return 'reuseAgents 未设 → false'
   })
 
   await check('reuseChildrenFor：reuseAgents:false → 不复用（false）', async () => {
-    const saved = mod.state
-    try {
-      mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { reuseAgents: false }) }))
-      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, {}), false, '显式 false 时不应复用')
-      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, { reuseAgents: false }), false, 'config 显式 false 时不应复用')
-      // `member.__reuse` 的强制语义保留：显式关掉时仍按它走
-      assert.equal(mod.reuseChildrenFor({ id: 'm_force', __reuse: true }, {}), true, '__reuse 仍可强制复用')
-      return 'reuseAgents:false → false（__reuse 仍可强制）'
-    } finally {
-      mod.__setState(saved)
+    setState(structuredClone(fixture))
+    assert.equal(reuseChildrenFor({ id: 'm1' }, { reuseAgents: false }), false)
+    return 'reuseAgents:false → false'
+  })
+
+  /* ── 运行中成员注册表 + 追加消息（council_tell 复用） ───────────────── */
+  await check('runningMembers：注册/查找/卸载（同一成员按最新 startedAt 命中）', async () => {
+    mod.__setRunningMembers([])
+    assert.equal(mod.runningMembers.size, 0, '空注册表')
+    mod.__setRunningMembers([
+      { sessionId: 'sess-1', memberId: 'm1', name: '代码', kind: 'deepseek', convId: 'conv-old', startedAt: 1000 },
+      { sessionId: 'sess-1', memberId: 'm1', name: '代码', kind: 'deepseek', convId: 'conv-new', startedAt: 2000 },
+      { sessionId: 'sess-1', memberId: 'm2', name: '文档', kind: 'deepseek', convId: 'conv-2', startedAt: 1500 },
+    ])
+    assert.equal(mod.runningMembers.size, 2, '同 key 后写覆盖（按 sessionId\0memberId）')
+    assert.equal(mod.runningMemberKey('sess-1', 'm1'), 'sess-1\u0000m1')
+    const hit = mod.findRunningMember('sess-1', { id: 'm1', name: '代码' })
+    assert.ok(hit, '应命中')
+    assert.equal(hit.convId, 'conv-new', '应是新的那条')
+    assert.equal(mod.findRunningMember('sess-1', { id: 'm2' }).convId, 'conv-2', '按 id 命中')
+    assert.equal(mod.findRunningMember('sess-2', { id: 'm1' }), null, '别的会话不命中')
+    assert.equal(mod.findRunningMember('sess-1', { id: 'zzz', name: '没人' }), null, '没在跑 → null')
+    mod.__setRunningMembers([])
+    return '注册 3 条 → 2 条（同 key 覆盖）· 跨会话不串 · 未命中返回 null'
+  })
+
+  await check('appendToRunningMember：deepseek 走 subagents.sendMessage，cli 腿明确 unsupported', async () => {
+    const sent = []
+    const subagents = { async sendMessage(parent, convId, content, options) { sent.push({ parent, convId, content, options }); return { ok: true } } }
+    const parent = { id: 'session-p' }
+    mod.__setRunningMembers([{ sessionId: 'session-p', memberId: 'm1', name: '代码', kind: 'deepseek', convId: 'conv-1' }])
+    const member = { id: 'm1', name: '代码', kind: 'deepseek' }
+    const okRes = await mod.appendToRunningMember(member, '  补一句话 ', { ctx: {}, sessionId: 'session-p', entry: null, parent, subagents })
+    assert.equal(okRes.ok, true, '应成功：' + JSON.stringify(okRes))
+    assert.equal(okRes.via, 'append')
+    assert.equal(sent.length, 1, '应恰好追加一次，且不新开子代理')
+    assert.equal(sent[0].convId, 'conv-1')
+    assert.equal(sent[0].parent, parent)
+    assert.equal(sent[0].content[0].type, 'text')
+    assert.equal(sent[0].content[0].text, '补一句话', '应 trim')
+    // 空文本不追加
+    const empty = await mod.appendToRunningMember(member, '   ', { ctx: {}, sessionId: 'session-p', parent, subagents })
+    assert.equal(empty.ok, false)
+    assert.equal(empty.reason, 'empty-text')
+    assert.equal(sent.length, 1, '空文本不应发消息')
+    // claude / codex 是一次性 CLI → 明确 unsupported，绝不偷偷新开
+    for (const kind of ['claude', 'codex']) {
+      const cliMember = { id: 'm1', name: '代码', kind }
+      const cli = await mod.appendToRunningMember(cliMember, '你好', { ctx: {}, sessionId: 'session-p', parent, subagents })
+      assert.equal(cli.ok, false, kind + ' 不应成功')
+      assert.equal(cli.reason, 'unsupported', kind + ' 应返回 unsupported')
     }
+    assert.equal(sent.length, 1, 'cli 腿不应发任何消息')
+    mod.__setRunningMembers([])
+    return 'deepseek → sendMessage(1 条 text，trim 后) · 空文本拦下 · claude/codex → unsupported 且零发送'
+  })
+
+  await check('council_tell：成员在跑 → 追加到运行中的成员（不新派活）', async () => {
+    const sent = []
+    const subagents = { async sendMessage(parent, convId, content) { sent.push({ convId, text: content[0].text }); return { ok: true } } }
+    const parent = { id: 'session-tell' }
+    mod.__setRunningMembers([{ sessionId: 'session-tell', memberId: 'm-tell', name: '测试员', kind: 'deepseek', convId: 'conv-tell' }])
+    mod.__resetProgress()
+    const ctx = { get: (name) => (name === 'subagents' ? subagents : undefined) }
+    const res = await mod.tellRunningMember(ctx, 'session-tell', '测试员', parent, '再检查一遍测试')
+    assert.ok(res, '应命中运行中成员')
+    assert.equal(res.ok, true, JSON.stringify(res))
+    assert.equal(res.via, 'running-member')
+    assert.equal(sent.length, 1, '应发一条追加消息')
+    assert.equal(sent[0].convId, 'conv-tell')
+    assert.equal(sent[0].text, '再检查一遍测试')
+    // 没在跑 → null（调用方回落到原「新派活」路径）
+    mod.__setRunningMembers([])
+    const miss = await mod.tellRunningMember(ctx, 'session-tell', '测试员', parent, '再来一次')
+    assert.equal(miss, null, '未运行时应返回 null')
+    assert.equal(sent.length, 1, '未运行时不应发消息')
+    // cli 腿在跑 → 给出明确错误，而不是假装成功
+    mod.__setRunningMembers([{ sessionId: 'session-tell', memberId: 'm-cli', name: '审阅', kind: 'claude', convId: 'conv-cli' }])
+    const cli = await mod.tellRunningMember(ctx, 'session-tell', '审阅', parent, '再看一眼')
+    assert.ok(cli && cli.ok === false, 'cli 腿应失败')
+    assert.match(String(cli.error || ''), /不支持追加消息/, '应说明是一次性 CLI')
+    assert.equal(sent.length, 1, 'cli 腿不应发消息')
+    mod.__setRunningMembers([])
+    return '在跑 → 命中并发 1 条追加 · 没在跑 → null（回落新派活）· cli 腿 → 明确报错'
   })
 
   /* ── 后台派活完成 → 主动唤醒主会话 ─────────────────────────────────── */
