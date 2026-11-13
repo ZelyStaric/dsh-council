@@ -136,7 +136,8 @@ const PROGRESS_CASES = [
 ]
 for (const [label, entry, need, forbid] of PROGRESS_CASES) {
   try {
-    const result = renderOne('council-progress', payload.state, [entry, NOW, false, false])
+    // entries 是数组：单条场景包一层；多行并行场景下面单独测
+    const result = renderOne('council-progress', payload.state, [Array.isArray(entry) ? entry : [entry], NOW, false, false])
     if (result.error) throw result.error
     const text = result.text
     const missing = need.filter((m) => !text.includes(m))
@@ -148,6 +149,40 @@ for (const [label, entry, need, forbid] of PROGRESS_CASES) {
     failed++
     console.log('FAIL progress/' + label + ': ' + (error && error.message))
   }
+}
+
+// Bug 5 回归：并行的多次 delegate 必须**全部**显示（老代码只渲染 list[最后一条]，
+// 实测 3 条只看到 1 条）。这里用两条进行中条目（不同 callId、同 sessionId）验证：
+// ① 两行「小组」；② 成员芯片带任务摘要（「正在做什么」）；③ 每行都有「停止」。
+try {
+  const entryA = {
+    callId: 'call-a', sessionId: 'session-test-bound', startedAt: NOW - 30_000,
+    members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 26_000, task: '重构进度条渲染，支持并行多条条目' } },
+  }
+  const entryB = {
+    callId: 'call-b', sessionId: 'session-test-bound', startedAt: NOW - 12_000,
+    members: { m2: { name: '画师', kind: 'image', stage: '出图中', at: NOW - 9_000, task: '给新角色画一张立绘' } },
+  }
+  const result = renderOne('council-progress', payload.state, [[entryA, entryB], NOW, false, false])
+  if (result.error) throw result.error
+  const text = result.text
+  const rows = (text.match(/小组/g) || []).length
+  if (rows !== 2) throw new Error('应当 2 行「小组」，实际 ' + rows + ' 行（' + text + '）')
+  const need = ['代码 · 执行中', '画师 · 出图中', '重构进度条渲染，支持并行多条条目', '给新角色画一张立绘', '停止']
+  const missing = need.filter((m) => !text.includes(m))
+  if (missing.length) throw new Error('缺 ' + missing.join(' / ') + '（实际：' + text + '）')
+  // 摘要超过 24 字要截断加 …（服务端 60 字、前端只显示前 24 字）
+  const longTask = '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十'
+  const truncated = renderOne('council-progress', payload.state, [[
+    { callId: 'call-c', startedAt: NOW - 3_000, members: { m3: { name: '3D建模', stage: '建模中', task: longTask } } },
+  ], NOW, false, false])
+  if (truncated.error) throw truncated.error
+  if (!truncated.text.includes(longTask.slice(0, 24) + '…')) throw new Error('长任务摘要应截到 24 字 + …（实际：' + truncated.text + '）')
+  if (truncated.text.includes(longTask.slice(0, 25))) throw new Error('长任务摘要超过 24 字未截断（实际：' + truncated.text + '）')
+  console.log('ok   progress/parallel-two-entries: 2 行 · 任务摘要可见 · 停止按钮在 · ' + text)
+} catch (error) {
+  failed++
+  console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
 }
 
 // Bug 4 回归：客户端双保险过滤 - 不同 sessionId 的 entry 不渲染
