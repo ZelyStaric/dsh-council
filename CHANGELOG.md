@@ -2,6 +2,23 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.63] - 2026-11-13
+
+### 修复
+
+- **点「停止」不再静默失效**：0.2.62 把 `progressRow` 提到模块级后，行内 `setRowStopped` 仍去写
+  `setEntries`，而它只存在于 `CouncilProgress` 作用域 —— 点停止会抛
+  `ReferenceError: setEntries is not defined` 且被 `catch` 吞掉，**按钮看着在、点了没反应**
+  （截图/文案断言都发现不了，只有真点才暴露）。现在由 `CouncilProgress` 用闭包造
+  `setRowStopped(target)` 作为第 4 个参数传进去，只给被点的那一行置灰。
+
+### 测试
+
+- `tests/render-smoke.mjs` 新增 `progress/stop-click`：**真的调用**「停止」节点的 `onClick`，
+  断言不抛错、且只有被点的那一行带上 `stoppedAt`。已回退到 0.2.62 验证过该断言会
+  `FAIL … setEntries is not defined`（不是摆设）。
+- 冒烟桩的 `useState` 改为**真 setter**（原来一律 no-op，所以作用域类 bug 抓不到）。
+
 ## [0.2.62] - 2026-11-13
 
 ### 修复

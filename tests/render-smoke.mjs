@@ -185,6 +185,31 @@ try {
   console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
 }
 
+// 点「停止」真的能跑通：progressRow 是模块级函数，看不见 CouncilProgress 里的 setEntries——
+// 曾因此点停止直接 ReferenceError setEntries is not defined（只读文案的断言发现不了）。
+try {
+  const entry = { callId: 'call-stop', sessionId: 'session-test-bound', startedAt: NOW - 5_000,
+    members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 4_000, task: '点一下停止' } } }
+  const rendered = renderOne('council-progress', payload.state, [[entry, { callId: 'call-stop2', sessionId: 'session-test-bound', startedAt: NOW - 3_000, members: {} }], NOW, false, false])
+  if (rendered.error) throw rendered.error
+  const findStop = (node) => {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) { for (const child of node) { const hit = findStop(child); if (hit) return hit } return null }
+    if (node.props && typeof node.props.onClick === 'function' && Array.isArray(node.children) && node.children[0] === '停止') return node
+    for (const child of (node.children || [])) { const hit = findStop(child); if (hit) return hit }
+    return null
+  }
+  const stopNode = findStop(rendered.node)
+  if (!stopNode) throw new Error('两行里找不到「停止」按钮')
+  await stopNode.props.onClick()
+  const marked = (rendered.state[0] || []).filter((e) => e.stoppedAt)
+  if (marked.length !== 1) throw new Error('点停止后应只有被点的那一行置灰，实际 ' + marked.length + ' 行')
+  console.log('ok   progress/stop-click: 点「停止」不抛 ReferenceError · 仅该行置灰（' + marked[0].callId + '）')
+} catch (error) {
+  failed++
+  console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
+}
+
 // Bug 4 回归：客户端双保险过滤 - 不同 sessionId 的 entry 不渲染
 // 模拟客户端过滤逻辑（useEffect 中的过滤）
 try {
@@ -332,9 +357,16 @@ function renderOne(id, state, seedOverride) {
     const window = { __ModuleLoader__: { load: (mod) => { captured = mod } } }
     const seed = seedOverride || (SEEDS[id] || (() => [state]))(state)
     let index = 0
+    // 真 setter：让 onClick 里调 setEntries 也走通（桩成 no-op 就抓不到作用域类 bug，见 progress/stop-click）
+    const tree = []
     const React = {
       createElement: (type, props, ...children) => ({ type, props, children }),
-      useState: (initial) => [index < seed.length ? seed[index++] : initial, () => {}],
+      useState: (initial) => {
+        const hook = index++
+        if (!(hook in tree)) tree[hook] = hook < seed.length ? seed[hook] : initial
+        const set = (next) => { tree[hook] = typeof next === 'function' ? next(tree[hook]) : next }
+        return [tree[hook], set]
+      },
       useEffect: () => {},
       useCallback: (fn) => fn,
       useRef: (value) => ({ current: value }),
@@ -360,7 +392,8 @@ function renderOne(id, state, seedOverride) {
     // 绑定会话 = 第一个未归档、且有 sessionId 的组；没有就退回第一个组的 sessionId（模拟「重新打开归档会话」）
     const boundId = (boundGroupOf(state) || {}).sessionId || (((state.groups || [])[0]) || {}).sessionId || 's1'
     const props = id === 'council-card' ? CARD_PROPS : { sessionId: boundId }
-    return { text: walk(target.comp(props)) }
+    const rendered = target.comp(props)
+    return { text: walk(rendered), node: rendered, state: tree }
   } catch (error) {
     return { error }
   }
