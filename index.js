@@ -510,6 +510,16 @@ function memberIdleMs(config) {
 }
 
 /**
+ * 子会话复用开关（默认 **开**）：只有页面/配置里**显式** `reuseAgents: false` 才关
+ * （`false` 之外的假值，如 `undefined`/`0`/`''`，一律视为默认开）。
+ * `member.__reuse` 是强制语义——仅当显式关闭时才按它回落到原行为。
+ */
+function reuseChildrenFor(member, config) {
+  const explicitOff = (state.config && state.config.reuseAgents) === false || (config && config.reuseAgents) === false
+  return explicitOff ? Boolean(member && member.__reuse) : true
+}
+
+/**
  * 成员单次调用硬上限（分钟）：默认 60 分钟，**0 = 完全不限制**。
  * 非数字/负数一律回落默认值（别让一个拼错的配置变成「立刻杀」）。
  */
@@ -721,6 +731,49 @@ async function steerRunningMember(callId, text, memberId) {
   } catch (error) {
     return { ok: false, error: String(error && error.message || error) }
   }
+}
+
+/**
+ * 正在跑的成员登记：callId+memberId -> { convId, memberName, kind, promise, startedAt }。
+ * `steerTargets` 只管「往已有会话里塞一句话」；这里额外回答「这个成员还在跑吗、它的子会话是哪个」，
+ * 供 council_tell / council_delegate 复用同一条腿（而不是新开一个子会话）。
+ */
+const runningMembers = new Map()
+
+function runningMemberKey(callId, memberId) {
+  return String(callId) + '\u0000' + String(memberId)
+}
+
+/** 按成员名/id 找一个正在跑的成员（不传 callId 时取最近启动的那个）。 */
+function findRunningMember(nameOrId, callId) {
+  const wanted = String(nameOrId || '')
+  let best = null
+  for (const entry of runningMembers.values()) {
+    if (callId && String(entry.callId) !== String(callId)) continue
+    if (wanted && String(entry.memberName) !== wanted && String(entry.memberId) !== wanted) continue
+    if (!best || entry.startedAt > best.startedAt) best = entry
+  }
+  return best
+}
+
+/**
+ * 把一段话插进正在跑的成员（复用，不新开子会话）。
+ * 走现有插话通道：deepseek 腿 = seam 的 sendMessage；claude / codex 腿是一次性的 → unsupported。
+ */
+async function appendToRunningMember(member, text, callId) {
+  const entry = findRunningMember(member && (member.name || member.id), callId)
+  if (!entry) return { ok: false, reason: 'not-running', error: '没有正在跑的成员可并入' }
+  const steered = await steerRunningMember(entry.callId, text, entry.memberId)
+  if (!steered.ok) {
+    return {
+      ok: false,
+      reason: entry.kind === 'deepseek' ? 'failed' : 'unsupported',
+      error: steered.error,
+      memberName: entry.memberName,
+      callId: entry.callId,
+    }
+  }
+  return { ok: true, via: steered.via, memberName: entry.memberName, callId: entry.callId }
 }
 
 function progressStaleMs(config) {
@@ -1794,14 +1847,15 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   if (!subagents.getProvider('spawn')) {
     return { ok: false, text: '', error: 'spawn subagent provider is not registered', usage: null }
   }
-  const reuseEnabled = Boolean((state.config && state.config.reuseAgents) || (config && config.reuseAgents) || member.__reuse)
+  const reuseEnabled = reuseChildrenFor(member, config)
   const reviewSlot = presetId === 'minimal'
   // 审核位（`__noResume`）一律全新子会话：不复用历史审核会话，也不续接成员自己的会话。
   if (!member.__noResume && reviewSlot && reuseEnabled && member.__reviewConvId) {
     member.convId = member.__reviewConvId
   }
   // `__continue`：截断续跑时即使没开 reuseAgents，也要接着同一个子会话跑（保住上下文）
-  if ((reuseEnabled || member.__continue) && member.convId) {
+  // `__noResume`（审核位）：**任何情况下都不续接**——复用默认开后不能再靠 reuseEnabled=false 兜底。
+  if (!member.__noResume && (reuseEnabled || member.__continue) && member.convId) {
     // 复用/续跑用的是既有子会话：它可能被 sendMessage 冷恢复，或清扫后又被复活，
     // 登记表里未必有它 → 补登记（不清零已有创建时间），否则它会变成清扫器看不见的孤儿驻留。
     if (reuseEnabled && !residentChildren.has(String(member.convId))) {
@@ -2928,12 +2982,28 @@ function acceptanceBlockedLine(rounds) {
  */
 async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
   if (callId && member && member.id) memberStopController(callId, member.id)
+  const runningKey = callId && member && member.id ? runningMemberKey(callId, member.id) : null
+  // 登记「正在跑的成员」：convId 由子会话建立后补写（deepseek 腿的 childSink.add），
+  // 用来回答 council_tell / council_delegate 的「这个成员还在跑吗」。
+  const runningEntry = runningKey
+    ? { callId: String(callId), memberId: String(member.id), memberName: member.name, kind: member.kind, convId: member.convId || null, promise: null, startedAt: Date.now() }
+    : null
+  if (runningKey) {
+    runningMembers.set(runningKey, runningEntry)
+    if (childSink && typeof childSink.add === 'function') {
+      const addChild = childSink.add.bind(childSink)
+      childSink.add = (id) => { try { runningEntry.convId = String(id) } catch { /* ignore */ } return addChild(id) }
+    }
+  }
   try {
-    return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
+    const promise = callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
+    if (runningEntry) runningEntry.promise = promise
+    return await promise
   } catch (error) {
     finishMemberStage(callId, member, onStage, '失败（内部错误：' + (shortStageText(error?.message) || '未知错误') + '）')
     throw error
   } finally {
+    if (runningKey) runningMembers.delete(runningKey)
     if (callId && member && member.id) memberStops.delete(memberStopKey(callId, member.id))
   }
 }

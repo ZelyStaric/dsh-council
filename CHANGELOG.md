@@ -2,6 +2,22 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.64] - 2026-11-13
+
+### 变更
+
+- **子会话复用默认开**：`runDeepseekViaSeam` 里的复用开关原来只有页面显式勾上 `reuseAgents` 才生效
+  （默认每次派活都开新子会话、用完删目录）。现在抽成 `reuseChildrenFor(member, config)`：
+  **只有显式 `reuseAgents: false` 才关**，未设一律按开——同一成员跨轮派活接着同一个子会话跑，保住上下文。
+  `member.__reuse` 的强制语义保留（显式关掉时仍按它走）。
+- 审核位（`__noResume`）**不再靠 `reuseEnabled === false` 兜底**：复用默认开后，`__reviewConvId`
+  恢复与续接两处都显式加了 `!member.__noResume`，审核位任何情况下都开新会话。
+
+### 测试
+
+- `tests/staffing-test.mjs` 新增 2 条 `reuseChildrenFor` 断言（未设 → true；显式 `false` → false，
+  且 `__reuse` 仍可强制），并把原有 dispose 用例改为显式 `reuseAgents: false` 才验「用完删目录」。
+
 ## [0.2.63] - 2026-11-13
 
 ### 修复

@@ -60,7 +60,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, reuseChildrenFor, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -1764,6 +1764,8 @@ try {
       get: (name) => (name === 'subagents' ? fakeSubagents : name === 'agents' ? { get: () => undefined, list: () => [] } : undefined),
     }
     try {
+      // 复用现在**默认开**：显式 reuseAgents:false 才是「用完删目录」那一档
+      setState({ ...structuredClone(fixture), config: { reuseAgents: false } })
       const out = await mod.runDeepseekViaSeam(
         fakeCtx,
         { id: 'm_child', name: '深寻', kind: 'deepseek', convId: memberConv },
@@ -4117,6 +4119,33 @@ try {
     assert.ok(tool, 'council_delegate 工具应该存在')
 
     return '重复 bind 两次不抛错 · 旧 disposer 被正确清理'
+  })
+
+  /* ── 子会话复用默认开（reuseChildrenFor） ───────────────────────────── */
+  await check('reuseChildrenFor：reuseAgents 未设 → 默认复用（true）', async () => {
+    const saved = mod.state
+    try {
+      mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { reuseAgents: undefined }) }))
+      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, {}), true, '未设时应默认复用')
+      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, { reuseAgents: undefined }), true, 'config 未设也应默认复用')
+      return 'reuseAgents 未设 → true'
+    } finally {
+      mod.__setState(saved)
+    }
+  })
+
+  await check('reuseChildrenFor：reuseAgents:false → 不复用（false）', async () => {
+    const saved = mod.state
+    try {
+      mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { reuseAgents: false }) }))
+      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, {}), false, '显式 false 时不应复用')
+      assert.equal(mod.reuseChildrenFor({ id: 'm_noreuse' }, { reuseAgents: false }), false, 'config 显式 false 时不应复用')
+      // `member.__reuse` 的强制语义保留：显式关掉时仍按它走
+      assert.equal(mod.reuseChildrenFor({ id: 'm_force', __reuse: true }, {}), true, '__reuse 仍可强制复用')
+      return 'reuseAgents:false → false（__reuse 仍可强制）'
+    } finally {
+      mod.__setState(saved)
+    }
   })
 
   /* ── 后台派活完成 → 主动唤醒主会话 ─────────────────────────────────── */
