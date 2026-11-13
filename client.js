@@ -1548,17 +1548,19 @@ window.__ModuleLoader__.load({
       if (!entries.length) return jumpChip ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip) : null
 
       // 每条进行中的派活一行（并行的多次 delegate 各占一行），互相独立
-      const rows = entries.map((entry, idx) => progressRow(entry, now, idx))
+      // setRowStopped 必须在 CouncilProgress 作用域里建（闭包到 setEntries）再传给行，
+      // 否则 progressRow 是模块级函数、看不到 setEntries → 点「停止」直接 ReferenceError。
+      const setRowStopped = (target) => (value) => {
+        setEntries((prev) => prev.map((e) => (e === target ? Object.assign({}, e, { stoppedAt: value }) : e)))
+      }
+      const rows = entries.map((entry, idx) => progressRow(entry, now, idx, setRowStopped(entry)))
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, rows, jumpChip
         ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '0 8px 6px' } }, jumpChip)
         : null)
     }
 
     /** 一条进度行：小组 + 秒数 + 成员芯片（带任务摘要）+ 停止。 */
-    function progressRow(entry, now, rowIndex) {
-      const setRowStopped = (value) => {
-        setEntries((prev) => prev.map((e) => (e === entry ? Object.assign({}, e, { stoppedAt: value }) : e)))
-      }
+    function progressRow(entry, now, rowIndex, setRowStopped) {
       const stageEntry = entry.members ? entry.members.__stage__ : null
       const members = Object.keys(entry.members || {}).filter((id) => id !== '__stage__').map((id) => entry.members[id])
       const total = entry.startedAt ? Math.round((now - entry.startedAt) / 1000) : null
