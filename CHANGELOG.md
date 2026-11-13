@@ -2,6 +2,12 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.61] - 2026-11-13
+
+### 修复
+
+- **后台派活回执不再截断**：`notifyParentJobDone()` 里 `body.slice(0, 8000)` 已去掉，完整回执原样推进主会话（其余逻辑不变：`job.notified` 去重、followup→steer 回退、仅后台模式推；`REVIEW_TEXT_HARD_CAP` 只作用于审校文本，未动）。
+
 ## [0.2.60] - 2026-11-13
 
 ### 修复

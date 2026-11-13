@@ -606,7 +606,7 @@ function notifyParentJobDone(ctx, job) {
     } catch (error) {
       body = String(job.error || (error && error.message) || '（回执渲染失败）')
     }
-    body = String(body || '').slice(0, 8000)
+    body = String(body || '')
     const text = '[后台派活完成] runId=' + String(job.runId || '') + ' · 状态=' + String(job.status || 'done') + ' · 用时=' + seconds + 's\n'
       + body
       + '\n\n—— 以上是本轮后台派活的回执。请据此向用户汇报结果（验收未通过就如实说未通过，不能当交付）。'
