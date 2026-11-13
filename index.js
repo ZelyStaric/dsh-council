@@ -566,6 +566,120 @@ function backgroundDelegations() {
   return raw === undefined || raw === null ? false : Boolean(raw)
 }
 
+/**
+ * 后台任务跑完后主动唤醒主会话（把回执作为一条 user 消息推进去）。
+ *
+ * 背景：backgroundDelegations=true 时 council_delegate 立刻返回 runId，成员跑完只写进
+ * backgroundJobs，没有任何推送 → 主会话一直闲着，用户看不到回执。这里补上推送。
+ *
+ * - 每个 job 只推一次（job.notified）；council_collect 取走结果时也会标记 notified。
+ * - 只推「后台模式」的 job：job.background !== false 且 backgroundDelegations() 为真。
+ * - 全部 try/catch 包住：推送失败绝不能影响主流程（成员结果已经存进 job 了）。
+ * - 发送优先级：agent.followup(msg) → agent.steer(msg) → 记错误日志。
+ */
+function notifyParentJobDone(ctx, job) {
+  try {
+    if (!job || job.notified) return false
+    if (job.background === false) return false
+    if (!backgroundDelegations()) return false
+    job.notified = true
+    const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    let agent
+    try {
+      if (agents && typeof agents.get === 'function' && job.sessionId) agent = agents.get(job.sessionId)
+      if (!agent && agents && typeof agents.list === 'function' && job.sessionId) {
+        const all = agents.list()
+        agent = (Array.isArray(all) ? all : []).find((a) => a && a.id === job.sessionId)
+      }
+    } catch {
+      agent = undefined
+    }
+    if (!agent) {
+      console.error('[council] background job done: parent agent not found (' + String(job.sessionId || '') + ')')
+      return false
+    }
+    const elapsed = Number(job.finishedAt || Date.now()) - Number(job.startedAt || job.finishedAt || Date.now())
+    const seconds = Math.max(0, Math.round((Number.isFinite(elapsed) ? elapsed : 0) / 1000))
+    let body = ''
+    try {
+      body = job.response ? delegateReceiptText(job.response) : String(job.error || '（没有回执）')
+    } catch (error) {
+      body = String(job.error || (error && error.message) || '（回执渲染失败）')
+    }
+    body = String(body || '').slice(0, 8000)
+    const text = '[后台派活完成] runId=' + String(job.runId || '') + ' · 状态=' + String(job.status || 'done') + ' · 用时=' + seconds + 's\n'
+      + body
+      + '\n\n—— 以上是本轮后台派活的回执。请据此向用户汇报结果（验收未通过就如实说未通过，不能当交付）。'
+    const msg = {
+      id: 'msg_' + randomUUID().replace(/-/g, ''),
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text }],
+    }
+    if (typeof agent.followup === 'function') {
+      agent.followup(msg)
+      return true
+    }
+    if (typeof agent.steer === 'function') {
+      agent.steer(msg)
+      return true
+    }
+    console.error('[council] background job done: no agent API')
+    return false
+  } catch (error) {
+    try { console.error('[council] background job notify failed:', String(error?.message ?? error)) } catch {}
+    return false
+  }
+}
+
+/** 把 council_delegate 的返回对象渲染成回执文本（render 与“验收硬失败”错误消息共用）。 */
+function delegateReceiptText(value) {
+  const input = value || {}
+  const verdict = (v) => (v ? (v.ok === true ? '通过' : v.ok === false ? '不通过' : '未判定') + (v.reason ? '（' + v.reason + '）' : '') : '无')
+  const summary = summarizeAcceptance(input.members || [])
+  const acceptanceStatus = ACCEPTANCE_STATUSES.includes(input.acceptanceStatus) ? input.acceptanceStatus : summary.acceptanceStatus
+  const acceptanceNote = String(input.acceptanceNote || summary.acceptanceNote || '')
+  const notAccepted = ACCEPTANCE_BLOCKED.has(acceptanceStatus)
+  const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
+  const body = (input.members || []).map((m) => {
+    const link = m.image ? '\n[image] ' + m.image : ''
+    const error = m.error ? '\n失败：' + m.error : ''
+    const text = String(m.text || '').trim()
+    const reviews = [m.review ? '审校：' + verdict(m.review) : '', m.commanderVerdict ? '指挥审核：' + verdict(m.commanderVerdict) : ''].filter(Boolean).join(' · ')
+    const acceptance = m.acceptance ? '\n验收：' + acceptanceStatusOfMember(m) : ''
+    return '## ' + m.name + '（' + m.kind + (m.provider ? ' / ' + m.provider : '') + (m.model ? ' / ' + m.model : '') + '）\n' + (text || error || '（无产出）') + link + (reviews ? '\n' + reviews : '') + acceptance
+  }).join('\n\n')
+  const acceptanceSection = notAccepted
+    ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
+      + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
+    : ''
+  // 补员 / 回收 / 子会话 / 越权拦截 / 越权审计 / 子进程回收（与原 render 一致）
+  const staffing = (input.staffingCreated || []).length
+    ? '\n\n## 补员\n' + input.staffingCreated.map((line) => '- ' + line).join('\n')
+    : ''
+  const pruned = (input.pruned || []).length
+    ? '\n\n## 回收\n已回收：' + input.pruned.map((m) => m.name + '（临时）').join('、')
+    : ''
+  const prunedSessions = Number(input.prunedSessions) > 0
+    ? '\n\n## 子会话\n已清理 ' + input.prunedSessions + ' 个子会话目录'
+    : ''
+  const blockedDetail = String(input.selfWorkBlockedDetail || '')
+  const blocked = Number(input.selfWorkBlocked) > 0
+    ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + input.selfWorkBlocked + ' 次写操作，已拦截' + (blockedDetail ? '（' + blockedDetail + '）' : '')
+    : ''
+  const selfRan = input.selfRan || {}
+  const selfRanTotal = (Number(selfRan.bash) || 0) + (Number(selfRan.readImage) || 0) + (Number(selfRan.read) || 0)
+  const selfRanSection = selfRanTotal > 0
+    ? '\n\n## 越权审计\n- 父会话本次自行执行：bash×' + (Number(selfRan.bash) || 0) + '、read_image×' + (Number(selfRan.readImage) || 0) + '、read×' + (Number(selfRan.read) || 0)
+      + '\n- 提示：这些应在小组内派给成员；如必要请说明理由'
+    : ''
+  const swept = Number(input.sweptChildren) > 0
+    ? '\n\n## 子进程回收\n- 已释放 ' + input.sweptChildren + ' 个驻留子代理'
+    : ''
+  const planLine = input.plan && input.plan.confirmation ? '**指挥确认**：' + String(input.plan.confirmation) : ''
+  return head + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
+}
+
 /** 取出当前会话最近一个后台任务。 */
 function latestBackgroundJob(sessionId) {
   let best = null
@@ -5077,54 +5191,6 @@ function bindAgent(ctx, config, group, agent) {
       order: 1500,
       text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
     }))
-/** 把 council_delegate 的返回对象渲染成回执文本（render 与“验收硬失败”错误消息共用）。 */
-function delegateReceiptText(value) {
-  const input = value || {}
-  const verdict = (v) => (v ? (v.ok === true ? '通过' : v.ok === false ? '不通过' : '未判定') + (v.reason ? '（' + v.reason + '）' : '') : '无')
-  const summary = summarizeAcceptance(input.members || [])
-  const acceptanceStatus = ACCEPTANCE_STATUSES.includes(input.acceptanceStatus) ? input.acceptanceStatus : summary.acceptanceStatus
-  const acceptanceNote = String(input.acceptanceNote || summary.acceptanceNote || '')
-  const notAccepted = ACCEPTANCE_BLOCKED.has(acceptanceStatus)
-  const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
-  const body = (input.members || []).map((m) => {
-    const link = m.image ? '\n[image] ' + m.image : ''
-    const error = m.error ? '\n失败：' + m.error : ''
-    const text = String(m.text || '').trim()
-    const reviews = [m.review ? '审校：' + verdict(m.review) : '', m.commanderVerdict ? '指挥审核：' + verdict(m.commanderVerdict) : ''].filter(Boolean).join(' · ')
-    const acceptance = m.acceptance ? '\n验收：' + acceptanceStatusOfMember(m) : ''
-    return '## ' + m.name + '（' + m.kind + (m.provider ? ' / ' + m.provider : '') + (m.model ? ' / ' + m.model : '') + '）\n' + (text || error || '（无产出）') + link + (reviews ? '\n' + reviews : '') + acceptance
-  }).join('\n\n')
-  const acceptanceSection = notAccepted
-    ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
-      + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
-    : ''
-  // 补员 / 回收 / 子会话 / 越权拦截 / 越权审计 / 子进程回收（与原 render 一致）
-  const staffing = (input.staffingCreated || []).length
-    ? '\n\n## 补员\n' + input.staffingCreated.map((line) => '- ' + line).join('\n')
-    : ''
-  const pruned = (input.pruned || []).length
-    ? '\n\n## 回收\n已回收：' + input.pruned.map((m) => m.name + '（临时）').join('、')
-    : ''
-  const prunedSessions = Number(input.prunedSessions) > 0
-    ? '\n\n## 子会话\n已清理 ' + input.prunedSessions + ' 个子会话目录'
-    : ''
-  const blockedDetail = String(input.selfWorkBlockedDetail || '')
-  const blocked = Number(input.selfWorkBlocked) > 0
-    ? '\n\n## 越权拦截\n- 父会话尝试自行执行 ' + input.selfWorkBlocked + ' 次写操作，已拦截' + (blockedDetail ? '（' + blockedDetail + '）' : '')
-    : ''
-  const selfRan = input.selfRan || {}
-  const selfRanTotal = (Number(selfRan.bash) || 0) + (Number(selfRan.readImage) || 0) + (Number(selfRan.read) || 0)
-  const selfRanSection = selfRanTotal > 0
-    ? '\n\n## 越权审计\n- 父会话本次自行执行：bash×' + (Number(selfRan.bash) || 0) + '、read_image×' + (Number(selfRan.readImage) || 0) + '、read×' + (Number(selfRan.read) || 0)
-      + '\n- 提示：这些应在小组内派给成员；如必要请说明理由'
-    : ''
-  const swept = Number(input.sweptChildren) > 0
-    ? '\n\n## 子进程回收\n- 已释放 ' + input.sweptChildren + ' 个驻留子代理'
-    : ''
-  const planLine = input.plan && input.plan.confirmation ? '**指挥确认**：' + String(input.plan.confirmation) : ''
-  return head + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
-}
-
     disposers.push(agentCtx.tools.register({
       name: 'council_delegate',
       description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。一次调用可以派多个成员，它们并发执行。',
@@ -5527,12 +5593,17 @@ function delegateReceiptText(value) {
           return response
         }
         if (!background) return toolResult(await runOnce())
-        const job = { runId, startedAt: Date.now(), status: 'running', sessionId: sessionIdOf(exec), promise: null, response: null, error: null }
+        const job = { runId, startedAt: Date.now(), status: 'running', sessionId: sessionIdOf(exec), promise: null, response: null, error: null, notified: false, background: true }
         backgroundJobs.set(runId, job)
         job.promise = runOnce().then((value) => {
-          job.status = 'done'; job.response = value; job.finishedAt = Date.now(); return value
+          job.status = 'done'; job.response = value; job.finishedAt = Date.now()
+          // 主动唤醒主会话（只推一次；失败不影响主流程）
+          notifyParentJobDone(ctx, job)
+          return value
         }).catch((error) => {
-          job.status = 'failed'; job.error = String(error && error.message || error); job.finishedAt = Date.now(); throw error
+          job.status = 'failed'; job.error = String(error && error.message || error); job.finishedAt = Date.now()
+          notifyParentJobDone(ctx, job)
+          throw error
         })
         if (job.promise && typeof job.promise.catch === 'function') job.promise.catch(() => {})
         return toolResult({ background: true, runId, status: 'running', members: [] })
@@ -5575,7 +5646,11 @@ function delegateReceiptText(value) {
             new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000)),
           ])
         }
-        if (job.status === 'done') return toolResult(Object.assign({ runId: job.runId, status: 'done' }, job.response))
+        if (job.status === 'done') {
+          // 结果已被主会话取走：不再重复推送
+          job.notified = true
+          return toolResult(Object.assign({ runId: job.runId, status: 'done' }, job.response))
+        }
         if (job.status === 'failed') return { status: 'failed', runId: job.runId, error: job.error }
         return { status: 'running', runId: job.runId, message: '成员还在跑，稍后再收（或加 waitSeconds 等待）' }
       },
