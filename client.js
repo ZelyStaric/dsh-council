@@ -1192,7 +1192,8 @@ window.__ModuleLoader__.load({
       const long = text.length > 240
       const shown = expanded || !long ? text : text.slice(0, 240) + '…'
       return h('div', null,
-        h('div', { style: { whiteSpace: 'pre-wrap' } }, shown),
+        // 显示不全时：鼠标悬停用原生 tooltip 给出完整大纲（长文本也能看全）
+        h('div', { style: { whiteSpace: 'pre-wrap' }, title: long ? text : undefined }, shown),
         long ? h('div', { style: { marginTop: 2 } },
           h('span', {
             style: Object.assign({}, styles.muted, { cursor: 'pointer', textDecoration: 'underline' }),
