@@ -1187,18 +1187,12 @@ window.__ModuleLoader__.load({
     }
 
     function Collapsible(props) {
-      const [expanded, setExpanded] = useState(false)
       const text = String(props.text || '')
       const long = text.length > 240
-      const shown = expanded || !long ? text : text.slice(0, 240) + '…'
+      // 截断显示；**悬停即可看到完整全文**（不再需要「展开全文」按钮）
+      const shown = !long ? text : text.slice(0, 240) + '…'
       return h('div', null,
-        // 显示不全时：鼠标悬停用原生 tooltip 给出完整大纲（长文本也能看全）
-        h('div', { style: { whiteSpace: 'pre-wrap' }, title: long ? text : undefined }, shown),
-        long ? h('div', { style: { marginTop: 2 } },
-          h('span', {
-            style: Object.assign({}, styles.muted, { cursor: 'pointer', textDecoration: 'underline' }),
-            onClick: () => setExpanded(!expanded),
-          }, expanded ? '收起' : '展开全文')) : null)
+        h('div', { style: { whiteSpace: 'pre-wrap' }, title: long ? text : undefined }, shown))
     }
 
     function parseArgs(raw) {
@@ -1637,7 +1631,11 @@ window.__ModuleLoader__.load({
       h('span', { style: { fontWeight: 600 } }, '小组'),
       h('span', { style: styles.muted }, total === null ? '' : total + 's'),
       members.length
-        ? members.map((m, i) => h('span', { key: i, style: Object.assign({}, styles.chip, { display: 'inline-flex', alignItems: 'center', gap: 4 }) },
+        ? members.map((m, i) => h('span', {
+          key: i,
+          style: Object.assign({}, styles.chip, { display: 'inline-flex', alignItems: 'center', gap: 4 }),
+          title: [m.name || '成员', m.stage || '', (m.task || '')].filter(Boolean).join(' · '),
+        },
           (m.name || '成员') + ' · ' + (m.stage || '…')
           + taskSuffix(m)
           + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))
