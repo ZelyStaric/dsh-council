@@ -1677,6 +1677,138 @@ window.__ModuleLoader__.load({
     }
 
 
+    /* 团队模式：大脑（CLI/DSH 腿）对话面板 —— 只调 council_* 编排工具，没有本地工具 */
+    function TeamBrainChat(props) {
+      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      const [team, setTeam] = useState(null)
+      const [providers, setProviders] = useState(null)
+      const [model, setModel] = useState('')
+      const [draft, setDraft] = useState('')
+      const [streamText, setStreamText] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [note, setNote] = useState('')
+      const esRef = useRef(null)
+
+      useEffect(() => {
+        if (!sessionId) return
+        call('/team/state?sessionId=' + encodeURIComponent(sessionId))
+          .then((d) => { setTeam(d); if (d && d.model) setModel(d.model) })
+          .catch(() => setTeam(null))
+        call('/providers').then((d) => setProviders(d.providers || [])).catch(() => setProviders(null))
+      }, [sessionId])
+
+      const brainModels = (() => {
+        const out = []
+        for (const p of (providers || [])) {
+          for (const m of (p.models || [])) {
+            if (!/^(claude|gpt|o\d|deepseek)/i.test(m)) continue
+            if (out.indexOf(m) >= 0) continue
+            out.push(m)
+          }
+        }
+        return out
+      })()
+
+      const stopStream = () => {
+        try { if (esRef.current) esRef.current.close() } catch { /* ignore */ }
+        esRef.current = null
+      }
+
+      const send = async () => {
+        const text = draft.trim()
+        if (!text || !sessionId || busy) return
+        setDraft('')
+        setStreamText('')
+        setBusy(true)
+        setNote('')
+        try {
+          const r = await call('/team/send', { sessionId, model: model || undefined, text })
+          const runId = r && r.runId
+          if (!runId) throw new Error(r && r.error ? r.error : '没有拿到 runId')
+          if (typeof EventSource === 'function') {
+            stopStream()
+            const es = new EventSource('/council/api/team/stream?runId=' + encodeURIComponent(runId))
+            esRef.current = es
+            es.addEventListener('delta', (event) => {
+              try {
+                const data = JSON.parse(event.data)
+                if (data && data.text) setStreamText((prev) => prev + data.text)
+              } catch { /* ignore */ }
+            })
+            es.addEventListener('done', () => { stopStream(); setBusy(false); refreshTeam() })
+            es.addEventListener('error', (event) => {
+              let msg = '出错'
+              try { const data = JSON.parse(event.data); if (data && data.error) msg = data.error } catch { /* ignore */ }
+              setNote(msg)
+              stopStream()
+              setBusy(false)
+              refreshTeam()
+            })
+          } else {
+            setNote('当前环境不支持 SSE 流式渲染')
+            setBusy(false)
+          }
+        } catch (error) {
+          setNote(String(error && error.message || error))
+          setBusy(false)
+        }
+      }
+
+      const refreshTeam = () => {
+        if (!sessionId) return
+        call('/team/state?sessionId=' + encodeURIComponent(sessionId)).then((d) => setTeam(d)).catch(() => {})
+      }
+
+      const stop = async () => {
+        const runs = (team && team.runIds) || []
+        const runId = runs[0]
+        stopStream()
+        setBusy(false)
+        if (!runId) return
+        try { await call('/team/stop', { runId }) } catch { /* ignore */ }
+        refreshTeam()
+      }
+
+      const messages = (team && team.messages) || []
+      const running = Boolean(team && team.running) || busy
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('strong', null, '团队大脑'),
+          h('select', {
+            style: Object.assign({}, styles.input, { width: 220 }),
+            value: model || '',
+            onChange: (event) => setModel(event.target.value),
+          }, (brainModels.length ? brainModels : ['claude-fable-5-2']).map((m) => h('option', { key: m, value: m }, m))),
+          h('span', { style: styles.muted },
+            (team && team.brainKind ? team.brainKind : '…') + (team && team.persisted ? ' · 已持久化' : ' · 仅内存')),
+          h('span', { style: { flex: 1 } }),
+          running ? h(Button, { onClick: stop }, '停止') : null),
+        messages.length
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' } },
+            messages.map((m, i) => h('div', {
+              key: 'tm' + i,
+              style: Object.assign({}, styles.bubble, m.role === 'user' ? styles.mine : {}, { maxWidth: '90%' }),
+            }, h('div', { style: styles.who }, (m.role === 'user' ? '你' : '大脑') + ' · ' + new Date(m.at).toLocaleTimeString()),
+              h('div', { style: { whiteSpace: 'pre-wrap' } }, m.text))))
+          : h('div', { style: styles.muted }, '还没有团队对话。选一个大脑模型，直接发消息。'),
+        streamText ? h('div', { style: Object.assign({}, styles.bubble, { maxWidth: '90%', opacity: 0.9 }) },
+          h('div', { style: styles.who }, '大脑 · 生成中'),
+          h('div', { style: { whiteSpace: 'pre-wrap' } }, streamText)) : null,
+        note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)' }) }, note) : null,
+        h('div', { style: { display: 'flex', gap: 6 } },
+          h('input', {
+            style: Object.assign({}, styles.input, { flex: 1 }),
+            placeholder: '对着团队大脑说话（它只会拆解/派活，不会自己动手）',
+            value: draft,
+            onChange: (event) => setDraft(event.target.value),
+            onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey) send() },
+          }),
+          h(Button, { onClick: send }, running ? '发送中…' : '发送')),
+        h('div', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
+          '大脑只能调 council_* 工具（没有 bash/edit）；成员照旧各自原生执行。「接管主对话」即将支持。'))
+    }
+
     /* 群聊视图：本会话的完整成员发言时间线（微信式） */
     function CouncilChatView(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
@@ -1747,7 +1879,8 @@ window.__ModuleLoader__.load({
       if (!state) return h('div', { style: Object.assign({}, styles.root, { padding: 16 }) }, h('div', { style: styles.muted }, '加载中…'))
       if (!entries.length) {
         return h('div', { style: Object.assign({}, styles.root, { padding: 16 }) },
-          h('div', { style: styles.muted }, '这个会话还没有群聊记录。切到「小组模式」并派一次活，成员发言就会出现在这里。'))
+          h(TeamBrainChat, { sessionId }),
+          h('div', { style: styles.muted }, '这个会话还没有成员回执。切成「团队」后先跟大脑说一句，它会按需派活。'))
       }
 
       const rounds = entries.map(function (entry, index) {
@@ -1787,8 +1920,9 @@ window.__ModuleLoader__.load({
       return h('div', {
         style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: 12, gap: 8, overflow: 'hidden' },
       },
+      h(TeamBrainChat, { sessionId }),
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' } },
-        h('strong', null, '小组群聊'),
+        h('strong', null, '成员回执'),
         h('span', { style: styles.muted }, entries.length + ' 轮 · 更新于 ' + new Date(now).toLocaleTimeString())),
       h('div', {
         ref: (node) => { scrollerRef.current = node },
@@ -1814,7 +1948,7 @@ window.__ModuleLoader__.load({
           name: 'conversation.view', id: 'council', order: 30, label: '小组',
         }, CouncilView))
         ctx.slots.inject('conversation.view', () => ctx.slots.register({
-          name: 'conversation.view', id: 'council-chat', order: 25, label: '群聊',
+          name: 'conversation.view', id: 'council-chat', order: 25, label: '团队',
         }, CouncilChatView))
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions', id: 'council-mode', order: 40,

@@ -2,6 +2,16 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] — 2026-11-15
+
+### 新增：团队模式（Client 半）
+- 「群聊」标签页改名为 **「团队」**，顶部新增**团队大脑面板**：
+  - 大脑模型下拉（来自 `/providers`，只列 claude-*/gpt-*/o<数字>*/deepseek-*）；
+  - 大脑对话记录（来自 `/team/state`，标注 `brainKind` 与「已持久化/仅内存」）；
+  - 输入框 + 发送 + 停止（`/team/send` → `/team/stream` SSE 流式渲染 → `/team/stop`）；
+  - 子面板保留原有「成员回执」时间线。
+- 模型→腿路由与工具限制沿用 Host 半（大脑没有 bash/edit）。
+
 ## [0.3.0] — 2026-11-15
 
 ### 新增：团队模式（Host 半）
