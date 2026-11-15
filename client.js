@@ -1342,13 +1342,23 @@ window.__ModuleLoader__.load({
      * 现在改成「中性半透明底 + 主题前景色」：深色下是一块稍亮的灰、浅色下是一块稍深的灰，
      * 文字始终跟随 --dsw-alias-label-primary，两种主题都清晰。
      */
+    /**
+     * 胶囊分段样式（v0.4.22，深色 + 浅色都要能看清）。
+     *
+     * 走过的弯路：
+     *  ① 最初 `brand-primary` 做底 + 白字 → 深色下 brand-primary 是**近白色**，白底白字看不见；
+     *  ② 改成中性半透明灰 + label-primary → 深色实测对比只有 3.83（AA 要 4.5）。
+     *
+     * 现在是**反色**方案（跟 iOS 分段控件同理）：
+     *   选中 = 前景色当底、背景色当字；未选中 = 透明底 + 次级前景色。
+     * 深色下是「浅底深字」，浅色下是「深底浅字」，两种主题对比度都远超 AA。
+     */
     const segStyle = (active) => ({
       padding: '2px 10px', borderRadius: 999, fontSize: 12, userSelect: 'none',
       cursor: active ? 'default' : 'pointer',
       fontWeight: active ? 600 : 400,
-      background: active ? 'rgba(127, 127, 127, 0.24)' : 'transparent',
-      color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-      boxShadow: active ? 'inset 0 0 0 1px rgba(127, 127, 127, 0.35)' : 'none',
+      background: active ? 'var(--dsw-alias-label-primary)' : 'transparent',
+      color: active ? 'var(--dsw-alias-bg-layer-1)' : 'var(--dsw-alias-label-secondary)',
       transition: 'background .12s ease, color .12s ease',
     })
 
