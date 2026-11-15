@@ -1967,12 +1967,16 @@ window.__ModuleLoader__.load({
           // 单人模式（或还没绑定小组）时给明确入口。
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
           // 在单人模式下仍然存在；这里用引导卡片替代"消失"，避免用户进来看到空白。
-          h('div', { style: { fontSize: 14, fontWeight: 600 } }, '这个会话还没有团队'),
+          h('div', { style: { fontSize: 14, fontWeight: 600 } },
+            team ? '这个小组还没有对话' : '这个会话还没有绑定小组'),
           h('div', { style: styles.muted },
-            '点页面右上角的胶囊切到「小组」，就会为这个会话建一个小组：'
-            + '你说的每句话都会交给指挥，它拆解后派给成员干活，成员的回执会回到这里。'),
+            team
+              ? '直接对下面的输入框说话——指挥会拆解、选人、派活，成员的回执会回到这里。'
+              : '点页面右上角的胶囊切到「小组」，就会为这个会话建一个小组：你说的每句话都会交给指挥，它拆解后派给成员干活。'),
           h('div', { style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.8 }) },
-            '（单人模式下这个页签可忽略：消息直接由本会话回答，不经过指挥。）'))),
+            team
+              ? '（团队成员回执来自内存，重启 dsh-web 后历史会清空；「对话」页里的会话记录不受影响。）'
+              : '（单人模式下这个页签可忽略：消息直接由本会话回答，不经过指挥。）'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
       /* 输入区 */
       h('div', { style: { display: 'flex', gap: 6, flex: '0 0 auto' } },
