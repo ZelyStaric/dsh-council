@@ -2024,10 +2024,14 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   const budgetMs = timeoutMs
   const idleMs = memberIdleMs(config)
   const subagents = ctx.get('subagents')
-  if (!subagents || !parent) {
-    // 没有父 agent 的入口（`POST /confirm` 直派成员、团队 turn）：seam 用不了，
+  // seam 的 startActivation 要求「真正的活 agent」（有 session / ctx 才派生得出来）。
+  // 团队大脑经 MCP 派活时传进来的只是 `{ agent: { id } }` 这类**壳对象**：truthy 但不可派生，
+  // seam 内部会抛 "subagent creation requires the exact live parent agent"。
+  // 所以「有活父会话」要看它有没有 session，而不只是非空。
+  const fromMcp = Boolean(parent && parent.__mcp)
+  if (!subagents || !parent || fromMcp) {
+    // 没有活父 agent 的入口（团队 turn、`POST /confirm` 直派成员）：seam 用不了，
     // 但 deepseek 本身完全能跑 —— 退回 `runDeepseek` 自建会话（agents.create）那条腿。
-    // 2026-11-15 修：之前这里直接返回 'no parent agent'，导致 HTTP 直派 deepseek 成员必然失败。
     return runDeepseek(ctx, member, prompt, config, { presetId })
   }
   if (!subagents.getProvider('spawn')) {
@@ -4648,7 +4652,8 @@ export function createHandler(ctx, config = {}) {
             const sessionId = normalizeSessionId(body.sessionId || url.searchParams.get('sessionId') || '')
             const group = (sessionId && groupForSession(state, sessionId)) || activeGroup()
             if (!group) return send(res, 409, { error: '还没有小组，先在页面上建一个' })
-            const exec = sessionId ? { agent: { id: sessionId } } : undefined
+            // __mcp: 这条路径来自 council-mcp 子进程 —— 团队 turn 没有活 agent，成员执行必须走自建会话
+            const exec = sessionId ? { agent: { id: sessionId }, __mcp: true } : { __mcp: true }
             const result = await impl.execute(body.args && typeof body.args === 'object' ? body.args : {}, exec)
             return send(res, 200, { result: result ?? null })
           }
@@ -6402,7 +6407,9 @@ function makeDelegateTool(ctx, config, group) {
             else signal.addEventListener('abort', handler, { once: true })
           })
           if (item && item.reference && member.kind === 'image') member.__reference = String(item.reference)
-          const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, exec && exec.agent, brief,
+          // MCP 路径（团队 turn）没有活 agent：传 undefined，成员走自建会话（runDeepseek）
+          const memberParent = exec && exec.__mcp ? undefined : (exec && exec.agent)
+          const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, memberParent, brief,
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage, task: shortTask }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })

@@ -4212,7 +4212,7 @@ try {
     const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
     assert.ok(!src.includes("'DSH subagent seam unavailable (no parent agent)'"),
       '旧的无条件硬失败文案应已移除')
-    assert.ok(/if \(!subagents \|\| !parent\) \{[\s\S]{0,500}?return runDeepseek\(ctx, member, prompt, config, \{ presetId \}\)/.test(src),
+    assert.ok(/if \(!subagents \|\| !parent \|\| fromMcp\) \{[\s\S]{0,600}?return runDeepseek\(ctx, member, prompt, config, \{ presetId \}\)/.test(src),
       '无 parent 时必须退回 runDeepseek（自建会话）而不是直接失败')
     return '已降级到 agents.create 路线'
   })
