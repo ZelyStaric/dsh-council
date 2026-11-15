@@ -1407,7 +1407,7 @@ window.__ModuleLoader__.load({
         // 表现就是「切到小组后 tab 闪一下就没了」（实测踩到）。
         if (!sessionId) return
         if (!state) return
-        applyTabVisibility(!bound)
+        applyTabVisibility(!bound, 'effect sessionId=' + sessionId.slice(0, 8) + ' bound=' + bound)
       }, [sessionId, bound, Boolean(state)])
 
       /* hero 预选 → 会话建立后自动启用小组模式 */
@@ -2040,8 +2040,15 @@ window.__ModuleLoader__.load({
     var councilSoloMode = false
     var tabWatchTimer = null
 
-    function applyTabVisibility(solo) {
+    function applyTabVisibility(solo, why) {
       councilSoloMode = Boolean(solo)
+      // 调试：浏览器控制台执行 window.__councilTabDebug = true 即可看到每次调用来源
+      try {
+        if (window.__councilTabDebug) {
+          const stack = String(new Error().stack || '').split('\n').slice(1, 4).map((l) => l.trim().slice(0, 70)).join(' < ')
+          console.log('[council:tab] solo=' + Boolean(solo) + ' why=' + String(why || '?') + ' | ' + stack)
+        }
+      } catch { /* ignore */ }
       try {
         const list = document.querySelector('[data-conversation-tabs]')
         if (!list) return
@@ -2065,6 +2072,12 @@ window.__ModuleLoader__.load({
         }
         for (const b of hide) b.style.display = 'none'
         for (const b of show) b.style.display = ''
+        try {
+          if (window.__councilTabDebug) {
+            const after = Array.prototype.slice.call(list.querySelectorAll('button[role="tab"]')).map((b) => labelOf(b) + '=' + (b.style.display === 'none' ? 'hidden' : 'show'))
+            console.log('[council:tab]   → ' + after.join(' '))
+          }
+        } catch { /* ignore */ }
       } catch { /* DOM 结构变了就放弃隐藏，功能不受影响 */ }
     }
 
@@ -2077,7 +2090,7 @@ window.__ModuleLoader__.load({
           if (tabWatchTimer) return
           tabWatchTimer = setTimeout(() => {
             tabWatchTimer = null
-            applyTabVisibility(true)
+            applyTabVisibility(true, 'observer')
           }, 60)
         })
         mo.observe(document.body, { childList: true, subtree: true })
