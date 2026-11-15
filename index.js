@@ -3575,11 +3575,13 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
       '-c', 'mcp_servers.council.args=["' + fileURLToPath(new URL('./council-mcp.mjs', import.meta.url)) + '"]',
       '-c', 'mcp_servers.council.env.COUNCIL_API="' + (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api') + '"',
     ]
+    const codexEnv = await envFor({ kind: 'codex' }, state.config).catch(() => undefined)
     const result = await runCodex({
       cwd: workdir,
       model: brain.model,
       resume: session.convId || undefined,
       prompt,
+      env: codexEnv,
       signal,
       scopeUnit,
       extraArgs: codexExtra,
@@ -3600,11 +3602,14 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
   }
 
   // claude CLI 腿（默认）。runClaude 自己处理「没装 claude」的中文报错与 scope 内存上限。
+  // 大脑腿必须自己算环境变量：团队 turn 没有父 agent，envFor 按 providerByKind 取 base/key
+  const claudeEnv = await envFor({ kind: 'claude' }, state.config).catch(() => undefined)
   const result = await runClaude({
     cwd: workdir,
     model: brain.model,
     resume: session.convId || undefined,
     prompt,
+    env: claudeEnv,
     signal,
     scopeUnit,
     config: state.config,

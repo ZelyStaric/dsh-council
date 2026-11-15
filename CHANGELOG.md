@@ -2,6 +2,11 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] — 2026-11-15
+
+### 修复
+- 团队大脑腿没算环境变量 → claude 腿报 `Not logged in`：`runBrain()` 现在用 `envFor({kind:'claude'|'codex'}, config)` 按 `providerByKind` 取 base/key 再注入（团队 turn 没有父 agent，必须自己算）。
+
 ## [0.3.1] — 2026-11-15
 
 ### 新增：团队模式（Client 半）
