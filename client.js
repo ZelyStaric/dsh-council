@@ -2007,8 +2007,11 @@ window.__ModuleLoader__.load({
      * 不改 DSH 源码；若 DSH 改动 tab 的 DOM 结构，这段会失效（但功能不受影响，
      * 只是 tab 又常驻了）。
      */
-    let councilSoloMode = false
-    let tabWatchTimer = null
+    // 注意：这两个变量声明位于 return {} 之后（DSH 只认 return 出去的对象），
+    // 用 var 而不是 let —— let 在模块顶层那段不可达代码里初始化，会 TDZ 报
+    // "Cannot access before initialization"；var 会提升成 undefined，逻辑本身能跑。
+    var councilSoloMode = false
+    var tabWatchTimer = null
 
     function applyTabVisibility(solo) {
       councilSoloMode = Boolean(solo)
