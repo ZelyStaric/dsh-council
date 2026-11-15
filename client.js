@@ -1408,6 +1408,12 @@ window.__ModuleLoader__.load({
         if (!sessionId) return
         if (!state) return
         applyTabVisibility(!bound, 'effect sessionId=' + sessionId.slice(0, 8) + ' bound=' + bound)
+        // 兜底复核：建组/绑定过程中 state 会刷新几次，中间某一帧可能短暂 bound=false。
+        // 有它就不会停在错误状态（tab 被误隐藏后 1.2 秒内自动纠正）。
+        const timer = setTimeout(() => {
+          applyTabVisibility(!bound, 'recheck bound=' + bound)
+        }, 1200)
+        return () => clearTimeout(timer)
       }, [sessionId, bound, Boolean(state)])
 
       /* hero 预选 → 会话建立后自动启用小组模式 */
@@ -2086,11 +2092,12 @@ window.__ModuleLoader__.load({
       if (typeof MutationObserver !== 'function') return
       try {
         const mo = new MutationObserver(() => {
-          if (!councilSoloMode) return
+          // 注意：两种模式都要复核（不只 solo）。DSH 重建 tab 节点时会把 display 重置，
+          // group 模式下「对话」若不重新隐藏就会冒出来。
           if (tabWatchTimer) return
           tabWatchTimer = setTimeout(() => {
             tabWatchTimer = null
-            applyTabVisibility(true, 'observer')
+            applyTabVisibility(councilSoloMode, 'observer')
           }, 60)
         })
         mo.observe(document.body, { childList: true, subtree: true })
