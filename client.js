@@ -1378,6 +1378,11 @@ window.__ModuleLoader__.load({
       const bound = Boolean(own)
       const pendingGroup = !sessionId && readPendingMode() === 'group'
 
+      // v0.4.17：单人模式隐藏「团队 / 小组」两个 tab（按绑定状态切换）
+      useEffect(() => {
+        applyTabVisibility(!bound)
+      }, [bound])
+
       /* hero 预选 → 会话建立后自动启用小组模式 */
       useEffect(() => {
         if (!sessionId || !state || pendingApplied.has(sessionId)) return
@@ -1526,6 +1531,8 @@ window.__ModuleLoader__.load({
         } catch (error) {
           try { console.error('[council] client registration failed', error) } catch { /* ignore */ }
         }
+        // v0.4.17：tab 会被重渲染替换，挂一个观察器把「单人模式隐藏团队/小组」补回去
+        watchTabList()
       },
     }
 
@@ -1990,7 +1997,57 @@ window.__ModuleLoader__.load({
         h(Button, { onClick: running ? stop : send }, running ? '停止' : '发送')))
     }
 
+    /* ── 按模式显示 tab（v0.4.17）──────────────────────────────────────
+     * 背景：用户要求「单人模式只显示 对话/轨迹，小组模式才有 团队/小组」。
+     * DSH 的 conversation.view 注册项只投影成 {id, label}，**没有可见性谓词**，
+     * 插件 apply 层也拿不到"当前会话"——所以没法从 slot 层条件注册。
+     *
+     * 但 tab 在 DOM 里是可预测的：[data-conversation-tabs] 下的 button[role=tab]。
+     * 这里按**标签文字**找到「团队 / 小组」两个 tab，单人模式下 display:none。
+     * 不改 DSH 源码；若 DSH 改动 tab 的 DOM 结构，这段会失效（但功能不受影响，
+     * 只是 tab 又常驻了）。
+     */
+    let councilSoloMode = false
+    let tabWatchTimer = null
+
+    function applyTabVisibility(solo) {
+      councilSoloMode = Boolean(solo)
+      try {
+        const list = document.querySelector('[data-conversation-tabs]')
+        if (!list) return
+        const tabs = Array.prototype.slice.call(list.querySelectorAll('button[role="tab"]'))
+        const mine = tabs.filter((b) => ['团队', '小组'].indexOf(String(b.textContent || '').trim()) >= 0)
+        if (!mine.length) return
+        // 先处理"正停在要被隐藏的 tab 上"：切回第一个（对话），避免内容区空白
+        if (solo) {
+          const active = mine.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
+          const first = tabs[0]
+          if (active && first && first !== active) {
+            try { first.click() } catch { /* ignore */ }
+          }
+        }
+        for (const b of mine) b.style.display = solo ? 'none' : ''
+      } catch { /* DOM 结构变了就放弃隐藏，功能不受影响 */ }
+    }
+
+    /** tab 会被 DSH 重渲染替换掉（节点换新），用 MutationObserver 把隐藏状态补回去 */
+    function watchTabList() {
+      if (typeof MutationObserver !== 'function') return
+      try {
+        const mo = new MutationObserver(() => {
+          if (!councilSoloMode) return
+          if (tabWatchTimer) return
+          tabWatchTimer = setTimeout(() => {
+            tabWatchTimer = null
+            applyTabVisibility(true)
+          }, 60)
+        })
+        mo.observe(document.body, { childList: true, subtree: true })
+      } catch { /* ignore */ }
+    }
+
     function registerAll(ctx) {
+
         ctx.slots.inject('conversation.view', () => ctx.slots.register({
           name: 'conversation.view', id: 'council', order: 30, label: '小组',
         }, CouncilView))
