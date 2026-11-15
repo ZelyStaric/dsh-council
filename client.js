@@ -210,6 +210,15 @@ window.__ModuleLoader__.load({
     }
 
     /* 小组：只负责编排（职位 / 成员 / 风格 / 指挥 / 用量） */
+    /** 各「运行框架」对应的实际执行引擎，用于把下拉写清楚 */
+    const RUNNER_LABEL = {
+      claude: 'Claude Code',
+      codex: 'Codex CLI',
+      deepseek: 'DSH 会话',
+      gemini: 'Gemini CLI',
+      image: '出图 API',
+    }
+
     function CouncilView(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
       const [state, setState] = useState(null)
@@ -479,11 +488,13 @@ window.__ModuleLoader__.load({
           h(Button, { onClick: () => mutate('/roles/delete', { id: role.id }) }, '删')),
         h('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
           h('select', {
-            'aria-label': '职位默认框架', title: '职位默认框架（补员时用它）',
+            'aria-label': '职位默认运行框架', title: '成员用哪个 agent 运行时跑（claude=Claude Code / codex=Codex / deepseek=DSH 会话 / gemini=Gemini CLI / image=出图 API）',
             value: role.kind || '', style: Object.assign({}, styles.input, { width: 132, flexShrink: 0 }),
             onChange: (event) => mutate('/roles', { id: role.id, kind: event.target.value, model: '' }),
-          }, h('option', { value: '' }, '框架：claude'),
-          ['codex', 'claude', 'deepseek', 'image'].map((kind) => h('option', { key: kind, value: kind }, '框架：' + kind))),
+          }, h('option', { value: '' }, '运行时：claude'),
+          ['claude', 'codex', 'deepseek', 'gemini', 'image'].map((kind) => h('option', { key: kind, value: kind },
+            // 把「引擎」写出来，避免只看到 claude/codex 这种代号不知所谓
+            '运行时：' + kind + (RUNNER_LABEL[kind] ? '（' + RUNNER_LABEL[kind] + '）' : '')))),
           h('select', {
             'aria-label': '职位默认模型', title: '职位默认模型（补员时用它）',
             value: role.model || '', style: Object.assign({}, styles.input, { flex: 1, minWidth: 0 }),
@@ -613,16 +624,15 @@ window.__ModuleLoader__.load({
           style: {
             padding: '2px 10px', borderRadius: 999, fontSize: 12, userSelect: 'none',
             cursor: lock || mode === value ? 'default' : 'pointer',
-            background: mode === value ? 'var(--dsw-alias-brand-primary)' : 'transparent',
-            color: mode === value ? '#fff' : 'var(--dsw-alias-label-secondary)',
+            // 与胶囊同一套反色方案：brand-primary 在深色主题下是近白色，配白字=白底白字
+            background: mode === value ? 'var(--dsw-alias-label-primary)' : 'transparent',
+            color: mode === value ? 'var(--dsw-alias-bg-layer-1)' : 'var(--dsw-alias-label-secondary)',
           },
           onClick: lock || mode === value ? undefined : () => saveTeam({ brainPermissions: value }),
         }, text)
         return h('div', { style: Object.assign({}, styles.card, { marginBottom: 12 }) },
           h('strong', null, '团队选项'),
-          row('需要指挥审核',
-            '成员交付后由指挥终审；关掉则只保留自审/审校',
-            check(cur.requireCommanderReview !== false, (v) => saveTeam({ requireCommanderReview: v }))),
+          // 「需要指挥审核」在下方「验收策略」里已有同名开关，这里不再重复（2026-11-16 用户指出重复）
           row('严格审核',
             '任一审核方不通过即强制不通过；关掉则冲突时以指挥为准',
             check(cur.strictReview !== false, (v) => saveTeam({ strictReview: v }))),
@@ -894,7 +904,8 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.root },
         header,
         error ? h('div', { style: Object.assign({}, styles.err, { padding: '6px 14px' }) }, error) : null,
-        h('div', { style: styles.body }, teamOptionsPanel(), rolesPanel, board))
+        // 布局（2026-11-16 用户要求）：左=职位预设（含提示词），中=成员，右=团队选项/验收策略
+        h('div', { style: styles.body }, rolesPanel, board, teamOptionsPanel()))
     }
 
 
