@@ -599,8 +599,16 @@ window.__ModuleLoader__.load({
                 return member.kind === 'image' ? modelOptions('image') : null
               })()),
           roleSelect),
-        h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) },
-          '职位：' + (role ? role.name : '未分配') + ' · 会话：' + (member.convId ? member.convId.slice(0, 8) : '尚未开始')))
+        h('div', { style: Object.assign({}, styles.muted, { marginTop: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }) },
+          h('span', null, '职位：' + (role ? role.name : '未分配') + ' · 会话：' + (member.convId ? member.convId.slice(0, 8) : '尚未开始')),
+          // v0.4 P3：长久成员继承上下文（可压缩）；临时成员每轮由指挥重发上下文
+          h('span', {
+            style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
+            title: member.persistent === false
+              ? '临时成员：每轮新会话，上下文由指挥重新发'
+              : '长久成员：同一会话内继承上下文；点击切为临时',
+            onClick: () => act('/members', { id: member.id, persistent: member.persistent === false }),
+          }, member.persistent === false ? '临时' : '长久')))
       }
 
       function apiCard() {
