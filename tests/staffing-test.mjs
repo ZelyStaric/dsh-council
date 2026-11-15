@@ -4174,10 +4174,38 @@ try {
     assert.ok(!/await runDeepseekViaSeam\(/.test(branch[0]),
       'dsh-seam 分支不得再调用 runDeepseekViaSeam（它要求父 agent，团队 turn 没有）')
     assert.ok(branch[0].includes('runDeepseek('), '必须改调自建会话的 runDeepseek')
-    assert.ok(branch[0].includes("presetId: 'minimal'"), '大脑腿必须用 minimal preset（去掉 bash/edit）')
+    // v0.4：preset 由 brainPermissions 决定 —— closed（默认）= minimal，open = 部署默认
+    assert.ok(branch[0].includes("brainOpen ? undefined : 'minimal'"),
+      'closed 时必须用 minimal preset（去掉 bash/edit），open 时放开')
     assert.ok(branch[0].includes('groupForSession'), '必须先校验小组：没有组就拿不到 council_* 派活工具')
     assert.ok(branch[0].includes('session.convId'), '多轮要接在同一段会话历史上')
-    return '不走 seam · runDeepseek + minimal · 有 group 校验 · 复用 convId'
+    return '不走 seam · runDeepseek + minimal(closed) · 有 group 校验 · 复用 convId'
+  })
+
+  await check('v0.4 大脑权限开关：三腿都受 brainPermissions 控制（源码断言）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(src.includes("const brainOpen = (state.config || {}).brainPermissions === 'open'"),
+      'runBrain 必须读 brainPermissions')
+    // claude 腿
+    assert.ok(/brainOpen \? \[\] : \['--disallowedTools', TEAM_BRAIN_DISALLOWED\.join\(' '\)\]/.test(src),
+      'claude 腿：closed 才加 disallowedTools')
+    // codex 腿
+    assert.ok(/brainOpen \? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="read-only"'/.test(src),
+      'codex 腿：closed=read-only，open=full-access')
+    // deepseek 腿
+    assert.ok(src.includes("brainOpen ? undefined : 'minimal'"), 'deepseek 腿：closed=minimal')
+    // 配置层
+    assert.ok(src.includes("brainPermissions: own.brainPermissions === 'open' ? 'open' : 'closed'"),
+      'configView 必须暴露 brainPermissions')
+    assert.ok(src.includes("if (body.brainPermissions === 'open' || body.brainPermissions === 'closed')"),
+      '/config POST 必须能写 brainPermissions')
+    assert.ok(src.includes("strictReview: own.authoritativeReviewer !== 'commander'"),
+      'configView 必须暴露 strictReview（映射 authoritativeReviewer）')
+    assert.ok(src.includes("if (typeof body.strictReview === 'boolean') next.authoritativeReviewer = body.strictReview ? 'any' : 'commander'"),
+      '/config POST 必须能把 strictReview 写成 authoritativeReviewer')
+    assert.ok(src.includes("requireCommanderReview: own.requireCommanderReview !== false"),
+      'configView 必须暴露 requireCommanderReview')
+    return 'claude/codex/deepseek 三腿 + 配置读写全部接线'
   })
 
   await check('runDeepseekViaSeam：没有父 agent 时降级到自建会话（HTTP 直派 deepseek 成员可用）', async () => {

@@ -683,31 +683,63 @@ window.__ModuleLoader__.load({
             h(Button, { onClick: save }, '保存 API 配置')),
           h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) }, '只提交填了值的项：留空 = 保持原样，要删除请点对应的「清空」。保存后立即生效。'))
       }
-
-      function usagePanel() {
-        if (keyUsage && keyUsage.keys && keyUsage.keys.length) {
-          const rows = keyUsage.keys.map((key) => h('div', {
-            key: key.id, style: { display: 'flex', gap: 8, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' },
-          },
-          h('span', { style: styles.chip }, key.label),
-          key.ok
-            ? h('span', { style: styles.muted },
-              (key.balance === null ? '' : '余额 ' + key.balance.toFixed(2) + ' · ')
-              + (key.today ? '今日 ' + key.today.requests + ' 次 · ' + fmtTokens(key.today.tokens) + ' tok · $' + key.today.cost.toFixed(2) + ' · ' : '')
-              + '累计 ' + key.totals.requests + ' 次 · ' + fmtTokens(key.totals.tokens) + ' tok · $' + key.totals.cost.toFixed(2))
-            : h('span', { style: styles.err }, ' 不可用：' + (key.error || '未知'))))
-          return h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
-            h('div', { style: styles.muted }, 'API key 用量（中转站 /v1/usage 实时值）'),
-            rows)
+      /* ── v0.4 团队选项：三个开关（需要指挥审核 / 严格审核 / 大脑权限）──────
+       * 取代原来的 usagePanel（那个函数定义了但从未被调用，属历史残留）。
+       * 读写都走 /config：strictReview ↔ authoritativeReviewer、
+       * brainPermissions 直接存；Host 侧 runBrain 三腿按它决定工具面。
+       */
+      function teamOptionsPanel() {
+        const cur = apiConfig || {}
+        const saveTeam = (patch) => {
+          setBusy('teamopt')
+          call('/config', patch)
+            .then((data) => { if (data && data.config) setApiConfig(data.config) })
+            .catch((e) => setError(String(e.message || e)))
+            .finally(() => setBusy(null))
         }
-        const rows = usageRows.map(([id, row]) => h('div', { key: id, style: { display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' } },
-          h('span', { style: styles.chip }, labelOf(id)),
-          h('span', { style: styles.muted }, '调用 ' + row.calls + ' · 入 ' + row.input + ' · 出 ' + row.output + ' · $' + (row.costUsd || 0).toFixed(4))))
-        return h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
-          h('div', { style: styles.muted }, '用量（本地统计；/v1/usage 不可用时回落到这里）'),
-          rows.length ? rows : h('div', { style: styles.muted }, '暂无'))
+        const lock = busy === 'teamopt'
+        const row = (label, hint, control) => h('div', {
+          style: { display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, opacity: lock ? 0.6 : 1 },
+        },
+          control,
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 1 } },
+            h('span', { style: { fontSize: 13 } }, label),
+            h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, hint)))
+        const check = (checked, onChange) => h('input', {
+          type: 'checkbox',
+          checked: Boolean(checked),
+          disabled: lock,
+          style: { marginTop: 3, cursor: lock ? 'default' : 'pointer' },
+          onChange: (e) => onChange(e.target.checked),
+        })
+        const mode = cur.brainPermissions === 'open' ? 'open' : 'closed'
+        const seg = (value, text) => h('span', {
+          key: value,
+          style: {
+            padding: '2px 10px', borderRadius: 999, fontSize: 12, userSelect: 'none',
+            cursor: lock || mode === value ? 'default' : 'pointer',
+            background: mode === value ? 'var(--dsw-alias-brand-primary)' : 'transparent',
+            color: mode === value ? '#fff' : 'var(--dsw-alias-label-secondary)',
+          },
+          onClick: lock || mode === value ? undefined : () => saveTeam({ brainPermissions: value }),
+        }, text)
+        return h('div', { style: Object.assign({}, styles.card, { marginBottom: 12 }) },
+          h('strong', null, '团队选项'),
+          row('需要指挥审核',
+            '成员交付后由指挥终审；关掉则只保留自审/审校',
+            check(cur.requireCommanderReview !== false, (v) => saveTeam({ requireCommanderReview: v }))),
+          row('严格审核',
+            '任一审核方不通过即强制不通过；关掉则冲突时以指挥为准',
+            check(cur.strictReview !== false, (v) => saveTeam({ strictReview: v }))),
+          row('大脑权限',
+            mode === 'open'
+              ? '开放：大脑可以自己动手（跑命令 / 改文件）'
+              : '关闭：大脑只拆解、做计划、派活',
+            h('div', {
+              style: { display: 'inline-flex', gap: 2, padding: 2, borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)' },
+            }, [seg('closed', '只派活'), seg('open', '可动手')])),
+        )
       }
-
       if (!state) {
         return h('div', { style: Object.assign({}, styles.root, { padding: 16 }) },
           error ? h('div', { style: styles.err }, error) : h('div', { style: styles.muted }, '加载中…'))
@@ -939,7 +971,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.root },
         header,
         error ? h('div', { style: Object.assign({}, styles.err, { padding: '6px 14px' }) }, error) : null,
-        h('div', { style: styles.body }, rolesPanel, board))
+        h('div', { style: styles.body }, teamOptionsPanel(), rolesPanel, board))
     }
 
 
@@ -1360,75 +1392,191 @@ window.__ModuleLoader__.load({
       })
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, margin: '6px 0' } }, banner, rows)
     }
+    /* ── v0.4 模式胶囊：左「单人」右「小组」双段按钮 + 大脑模型下拉 ──────
+     * 未建会话（hero 草稿态）时点「小组」会记住预选，发出第一条消息、
+     * 会话建立后自动建组并绑定（见下方 useEffect）。
+     */
+    const MODE_PENDING_KEY = 'council.pendingMode'
+    const readPendingMode = () => {
+      try { return window.localStorage.getItem(MODE_PENDING_KEY) || '' } catch { return '' }
+    }
+    const writePendingMode = (value) => {
+      try {
+        if (value) window.localStorage.setItem(MODE_PENDING_KEY, value)
+        else window.localStorage.removeItem(MODE_PENDING_KEY)
+      } catch { /* 隐私模式禁用 storage，忽略 */ }
+    }
+    /** hero 会自动应用预选的会话（只尝试一次，避免 effect 反复触发） */
+    const pendingApplied = new Set()
+    /** 能当「指挥大脑」的模型（前缀约定，与 Host 的 resolveBrain 对齐） */
+    const isBrainModel = (id) => {
+      const s = String(id || '')
+      return s.startsWith('claude') || s.startsWith('gpt-') || /^o\d/.test(s)
+        || s.startsWith('deepseek') || s.startsWith('gemini')
+    }
+    const capsuleStyle = {
+      display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2,
+      borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)',
+      background: 'var(--dsw-alias-bg-layer-1)',
+    }
+    const segStyle = (active) => ({
+      padding: '2px 10px', borderRadius: 999, fontSize: 12, userSelect: 'none',
+      cursor: active ? 'default' : 'pointer',
+      fontWeight: active ? 600 : 400,
+      background: active ? 'var(--dsw-alias-brand-primary)' : 'transparent',
+      color: active ? '#fff' : 'var(--dsw-alias-label-secondary)',
+      transition: 'background .12s ease',
+    })
 
     function ModeToggle(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
       const [state, setState] = useState(null)
+      const [team, setTeam] = useState(null)
+      const [providers, setProviders] = useState(null)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
 
       useEffect(() => {
         let alive = true
         const reload = () => {
-          call('/state').then((data) => { if (alive) setState(data.state) }).catch((e) => { if (alive) setError(String(e.message || e)) })
+          call('/state')
+            .then((data) => { if (alive) setState(data.state) })
+            .catch((e) => { if (alive) setError(String(e.message || e)) })
+          call('/providers')
+            .then((data) => { if (alive) setProviders(data) })
+            .catch(() => { /* 模型列表拿不到不影响切换 */ })
+          if (sessionId) {
+            call('/team/state?sessionId=' + encodeURIComponent(sessionId))
+              .then((data) => { if (alive) setTeam(data) })
+              .catch(() => { /* 没绑定小组时 400，忽略 */ })
+          }
         }
         reload()
         councilListeners.add(reload)
         const timer = setInterval(() => { if (!document.hidden) reload() }, 8000)
         return () => { alive = false; councilListeners.delete(reload); clearInterval(timer) }
-      }, [])
+      }, [sessionId])
 
-      if (!sessionId) {
-        // 还没建立会话（Hero 草稿态）：保留入口，点一下给出可操作的提示
-        const hint = '先发一条消息建立会话，再点小组模式'
-        return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-          h('span', {
-            style: Object.assign({}, styles.chip, { cursor: 'pointer' }),
-            title: hint,
-            onClick: () => setError(hint),
-          }, '单人模式'),
-          error ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 } ) }, error) : null)
-      }
-      if (!state) {
-        return h('span', { style: styles.chip }, error ? '小组状态未知' : '模式…')
-      }
-      const groupList = (state.groups || []).filter((g) => !g.archived)
-      const own = groupForSession(state, sessionId)
+      const own = sessionId && state ? groupForSession(state, sessionId) : null
       const bound = Boolean(own)
-      const toggle = async () => {
-        setBusy(true); setError(null)
-        try {
-          let data
-          if (bound) {
-            data = await call('/groups/bind', { id: own.id, sessionId: null })
-          } else {
+      const pendingGroup = !sessionId && readPendingMode() === 'group'
+
+      /* hero 预选 → 会话建立后自动启用小组模式 */
+      useEffect(() => {
+        if (!sessionId || !state || pendingApplied.has(sessionId)) return
+        if (readPendingMode() !== 'group') return
+        if (groupForSession(state, sessionId)) { writePendingMode(''); return }
+        pendingApplied.add(sessionId)
+        const run = async () => {
+          try {
             const created = await call('/groups', { name: '本会话小组' })
             const next = created.state.groups[created.state.groups.length - 1]
-            data = await call('/groups/bind', { id: next.id, sessionId: sessionId })
+            await call('/groups/bind', { id: next.id, sessionId })
             await provisionDefaultRoster(next.id)
-            data = await call('/state')
-          }
+            const data = await call('/state')
+            setState(data.state)
+            writePendingMode('')
+            notifyCouncilChange()
+          } catch (e) { setError(String(e.message || e)) }
+        }
+        run()
+      }, [sessionId, state])
+
+      const switchToSolo = async () => {
+        if (busy) return
+        if (!sessionId) { writePendingMode(''); setError(null); return }
+        if (!bound) return
+        setBusy(true); setError(null)
+        try {
+          await call('/groups/bind', { id: own.id, sessionId: null })
+          const data = await call('/state')
           setState(data.state)
           notifyCouncilChange()
-        } catch (e) { setError(String(e.message || e)) }
-        finally { setBusy(false) }
+        } catch (e) { setError(String(e.message || e)) } finally { setBusy(false) }
       }
-      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+
+      const switchToGroup = async () => {
+        if (busy) return
+        if (!sessionId) {
+          writePendingMode('group')
+          setError('已选小组模式：发出第一条消息后自动启用')
+          return
+        }
+        if (bound) return
+        setBusy(true); setError(null)
+        try {
+          const created = await call('/groups', { name: '本会话小组' })
+          const next = created.state.groups[created.state.groups.length - 1]
+          await call('/groups/bind', { id: next.id, sessionId })
+          await provisionDefaultRoster(next.id)
+          const data = await call('/state')
+          setState(data.state)
+          writePendingMode('')
+          notifyCouncilChange()
+        } catch (e) { setError(String(e.message || e)) } finally { setBusy(false) }
+      }
+
+      const pickBrain = async (model) => {
+        if (busy || !sessionId || !model) return
+        setBusy(true); setError(null)
+        try {
+          await call('/team/model', { sessionId, model })
+          const data = await call('/team/state?sessionId=' + encodeURIComponent(sessionId))
+          setTeam(data)
+          notifyCouncilChange()
+        } catch (e) { setError(String(e.message || e)) } finally { setBusy(false) }
+      }
+
+      /* 大脑模型下拉：按 provider 分组，只列能当大脑的模型 */
+      const options = []
+      for (const p of (providers && providers.providers) || []) {
+        const ids = (p.models || []).filter(isBrainModel)
+        if (!ids.length) continue
+        options.push(h('optgroup', { key: p.id, label: (p.name || p.id) },
+          ids.map((id) => h('option', { key: id, value: id }, id))))
+      }
+      const brainModel = (team && team.model) || ''
+      const selectStyle = {
+        fontSize: 11, maxWidth: 210, padding: '1px 4px', borderRadius: 6,
+        border: '1px solid var(--dsw-alias-border-l1)', background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+      }
+
+      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
         h('span', {
-          style: Object.assign({}, styles.chip, {
-            cursor: busy ? 'default' : 'pointer',
-            opacity: busy ? 0.6 : 1,
-            borderColor: bound ? 'var(--dsw-alias-brand-primary)' : undefined,
-            fontWeight: 600,
-          }),
-          title: bound ? '当前是小组模式，点击切回单人模式' : '当前是单人模式，点击启用小组模式',
-          onClick: busy ? undefined : toggle,
-        }, (bound ? '小组模式' : '单人模式') + (error ? ' !' : '')),
+          style: Object.assign({}, capsuleStyle, busy ? { opacity: 0.6 } : {}),
+          title: bound ? '当前是小组模式：消息交给「指挥」拆解并派给成员' : '当前是单人模式：消息直接由本会话回答',
+        },
+          h('span', {
+            style: segStyle(!bound),
+            title: bound ? '切回单人模式（对话/轨迹）' : '当前已在单人模式',
+            onClick: busy || !bound ? undefined : switchToSolo,
+          }, '单人'),
+          h('span', {
+            style: segStyle(bound || pendingGroup),
+            title: bound ? '当前已在小组模式' : '切到小组模式：消息交给指挥拆解派活',
+            onClick: busy || bound ? undefined : switchToGroup,
+          }, '小组'),
+        ),
+        bound
+          ? h('select', {
+            value: brainModel,
+            title: '指挥大脑用哪个模型（本会话持久化）',
+            style: selectStyle,
+            onClick: (e) => e.stopPropagation(),
+            onChange: (e) => pickBrain(e.target.value),
+          }, options.length ? options : [h('option', { key: '__none', value: '' }, '（无可用模型）')])
+          : null,
         bound ? h('span', {
-          style: Object.assign({}, styles.chip, { cursor: 'pointer' }),
+          style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
           title: '编辑本组名册',
           onClick: () => openRosterPanel(sessionId),
-        }, '名册') : null)
+        }, '名册') : null,
+        error ? h('span', {
+          style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', maxWidth: 260 },
+          title: error,
+        }, error) : null,
+      )
     }
 
     return {

@@ -937,6 +937,14 @@ function configView(config, source) {
     hasImageKey: Boolean(settings.imageKey),
     reuseChildren: Boolean((state.config || {}).reuseChildren),
     strictDelegate: own.strictDelegate !== false,
+    // ── v0.4 团队三开关（页面「小组」tab 的选项）────────────────────
+    // 严格审核：任一审核方不通过即不通过。关掉后冲突时以指挥终审为准。
+    // 内部仍用 authoritativeReviewer 表达：any = 严格（默认），commander = 以指挥为准。
+    strictReview: own.authoritativeReviewer !== 'commander',
+    // 大脑权限：closed（默认，只拆解/做计划/派活）/ open（可以自己动手：给 bash/edit 等）
+    brainPermissions: own.brainPermissions === 'open' ? 'open' : 'closed',
+    // 是否需要指挥审核（页面级默认；组级 requireCommander 仍可覆盖）
+    requireCommanderReview: own.requireCommanderReview !== false,
     failOnRejectedAcceptance: failOnRejectedAcceptance(config),
     backgroundDelegations: backgroundDelegations(),
     claudeBase: own.claudeBase || '',
@@ -3687,9 +3695,14 @@ function teamToolRegistry() {
  */
 async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUnit } = {}) {
   const session = teamSessionState(sessionId)
-  const brain = resolveBrain(model || session.model || teamModelDefault())
+  // 大脑模型优先级：显式传入 → 内存态 → 组级（`/team/model` 写入，持久化）→ 全局默认
+  const brainGroup = groupForSession(state, normalizeSessionId(sessionId))
+  const brain = resolveBrain(model || session.model || (brainGroup && brainGroup.brainModel) || teamModelDefault())
   session.model = brain.model
   session.brainKind = brain.kind
+  // 大脑权限（v0.4）：closed = 只拆解/做计划/派活（默认）；open = 可以自己动手。
+  // 这是「大脑开放所有权限 / 关闭所有权限」开关在三条腿上的统一落点。
+  const brainOpen = (state.config || {}).brainPermissions === 'open'
   const prompt = String(text ?? '')
   const workdir = cwd || process.env.COUNCIL_TEAM_CWD || process.cwd()
   if (!prompt.trim()) return { ok: false, text: '', convId: null, error: 'text 不能为空', kind: brain.kind }
@@ -3727,8 +3740,9 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
       convId: session.convId || undefined,
     }
     const result = await runDeepseek(ctx0, member, prompt, state.config || {}, {
-      // minimal：没有 bash / edit / write，只有 council_* 编排工具
-      presetId: 'minimal',
+      // closed（默认）：minimal → 没有 bash / edit / write，只有 council_* 编排工具
+      // open：不指定 preset，用部署默认（大脑可以自己动手）
+      presetId: brainOpen ? undefined : 'minimal',
       // 显式补绑小组：新建的会话不在任何组里，agent/created 不会自动绑（见 runDeepseek）
       bindGroup: group,
       onDelta: delta,
@@ -3745,7 +3759,9 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
 
   if (brain.kind === 'codex') {
     const codexExtra = [
-      '-c', 'sandbox_mode="read-only"',
+      // closed（默认）：只读沙箱，大脑只能通过 council MCP 派活
+      // open：全权限，大脑可以自己动手跑命令/改文件
+      '-c', brainOpen ? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="read-only"',
       '-c', 'mcp_servers.council.command="' + process.execPath + '"',
       '-c', 'mcp_servers.council.args=["' + fileURLToPath(new URL('./council-mcp.mjs', import.meta.url)) + '"]',
       '-c', 'mcp_servers.council.env.COUNCIL_API="' + (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api') + '"',
@@ -3792,7 +3808,10 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
     noTools: false,
     allowMcp: true, // 关键：不让 runClaude 塞空 --mcp-config，council 服务器由 extraArgs 带进去
     maxDurationMs: memberMaxMinutesMs(state.config || {}) || undefined,
-    extraArgs: ['--strict-mcp-config', '--mcp-config', councilMcpConfig(), '--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')],
+    // closed（默认）：disallowedTools 去掉一切本地工具，大脑只能走 council MCP
+    // open：不禁任何工具，大脑可以自己动手
+    extraArgs: ['--strict-mcp-config', '--mcp-config', councilMcpConfig(),
+      ...(brainOpen ? [] : ['--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')])],
   })
   if (!session.convId && result.convId) session.convId = result.convId
   if (result.text) delta(result.text)
@@ -4344,6 +4363,11 @@ export function createHandler(ctx, config = {}) {
               }
               if (typeof body.reuseChildren === 'boolean') next.reuseAgents = body.reuseChildren
               if (typeof body.strictDelegate === 'boolean') next.strictDelegate = body.strictDelegate
+              // v0.4 团队三开关
+              // 严格审核 → 内部写 authoritativeReviewer：true=any（任一不通过即不通过），false=commander（以指挥为准）
+              if (typeof body.strictReview === 'boolean') next.authoritativeReviewer = body.strictReview ? 'any' : 'commander'
+              if (body.brainPermissions === 'open' || body.brainPermissions === 'closed') next.brainPermissions = body.brainPermissions
+              if (typeof body.requireCommanderReview === 'boolean') next.requireCommanderReview = body.requireCommanderReview
               if (typeof body.failOnRejectedAcceptance === 'boolean') next.failOnRejectedAcceptance = body.failOnRejectedAcceptance
               if (typeof body.backgroundDelegations === 'boolean') next.backgroundDelegations = body.backgroundDelegations
               // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
@@ -4521,7 +4545,9 @@ export function createHandler(ctx, config = {}) {
             const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
             if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
             const entry = teamSessions.get(sessionId)
-            const model = (entry && entry.model) || teamModelDefault()
+            // 大脑模型优先级：内存态 → 组级（持久化）→ 全局默认
+            const group = groupForSession(state, sessionId)
+            const model = (entry && entry.model) || (group && group.brainModel) || teamModelDefault()
             const brain = resolveBrain(model)
             const running = [...teamRuns.values()].filter((slot) => slot.sessionId === sessionId)
             return send(res, 200, {
@@ -4534,6 +4560,22 @@ export function createHandler(ctx, config = {}) {
               persisted: Boolean(entry && entry.persisted),
               messages: (entry ? entry.messages : []).map((m) => ({ role: m.role, text: m.text, at: m.at })),
             })
+          }
+          // v0.4：选择本会话的「指挥大脑」模型（持久化到组上，重启不丢）
+          if (req.method === 'POST' && route === '/team/model') {
+            const body = await readBody(req)
+            const sessionId = normalizeSessionId(body.sessionId || '')
+            const model = String(body.model || '').trim()
+            if (!sessionId) return send(res, 400, { error: 'team/model 需要 sessionId' })
+            if (!model) return send(res, 400, { error: 'team/model 需要 model' })
+            const group = groupForSession(state, sessionId)
+            if (!group) return send(res, 409, { error: '这个会话还没有小组，先在胶囊里切到小组模式' })
+            const brain = resolveBrain(model)
+            group.brainModel = model
+            const entry = teamSessionState(sessionId)
+            entry.model = model
+            await save()
+            return send(res, 200, { ok: true, sessionId, model, brainKind: brain.kind })
           }
           if (req.method === 'POST' && route === '/team/takeover') {
             // 预留：把团队会话接管成主对话（客户端半还没做）
@@ -7001,10 +7043,15 @@ async function keyUsage(config) {
 }
 
 function publicConfig(config) {
+  const own = state.config || {}
   return {
     defaultWorkspace: config.defaultWorkspace,
     hasClaudeKey: Boolean(config.claudeApiKey),
     lowBalanceThreshold: config.lowBalanceThreshold ?? 20,
+    // v0.4 团队三开关：页面「小组」tab 的选项面板读这三个
+    strictReview: own.authoritativeReviewer !== 'commander',
+    brainPermissions: own.brainPermissions === 'open' ? 'open' : 'closed',
+    requireCommanderReview: own.requireCommanderReview !== false,
   }
 }
 

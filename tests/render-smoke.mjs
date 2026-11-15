@@ -62,8 +62,8 @@ const CARD_PROPS = {
 
 const EXPECT = {
   live: { council: ['职位', '成员', '总画师风格', 'API key 用量'], 'council-thread': ['位成员', '发送'] },
-  empty: { council: ['单人模式'], 'council-mode': ['模式'] },
-  'with-review': { council: ['职位', '成员'], 'council-card': ['画师', '自审', '指挥审核', '[img]'], 'council-mode': ['模式'] },
+  empty: { council: ['单人模式'], 'council-mode': ['单人', '小组'] },
+  'with-review': { council: ['职位', '成员'], 'council-card': ['画师', '自审', '指挥审核', '[img]'], 'council-mode': ['单人', '小组'] },
 }
 
 const MODELS = { codex: ['gpt-6.1-sol'], claude: ['claude-sonnet-5'], deepseek: ['deepseek-flash'], image: ['gpt-image-2.5-flare'] }
