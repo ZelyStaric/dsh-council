@@ -3652,37 +3652,18 @@ function councilMcpConfig() {
 const TEAM_BRAIN_DISALLOWED = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'WebFetch', 'WebSearch']
 
 /**
- * 每个小组的 `council_delegate` 真实实现（bindAgent 注册时自登记）。
- *
- * 为什么需要它：claude / codex 大脑腿是**外部进程**，只能通过 council-mcp → `/internal/tool`
- * 回调。而 delegate 的真实逻辑写在 `bindAgent` 注册的工具闭包里（捕获了 group / ctx），
- * registry 拿不到。于是 v0.3.0 起 MCP 侧的 council_delegate 直接返回「不能经由 MCP 转发」，
- * 导致 **claude/codex 大脑永远无法派活**（只有 deepseek 大脑能用，因为它走 DSH 原生工具）。
- *
- * 现在：bindAgent 注册时把 impl 按组登记进来，`/internal/tool` 用 sessionId 找到组再取 impl，
- * 传一个最小 `exec`（只带 agent.id）即可复用同一份逻辑。
- */
-const delegateImplByGroup = new Map()
-
-/**
  * 工具表：把 bindAgent 里 register 的那些 name→execute 摘出来，供 /internal/tool 按名字转发。
  */
 function teamToolRegistry() {
   return {
     council_delegate: {
       async execute(args, exec) {
-        // 按会话找组 → 取该组登记的真实实现（见 delegateImplByGroup 注释）
         const sessionId = sessionIdOf(exec)
         const group = (sessionId && groupForSession(state, sessionId)) || activeGroup()
         if (!group) return { ok: false, error: '还没有小组，先在页面上建一个' }
-        const impl = delegateImplByGroup.get(group.id)
-        if (!impl) {
-          return {
-            ok: false,
-            error: '这个小组还没有绑定活会话，无法派活：先在页面上把胶囊切到「小组模式」（或打开一次该会话）再试。',
-          }
-        }
-        return impl(args, exec)
+        // 直接构造一份该组的 delegate 工具来执行：团队 turn 不产生 DSH agent，
+        // 所以不能依赖 bindAgent 注册过的闭包（那些只在小组会话里存在）。
+        return makeDelegateTool(ctx0, state.config || {}, group).execute(args, exec)
       },
     },
     council_collect: {
@@ -6085,32 +6066,17 @@ async function runMemberAction(group, args, ctx, config) {
       return toolResult({ ok: false, error: 'unknown action' })
 }
 
-function bindAgent(ctx, config, group, agent) {
-  const key = group.id + '\u0000' + agent.id
-  // 重复绑定时先释放旧的 disposer，避免"already registered"错误
-  if (boundAgents.has(key)) {
-    const oldCleanup = boundAgents.get(key)
-    try { oldCleanup() } catch { /* ignore */ }
-  }
-  const agentCtx = agent.ctx || ctx
-  const disposers = []
-  try {
-    disposers.push(agentCtx.systemPrompt.section({
-      name: 'council:mandate:' + group.id,
-      order: 100,
-      text: () => mandateText(state.groups.find((g) => g.id === group.id) || group),
-    }))
-    disposers.push(agentCtx.systemPrompt.section({
-      name: 'council:catalog:' + group.id,
-      order: 1200,
-      text: () => catalogText(),
-    }))
-    disposers.push(agentCtx.systemPrompt.section({
-      name: 'council:roster:' + group.id,
-      order: 1500,
-      text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
-    }))
-    const delegateTool = {
+/**
+ * 构造 council_delegate 工具（按组）。
+ *
+ * 做成工厂而不是直接写在 bindAgent 里，是为了让「团队大脑经 MCP 回调」也能用同一份实现：
+ * claude / codex 大脑是外部 CLI 子进程，跑团队 turn 时并不产生 DSH agent，
+ * 所以 agent/created 永远不会给它绑工具 —— 原先 MCP 侧只能返回「不能经由 MCP 转发」，
+ * 导致 claude/codex 大脑永远无法派活。现在 /internal/tool 直接
+ * makeDelegateTool(ctx0, config, group).execute(args, exec) 复用同一份逻辑。
+ */
+function makeDelegateTool(ctx, config, group) {
+  return {
       name: 'council_delegate',
       description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。多成员/多步任务用 request 交给指挥拆解；assignments 直派只用于单成员单任务的简单转派。',
       parameters: {
@@ -6285,8 +6251,6 @@ function bindAgent(ctx, config, group, agent) {
         },
       },
       execute: async function delegateImpl(args, exec) {
-        // 自登记：让 /internal/tool（MCP 转发的 council_delegate）能按组拿到这份真实实现。
-        try { delegateImplByGroup.set(group.id, delegateImpl) } catch { /* 登记失败不影响正常调用 */ }
         const background = args && args.background !== undefined ? Boolean(args.background) : backgroundDelegations()
         const runId = 'job_' + randomUUID().slice(0, 8)
         // 拆解职责归指挥：多成员/多任务直派在派活前就拒绝（返回错误结果，不抛异常），
@@ -6601,10 +6565,35 @@ function bindAgent(ctx, config, group, agent) {
         if (job.promise && typeof job.promise.catch === 'function') job.promise.catch(() => {})
         return toolResult({ background: true, runId, status: 'running', members: [] })
       },
-    }
-    // 注册即登记：大脑经 MCP 回调时不必等 DSH 侧先执行过一次
-    try { delegateImplByGroup.set(group.id, delegateTool.execute) } catch { /* 登记失败不影响正常功能 */ }
-    disposers.push(agentCtx.tools.register(delegateTool))
+  }
+}
+
+function bindAgent(ctx, config, group, agent) {
+  const key = group.id + '\u0000' + agent.id
+  // 重复绑定时先释放旧的 disposer，避免"already registered"错误
+  if (boundAgents.has(key)) {
+    const oldCleanup = boundAgents.get(key)
+    try { oldCleanup() } catch { /* ignore */ }
+  }
+  const agentCtx = agent.ctx || ctx
+  const disposers = []
+  try {
+    disposers.push(agentCtx.systemPrompt.section({
+      name: 'council:mandate:' + group.id,
+      order: 100,
+      text: () => mandateText(state.groups.find((g) => g.id === group.id) || group),
+    }))
+    disposers.push(agentCtx.systemPrompt.section({
+      name: 'council:catalog:' + group.id,
+      order: 1200,
+      text: () => catalogText(),
+    }))
+    disposers.push(agentCtx.systemPrompt.section({
+      name: 'council:roster:' + group.id,
+      order: 1500,
+      text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
+    }))
+    disposers.push(agentCtx.tools.register(makeDelegateTool(ctx, config, group)))
     disposers.push(agentCtx.tools.register({
       name: 'council_collect',
       description: '取回后台派活的结果：council_delegate 以 background 模式派活时会立刻返回 runId，成员在后台跑；完成后用这个工具收结果（可带等待秒数）。',
