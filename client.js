@@ -1401,9 +1401,14 @@ window.__ModuleLoader__.load({
       // ⚠️ 必须等 state 就绪再判断：初次渲染时 state === null，bound 必然是 false，
       // 急着隐藏会把「已绑定小组的会话」也一起藏掉（实测踩到）。
       useEffect(() => {
+        // ⚠️ 只有「会话内那个实例」才管 tab 可见性。
+        // 这个组件同时挂在 conversation.session.header.actions 和 conversation.hero.options 两处；
+        // hero 实例没有 sessionId → bound 恒为 false → 它会把刚显示出来的「团队/小组」又藏掉，
+        // 表现就是「切到小组后 tab 闪一下就没了」（实测踩到）。
+        if (!sessionId) return
         if (!state) return
         applyTabVisibility(!bound)
-      }, [bound, Boolean(state)])
+      }, [sessionId, bound, Boolean(state)])
 
       /* hero 预选 → 会话建立后自动启用小组模式 */
       useEffect(() => {
@@ -2041,17 +2046,22 @@ window.__ModuleLoader__.load({
         const list = document.querySelector('[data-conversation-tabs]')
         if (!list) return
         const tabs = Array.prototype.slice.call(list.querySelectorAll('button[role="tab"]'))
-        const mine = tabs.filter((b) => ['团队', '小组'].indexOf(String(b.textContent || '').trim()) >= 0)
+        const labelOf = (b) => String(b.textContent || '').trim()
+        const MINE = ['团队', '小组']      // 小组模式专属
+        const NATIVE = ['对话', '轨迹']    // 单人模式专属
+        const mine = tabs.filter((b) => MINE.indexOf(labelOf(b)) >= 0)
+        const native = tabs.filter((b) => NATIVE.indexOf(labelOf(b)) >= 0)
         if (!mine.length) return
-        // 先处理"正停在要被隐藏的 tab 上"：切回第一个（对话），避免内容区空白
-        if (solo) {
-          const active = mine.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
-          const first = tabs[0]
-          if (active && first && first !== active) {
-            try { first.click() } catch { /* ignore */ }
-          }
+        // 单人：只留 对话/轨迹；小组：只留 团队/小组（"对话窗口变为团队"，见用户需求）
+        const hide = solo ? mine : native
+        const show = solo ? native : mine
+        // 先把选中项挪到「会被显示」的那一边，再隐藏——否则内容区会变成空白
+        const activeHidden = hide.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
+        if (activeHidden && show[0]) {
+          try { show[0].click() } catch { /* ignore */ }
         }
-        for (const b of mine) b.style.display = solo ? 'none' : ''
+        for (const b of hide) b.style.display = 'none'
+        for (const b of show) b.style.display = ''
       } catch { /* DOM 结构变了就放弃隐藏，功能不受影响 */ }
     }
 
