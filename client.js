@@ -37,14 +37,6 @@ window.__ModuleLoader__.load({
       for (const listener of councilListeners) { try { listener() } catch { /* ignore */ } }
     }
 
-    /** Compact token counts: 1234 -> 1.2k, 1234567 -> 1.23M. */
-    function fmtTokens(value) {
-      const n = Number(value) || 0
-      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
-      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k'
-      return String(n)
-    }
-
     async function call(path, body) {
       const response = await fetch(API + path, body === undefined ? {} : {
         method: 'POST',
@@ -204,26 +196,7 @@ window.__ModuleLoader__.load({
       return h('button', { onClick: props.onClick, disabled: props.disabled, style: dimmed }, props.children)
     }
 
-    function statusChip(status) {
-      if (status === 'done') return styles.chip
-      if (status === 'running') return Object.assign({}, styles.chip, { borderColor: 'var(--dsw-alias-brand-primary)' })
-      if (status === 'failed') return Object.assign({}, styles.chip, styles.err)
-      return Object.assign({}, styles.chip, { opacity: 0.7 })
-    }
-
     const statusLabel = { pending: '排队中', running: '正在说…', done: '已回执', failed: '失败' }
-
-    function reviewLine(label, verdict) {
-      if (!verdict) return null
-      const chip = verdict.ok === true
-        ? styles.chip
-        : verdict.ok === false
-          ? Object.assign({}, styles.chip, styles.err)
-          : Object.assign({}, styles.chip, { opacity: 0.75 })
-      return h('div', { style: { marginTop: 2 } },
-        h('span', { style: chip }, label + '：' + (verdict.ok === true ? '通过' : verdict.ok === false ? '不通过' : '未判定')),
-        h('span', { style: { marginLeft: 6 } }, (verdict.by ? verdict.by + '：' : '') + (verdict.reason || '')))
-    }
 
     /** The group owned by one session (1:1 binding). */
     function groupForSession(state, sessionId) {
@@ -472,12 +445,6 @@ window.__ModuleLoader__.load({
         }, options.map((id) => h('option', { key: id, value: id }, id)))
       }
 
-      function labelOf(id) {
-        if (id.indexOf('commander:') === 0) return '指挥'
-        const member = (state.members || []).find((m) => m.id === id)
-        return member ? member.name : id
-      }
-
       function memberChip(member) {
         return h('span', {
           key: member.id, style: styles.chip, draggable: true,
@@ -611,89 +578,6 @@ window.__ModuleLoader__.load({
           }, member.persistent === false ? '临时' : '长久')))
       }
 
-      function apiCard() {
-        const info = apiConfig || {}
-        const save = () => {
-          const read = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : '' }
-          // 只提交「填了值的」字段：空输入框表示“保持原样”，不是“删除”，否则会互相清空
-          const body = {}
-          const pairs = [
-            ['council-codex-token', 'codexToken'],
-            ['council-claude-key', 'claudeKey'],
-            ['council-image-key', 'imageKey'],
-            ['council-codex-base', 'codexBase'],
-            ['council-claude-base', 'claudeBase'],
-            ['council-proxy-url', 'proxyUrl'],
-          ]
-          for (const [id, key] of pairs) {
-            const value = read(id)
-            if (value) body[key] = value
-          }
-          // provider 选择：每个框架选一个 DSH 设置里的 provider（空 = 不指定，回落到 key/base）
-          const providerByKind = {}
-          for (const kind of ['claude', 'codex', 'deepseek', 'image']) {
-            const value = read('provider-' + kind)
-            if (value) providerByKind[kind] = value
-          }
-          if (Object.keys(providerByKind).length) body.providerByKind = providerByKind
-          if (!Object.keys(body).length) return
-          mutate('/config', body)
-            .then(() => refreshModels())
-            .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
-            .then(() => { for (const [id] of pairs) { const el = document.getElementById(id); if (el) el.value = '' } })
-            .catch(() => {})
-        }
-        const clearKey = (key) => mutate('/config', { [key]: '' }).then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
-        const note = modelNote || {}
-        const refreshButton = h('button', {
-          type: 'button',
-          style: {
-            padding: '4px 10px', fontSize: 12, cursor: 'pointer', borderRadius: 6,
-            border: '1px solid ' + (note.ok === false ? 'var(--dsw-alias-border-danger, #c0392b)' : 'var(--dsw-alias-border-secondary, rgba(127,127,127,.35))'),
-            background: 'transparent',
-            color: note.ok === false ? 'var(--dsw-alias-label-danger, #c0392b)' : 'var(--dsw-alias-label-secondary, rgba(127,127,127,.9))',
-          },
-          onClick: () => { if (busy !== 'models') refreshCatalog() },
-        }, note.text ? note.text : (busy === 'models' ? '刷新中…' : '刷新模型列表'))
-        return h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
-          h('div', { style: { fontWeight: 600, marginBottom: 2 } }, '① CLI 与出图密钥'),
-          h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) },
-            '只有 codex / claude CLI 成员和 image 出图成员需要这里；其余成员不需要填。'
-            + '留空则用 profile 配置（当前来源：' + (info.source === 'page' ? '本页' : 'profile') + '）'),
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
-            refreshButton,
-            note.stale && note.stale.length
-              ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 12 }) },
-                '这些模型已不在新列表里（不会自动改）：' + note.stale.join('、'))
-              : null),
-          (providers && providers.length
-            ? h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
-              ['claude', 'codex', 'deepseek', 'image'].map((kind) => h('label', { key: kind, style: { display: 'flex', gap: 4, alignItems: 'center', fontSize: 12 } },
-                h('span', { style: styles.muted }, kind),
-                h('select', {
-                  id: 'provider-' + kind,
-                  style: Object.assign({}, styles.input, { width: 170 }),
-                  defaultValue: (info.providerByKind && info.providerByKind[kind]) || '',
-                }, [h('option', { key: '', value: '' }, '（默认/不指定）')].concat(
-                  providers.map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id)),
-                )))))
-            : h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6, fontSize: 12 }) },
-              '未能读取 DSH 设置里的 provider 列表（会在保存时尝试）')),
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-            h('input', { id: 'council-codex-token', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt key（codex 用）' + (info.hasCodexToken ? ' · 已配置' : '') }),
-            h(Button, { onClick: () => clearKey('codexToken') }, '清空'),
-            h('input', { id: 'council-claude-key', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'claude key' + (info.hasClaudeKey ? ' · 已配置' : '') }),
-            h(Button, { onClick: () => clearKey('claudeKey') }, '清空'),
-            h('input', { id: 'council-image-key', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), type: 'password', placeholder: 'gpt-image key' + (info.hasImageKey ? ' · 已配置' : '') }),
-            h(Button, { onClick: () => clearKey('imageKey') }, '清空'),
-            h(Button, { onClick: () => clearKey('proxyUrl') }, '清空代理')),
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 } },
-            h('input', { id: 'council-codex-base', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.codexBase || '', placeholder: 'codex base URL' }),
-            h('input', { id: 'council-claude-base', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.claudeBase || '', placeholder: 'claude base URL（留空=用 profile）' }),
-            h('input', { id: 'council-proxy-url', style: Object.assign({}, styles.input, { flex: '1 1 200px' }), defaultValue: info.proxyUrl || '', placeholder: '代理 http://127.0.0.1:7897（可选，官方 key 才需要）' }),
-            h(Button, { onClick: save }, '保存 API 配置')),
-          h('div', { style: Object.assign({}, styles.muted, { marginTop: 6 }) }, '只提交填了值的项：留空 = 保持原样，要删除请点对应的「清空」。保存后立即生效。'))
-      }
       /* ── v0.4 团队选项：三个开关（需要指挥审核 / 严格审核 / 大脑权限）──────
        * 取代原来的 usagePanel（那个函数定义了但从未被调用，属历史残留）。
        * 读写都走 /config：strictReview ↔ authoritativeReviewer、
@@ -1410,36 +1294,6 @@ window.__ModuleLoader__.load({
       },
     }
 
-    function CouncilChatRow(props) {
-      const node = props && (props.node || props.data)
-      const data = node && node.data ? node.data : node
-      const text = data && typeof data.text === 'string' ? data.text : ''
-      const sections = parseCouncilText(text)
-      if (!sections.length) return null
-      const banner = h('div', {
-        style: {
-          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
-          borderRadius: 10, background: 'var(--dsw-alias-bg-layer-2)',
-          border: '1px solid var(--dsw-alias-border-l1)', fontSize: 12,
-        },
-      }, h('strong', null, '小组群聊'), h('span', { style: styles.muted }, sections.length + ' 位成员'))
-      const rows = sections.map(function (item, index) {
-        const bubble = h('div', { style: Object.assign({}, styles.bubble, { flex: 1 }) },
-          h('div', { style: styles.who }, item.who + (item.kind ? ' · ' + item.kind : '')),
-          item.body ? h(Collapsible, { text: item.body }) : null,
-          item.image ? h('img', {
-            src: item.image, alt: 'generated',
-            style: { display: 'block', maxWidth: 320, marginTop: 6, borderRadius: 8 },
-          }) : null,
-          (item.review || []).map(function (entry, i) {
-            return h('div', { key: i, style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, entry[0] + '：' + entry[1])
-          }))
-        return h('div', { key: index, style: { display: 'flex', alignItems: 'flex-start', maxWidth: '88%', marginTop: 8 } },
-          h(Avatar, { kind: item.kind, name: item.who }),
-          bubble)
-      })
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, margin: '6px 0' } }, banner, rows)
-    }
     /* ── v0.4 模式胶囊：左「单人」右「小组」双段按钮 + 大脑模型下拉 ──────
      * 未建会话（hero 草稿态）时点「小组」会记住预选，发出第一条消息、
      * 会话建立后自动建组并绑定（见下方 useEffect）。
@@ -2109,8 +1963,16 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.who }, '指挥 · 生成中'),
               h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, streamText)))]
             : [])
-        : h('div', { style: Object.assign({}, styles.muted, { padding: 12 }) },
-          '还没有团队对话。直接在下面说你要做什么——指挥会拆解、选人、派活，成员的回执会回到这里。')),
+        : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
+          // 单人模式（或还没绑定小组）时给明确入口。
+          // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
+          // 在单人模式下仍然存在；这里用引导卡片替代"消失"，避免用户进来看到空白。
+          h('div', { style: { fontSize: 14, fontWeight: 600 } }, '这个会话还没有团队'),
+          h('div', { style: styles.muted },
+            '点页面右上角的胶囊切到「小组」，就会为这个会话建一个小组：'
+            + '你说的每句话都会交给指挥，它拆解后派给成员干活，成员的回执会回到这里。'),
+          h('div', { style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.8 }) },
+            '（单人模式下这个页签可忽略：消息直接由本会话回答，不经过指挥。）'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
       /* 输入区 */
       h('div', { style: { display: 'flex', gap: 6, flex: '0 0 auto' } },
