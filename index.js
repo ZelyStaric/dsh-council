@@ -690,7 +690,9 @@ function delegateReceiptText(value) {
     ? '\n\n## 子进程回收\n- 已释放 ' + input.sweptChildren + ' 个驻留子代理'
     : ''
   const planLine = input.plan && input.plan.confirmation ? '**指挥确认**：' + String(input.plan.confirmation) : ''
-  return head + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
+  if (input.error && !(input.members || []).length) return plannerSection(input)
+  const planner = plannerSection(input)
+  return head + (planner ? planner + '\n\n' : '') + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
 }
 
 /** 取出当前会话最近一个后台任务。 */
@@ -4167,6 +4169,7 @@ function mandateText(group) {
     '你自己不得编写实现代码、不得直接修改文件或执行构建命令来完成任务（只能读取、检查、验收）。',
     '例外只有三种：① 用户明确说"你自己做"或"你直接改"；② 只是回答关于小组本身的问题（怎么用、成员有谁、为什么失败）；③ 需要检查文件/日志/状态来验收或排障（只读操作）。',
     '若你发现自己在写代码或跑构建命令，立即停下，改用 council_delegate 派给成员。',
+    '拆解职责属于「指挥」成员：超过 1 个成员、或需要多步拆分的任务，必须用 request 交给指挥拆；assignments 直派只用于单成员单任务的简单转派。主对话只负责验收、汇报与插话。',
     '『验收未通过』≠ 交付：若 council_delegate 回执标了未通过验收，禁止把它当成果汇报给用户；要么继续派返工（最多 maxRework 次），要么明确告诉用户哪里没过。',
     '违反这条 = 任务失败。',
   ].join('\n')
@@ -4192,6 +4195,32 @@ const SELF_WORK_ESCAPE = /你自己做|你直接改|你亲自动手|放行/
 
 /** 拒绝理由：与 mandateText 的措辞一致，并给出两条逃生路径。 */
 const SELF_WORK_DENY_REASON = '小组模式：不要自己执行写操作。用 council_delegate 派给成员；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。'
+
+/**
+ * 拆解职责归指挥：多成员/多任务只走 request 让指挥拆解，assignments 直派限单成员单任务。
+ * 实测会话 fb8404c5：714 次 council_delegate 里 322 次主对话自己写 assignments，只有 12 次用
+ * request 让指挥拆解 —— 指挥形同虚设。命中时返回错误结果（不抛异常），逃生口是 bypassPlanner:true。
+ */
+const PLANNER_REQUIRED_ERROR = '多成员/多任务派活必须用 request 交给指挥拆解（assignment 直派只允许单个成员单任务）；若确需绕过，加 bypassPlanner:true 并说明理由。'
+
+/** 回执顶部的「## 拆解」一节：谁做的拆解（指挥 / 主对话直派），被拒绝时写清原因。 */
+function plannerSection(value) {
+  const input = value || {}
+  if (input.error && !(input.members || []).length) {
+    return '## 拆解\n- 未执行：主对话试图直派多个任务（多成员/多任务必须交给指挥拆解）\n\n## 派活被拒绝\n' + String(input.error)
+  }
+  if (input.plannedBy === 'commander') {
+    const who = input.planner || {}
+    const name = String(who.name || '指挥')
+    const route = [who.kind, who.model].filter(Boolean).map(String).join(' / ')
+    return '## 拆解\n- 由 ' + name + (route ? '（' + route + '）' : '') + ' 拆解'
+  }
+  if (input.plannedBy === 'parent') {
+    return '## 拆解\n- 由 主对话直接派活（'
+      + (input.bypassPlanner === true ? '多任务，bypassPlanner 绕过指挥拆解' : '单成员单任务') + '）'
+  }
+  return ''
+}
 
 /**
  * 方案 B：只读工具分组 —— 放行但计数。父会话自己 grep/读代码/看图判读，
@@ -5320,7 +5349,7 @@ function bindAgent(ctx, config, group, agent) {
     }))
     disposers.push(agentCtx.tools.register({
       name: 'council_delegate',
-      description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。一次调用可以派多个成员，它们并发执行。',
+      description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。多成员/多步任务用 request 交给指挥拆解；assignments 直派只用于单成员单任务的简单转派。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -5332,7 +5361,7 @@ function bindAgent(ctx, config, group, agent) {
           } } },
           assignments: {
             type: 'array',
-            description: '要派发的任务；每个任务都必须自包含（背景+目标+验收标准）。',
+            description: '要派发的任务，只用于单成员单任务的简单转派；超过 1 个任务必须改用 request 交给指挥拆解。每个任务都必须自包含（背景+目标+验收标准）。',
             items: {
               type: 'object',
               additionalProperties: false,
@@ -5345,6 +5374,7 @@ function bindAgent(ctx, config, group, agent) {
               required: ['member', 'task'],
             },
           },
+          bypassPlanner: { type: 'boolean', description: '默认 false。只有确需绕过指挥拆解、由主对话直派多个任务时才设 true，并在回执正文说明理由（回执会标记为绕过）。' },
         },
       },
       output: {
@@ -5368,6 +5398,15 @@ function bindAgent(ctx, config, group, agent) {
               additionalProperties: true,
             },
             plan: { type: 'object', additionalProperties: true },
+            plannedBy: { type: 'string', enum: ['commander', 'parent'], description: '本次拆解由谁做的：commander=指挥成员拆解；parent=主对话直接派活（单成员单任务）。' },
+            planner: {
+              type: 'object',
+              description: 'plannedBy=commander 时，实际拆解的指挥成员（名字 / 框架 / 模型）。',
+              properties: { name: { type: 'string' }, kind: { type: 'string' }, model: { type: 'string' } },
+              additionalProperties: true,
+            },
+            bypassPlanner: { type: 'boolean', description: 'true = 本次多任务直派绕过了指挥拆解（调用方显式传了 bypassPlanner:true）。' },
+            error: { type: 'string', description: '派活未被受理的原因（如多成员直派被拒绝）；此时没有执行任何成员。' },
             acceptanceStatus: {
               type: 'string',
               enum: ACCEPTANCE_STATUSES.slice(),
@@ -5468,12 +5507,31 @@ function bindAgent(ctx, config, group, agent) {
           if (value && value.background) {
             return [{ type: 'text', text: '已在后台派活（' + value.runId + '）：成员在后台跑，你随时可以继续说话；完成后用 council_collect 收结果。' }]
           }
-          return [{ type: 'text', text: head + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
+          // 派活未被受理（多任务直派被拒）：只回拒绝原因，不要拼「没有成员回执」的噪音
+          if (value && value.error && !(value.members || []).length) {
+            return [{ type: 'text', text: plannerSection(value) }]
+          }
+          const planner = plannerSection(value)
+          return [{ type: 'text', text: head + (planner ? planner + '\n\n' : '') + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
         },
       },
       async execute(args, exec) {
         const background = args && args.background !== undefined ? Boolean(args.background) : backgroundDelegations()
         const runId = 'job_' + randomUUID().slice(0, 8)
+        // 拆解职责归指挥：多成员/多任务直派在派活前就拒绝（返回错误结果，不抛异常），
+        // 连成员都不建，避免「先建了临时成员再回滚」的副作用。
+        const directAssignments = Array.isArray(args && args.assignments) ? args.assignments : []
+        const bypassPlanner = Boolean(args && args.bypassPlanner === true)
+        if (!bypassPlanner && directAssignments.length > 1) {
+          return toolResult({
+            error: PLANNER_REQUIRED_ERROR,
+            members: [],
+            staffing: [],
+            bypassPlanner: false,
+            acceptanceStatus: 'none',
+            acceptanceNote: '派活被拒绝：没有执行任何成员，不是交付物',
+          })
+        }
         const runOnce = async () => {
         const live = state.groups.find((g) => g.id === group.id) || group
         // 本次派活新建的临时成员：成功 / 失败 / 取消都在 finally 里回收
@@ -5513,6 +5571,14 @@ function bindAgent(ctx, config, group, agent) {
             break delegate
           }
         }
+        // 拆解归属：request 路径由指挥拆解；assignments 直派由主对话自己派（单成员单任务，
+        // 或多任务显式 bypassPlanner）。回执顶部「## 拆解」与结构化字段都从这里取。
+        response.plannedBy = requestText && !directAssignments.length ? 'commander' : 'parent'
+        if (response.plannedBy === 'commander') {
+          const cmdr = memberWithRole(live, '指挥')
+          if (cmdr) response.planner = { name: cmdr.name, kind: cmdr.kind, ...(cmdr.model ? { model: cmdr.model } : {}) }
+        }
+        if (bypassPlanner && directAssignments.length > 1) response.bypassPlanner = true
         // assignments 里直接写职位名、但本组还没人持有该职位 → 按职位默认自动补员
         const missingRoles = assignments
           .filter((a) => typeof a.member === 'string'

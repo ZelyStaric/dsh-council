@@ -2,6 +2,28 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.68] - 2026-11-15
+
+### 变更
+
+- **拆解职责强制归「指挥」**：`council_delegate` 收 `assignments` 且超过 1 个任务 → 直接返回
+  错误结果（不抛异常；结构化 `error` 字段 + 回执「## 派活被拒绝」），文案明确要求改用 `request`
+  交给指挥拆解。逃生口 `bypassPlanner: true`（回执标「多任务，bypassPlanner 绕过指挥拆解」）；
+  单成员单任务直派保持轻量，回执标 `plannedBy: 'parent'`。背景：实测会话 `fb8404c5` 的 714 次
+  `council_delegate` 中 322 次是主对话自己给 `assignments`，只有 12 次用 `request` 让指挥拆。
+- **回执顶部新增「## 拆解」**：`plannedBy: 'commander'` 时显示实际拆解的指挥成员
+  （名字 / 框架 / 模型，如「由 指挥（claude / claude-fable-5-2）拆解」）；`'parent'` 时显示
+  「由 主对话直接派活（单成员单任务）」。新增结构化字段 `plannedBy` / `planner` / `bypassPlanner`。
+- **`mandateText()` 增加拆解约束**：超过 1 个成员或多步拆分的任务必须用 `request` 交给指挥；
+  `assignments` 直派只用于单成员单任务的简单转派；主对话只负责验收、汇报与插话。
+
+### 测试
+
+- `tests/staffing-test.mjs` 新增 3 条（164 → 167）：多成员直派被拒（不抛、0 次成员执行、
+  `bypassPlanner:true` 放行并继续）／单成员直派 `plannedBy === 'parent'`／`request` 路径
+  `plannedBy === 'commander'` 且回执带指挥名字与模型。「验收②」改为断言回执首行是「## 拆解」。
+- 同一测试内的 `bypassPlanner` 回执断言「bypassPlanner 绕过指挥拆解」，防止绕过被静默。
+
 ## [0.2.63] - 2026-11-13
 
 ### 变更

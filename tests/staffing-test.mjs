@@ -40,6 +40,9 @@
  *   - 越权审计（方案 B）：放行的 bash / read_image / grep+glob+read+read_file 也计数（不拦）/
  *     council_delegate 回执按「水位线」只报上次回执之后的 Δ：先跑后派也会报；有则输出
  *     「## 越权审计」+ selfRan 三个数字，无则不出该节且全 0
+ *   - 拆解职责归指挥：多成员 assignments 且无 bypassPlanner → 返回 error（不抛、不执行成员）；
+ *     bypassPlanner:true → 放行并标 plannedBy=parent；单成员 assignments → plannedBy=parent；
+ *     request 路径 → plannedBy=commander（planner 名字/框架/模型取自 group 的指挥成员）
  *   - 路由一致性：client 的 SESSIONS_PRUNE_PATH === host 的 SESSIONS_PRUNE_ROUTE
  *
  * Usage: node tests/staffing-test.mjs
@@ -2479,7 +2482,8 @@ try {
       const rendered = tool.output.render({}, out)[0].text
       assert.doesNotMatch(rendered, /⛔/, '验收通过时不许出现 ⛔')
       assert.doesNotMatch(rendered, /## 验收（本次调用）/, '验收通过时不加「## 验收（本次调用）」段')
-      assert.match(rendered.split('\n')[0], /^## 代码/, '首行应直接是成员回执，实际：' + rendered.split('\n')[0])
+      assert.equal(rendered.split('\n')[0], '## 拆解', '首行应是拆解归属，实际：' + rendered.split('\n')[0])
+      assert.match(rendered, /\n## 代码（/, '成员回执应紧随拆解两行之后')
       return '无 ⛔ · status=passed · 首行=' + rendered.split('\n')[0]
     } finally {
       mod.__setRunKind(undefined)
@@ -4263,6 +4267,103 @@ try {
       return '首次推 1 条 user 文本（含 runId/状态/回执）· 重复推被拦 · 失败任务推 error · 开关关闭不推'
     } finally {
       mod.__setState(saved)
+    }
+  })
+
+  /* ── A+B：拆解职责归指挥（多任务直派被拦 / 单任务直派 / request 由指挥拆解） ── */
+  const bindPlannerGroup = async () => {
+    const next = structuredClone(fixture)
+    next.roles.push({ id: 'r_cmd', name: '指挥', prompt: '拆解', kind: 'claude', model: 'claude-fable-5-2' })
+    next.members.push(
+      { id: 'm_cmd', name: '指挥', kind: 'claude', model: 'claude-fable-5-2', roleId: 'r_cmd' },
+      { id: 'm_code2', name: '代码2', kind: 'deepseek', model: 'deepseek-flash', roleId: 'r_code' },
+    )
+    next.groups = [{
+      id: 'g_plan', name: 'Plan', sessionId: 'session-g5',
+      memberIds: ['m_cmd', 'm_code', 'm_code2'], requirePrelim: false, requireCommander: false,
+    }]
+    setState(next)
+    mod.__resetProgress()
+    await getState('?sessionId=session-g5')
+    return registered.council_delegate
+  }
+
+  await check('拆解①：多成员 assignments 且无 bypassPlanner → 返回 error（不抛），一个成员都不跑', async () => {
+    const tool = await bindPlannerGroup()
+    let ran = 0
+    mod.__setRunKind(async () => { ran += 1; return { ok: true, text: '做完了' } })
+    try {
+      const result = await tool.execute(
+        { assignments: [{ member: '代码', task: '改 A' }, { member: '代码2', task: '改 B' }] },
+        { callId: 'c-planner-block', agent: { id: 'session-g5' } },
+      )
+      assert.equal(ran, 0, '被拒绝时不应执行任何成员')
+      assert.ok(result.error, '必须返回 error 字段（不抛异常）')
+      assert.match(result.error, /多成员\/多任务派活必须用 request 交给指挥拆解/)
+      assert.equal(result.members.length, 0)
+      const rendered = tool.output.render({}, result)[0].text
+      assert.match(rendered, /## 拆解\n- 未执行/)
+      assert.match(rendered, /## 派活被拒绝\n多成员\/多任务派活必须用 request 交给指挥拆解/)
+      // bypassPlanner:true → 放行并继续
+      const bypassed = await tool.execute(
+        { assignments: [{ member: '代码', task: '改 A' }, { member: '代码2', task: '改 B' }], bypassPlanner: true },
+        { callId: 'c-planner-bypass', agent: { id: 'session-g5' } },
+      )
+      assert.equal(bypassed.error, undefined, 'bypassPlanner:true 必须放行')
+      assert.equal(ran, 2, '绕过时两个成员都应执行')
+      assert.equal(bypassed.members.length, 2)
+      assert.equal(bypassed.plannedBy, 'parent')
+      assert.equal(bypassed.bypassPlanner, true)
+      assert.match(tool.output.render({}, bypassed)[0].text, /bypassPlanner 绕过指挥拆解/)
+      return '直派被拒（0 次执行）· bypassPlanner 放行（2 次执行）· 回执分别标记'
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('拆解②：单成员 assignments → 成功且 plannedBy=parent（保持轻量直派）', async () => {
+    const tool = await bindPlannerGroup()
+    mod.__setRunKind(async () => ({ ok: true, text: '做完了' }))
+    try {
+      const out = await tool.execute(
+        { assignments: [{ member: '代码', task: '写点东西' }] },
+        { callId: 'c-planner-single', agent: { id: 'session-g5' } },
+      )
+      assert.equal(out.members.length, 1)
+      assert.equal(out.members[0].ok, true)
+      assert.equal(out.plannedBy, 'parent')
+      assert.equal(out.bypassPlanner, undefined, '单任务直派不该标记绕过')
+      const rendered = tool.output.render({}, out)[0].text
+      assert.match(rendered, /## 拆解\n- 由 主对话直接派活（单成员单任务）/)
+      return 'plannedBy=parent · 回执「由 主对话直接派活（单成员单任务）」'
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('拆解③：request 路径 → plannedBy=commander（名字/模型从 group 的指挥成员取）', async () => {
+    const tool = await bindPlannerGroup()
+    mod.__setRunKind(async (_ctx, _member, prompt) => {
+      if (String(prompt).includes('你是这个小组的指挥')) {
+        return { ok: true, text: JSON.stringify({ assignments: [{ member: '代码', task: '写点东西' }] }) }
+      }
+      return { ok: true, text: '做完了' }
+    })
+    try {
+      const out = await tool.execute(
+        { request: '让代码写点东西' },
+        { callId: 'c-planner-cmd', agent: { id: 'session-g5' } },
+      )
+      assert.equal(out.plannedBy, 'commander')
+      assert.equal(out.planner.name, '指挥')
+      assert.equal(out.planner.kind, 'claude')
+      assert.equal(out.planner.model, 'claude-fable-5-2')
+      assert.equal(out.members[0].name, '代码')
+      const rendered = tool.output.render({}, out)[0].text
+      assert.match(rendered, /## 拆解\n- 由 指挥（claude \/ claude-fable-5-2） 拆解/)
+      return 'plannedBy=commander · 回执「由 指挥（claude / claude-fable-5-2）拆解」'
+    } finally {
+      mod.__setRunKind(undefined)
     }
   })
 
