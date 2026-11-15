@@ -13,7 +13,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const STATE_FILE = path.join(DSH_HOME, 'storages', 'council.json')
@@ -1178,9 +1178,11 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config, scopeUnit = '', extraArgs = null }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
+  // 团队大脑：只读沙箱 + 只挂 council MCP（必须在 prompt/resume 之前）
+  if (Array.isArray(extraArgs) && extraArgs.length) args.push(...extraArgs)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
 
@@ -1200,7 +1202,7 @@ async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, time
   }
 
   try {
-    const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName })
+    const { code, out, err, reason, error: killedError } = await run(CODEX_BIN, args, { cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName, scopeUnit })
     const events = jsonLines(out)
     const started = events.find((e) => e.type === 'thread.started')
     const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')
@@ -1254,7 +1256,7 @@ function claudeCliModel(model) {
   return CLAUDE_CLI_MODEL_ALIASES[id] || id
 }
 
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false, extraArgs = null, scopeUnit = '' }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -1267,6 +1269,8 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   // 默认不带 MCP：member 的 MCP 越多，启动越慢（实测两个 Blender MCP 会让首轮卡几分钟）
   if (!allowMcp) args.push('--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}')
+  // 团队模式：调用方自带 MCP 配置（只挂 council，其它一律不给），放在 --strict-mcp-config 之后
+  if (Array.isArray(extraArgs) && extraArgs.length) args.push(...extraArgs)
   const exec = claudeExecOverride || run
   if (resume && !noResume) args.push('--resume', resume)
 
@@ -1290,6 +1294,7 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
     const input = steerable ? JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n' : undefined
     const { code, out, err, reason, error: killedError } = await exec(claudeBin, args, {
       cwd, env, signal: actualSignal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName,
+      scopeUnit,
       input,
       keepStdinOpen: steerable,
       onSpawn: steerable ? (child) => {
@@ -3388,6 +3393,238 @@ async function archiveGroupForSession(sessionId) {
   return group
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 团队模式（Team Mode）Host 半
+//
+// 设计：大脑（brain）只长「编排」的手，不长「干活」的手。大脑拿到的唯一工具集是
+// council-mcp.mjs 提供的 5 个 council_* 工具，它自己不能读文件、不能跑命令；
+// 所有实际动作都由 council_delegate 路由到成员腿上执行。
+//
+// 模型 → 腿的路由是**前缀约定**，不查表：
+//   claude-*              → claude CLI 无头（--output-format stream-json）
+//   gpt-* / o<数字>*      → codex CLI（exec --json）
+//   deepseek-*            → 现有 DSH subagent seam（唯一支持追问的一腿）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 团队模式默认大脑模型（页面配置里的 teamModel 优先）。 */
+const DEFAULT_TEAM_MODEL = 'claude-fable-5-2'
+/** 团队会话在内存里留多少条消息（/team/state 只读这里）。 */
+const TEAM_MESSAGE_LIMIT = 200
+
+/**
+ * 按模型名前缀决定走哪条腿。
+ * @param {string} model 模型名
+ * @returns {{kind: 'claude-cli'|'codex'|'dsh-seam', model: string}}
+ */
+function resolveBrain(model) {
+  const name = String(model || '').trim() || DEFAULT_TEAM_MODEL
+  const lower = name.toLowerCase()
+  if (lower.startsWith('claude')) return { kind: 'claude-cli', model: name }
+  if (lower.startsWith('gpt') || /^o\d/.test(lower)) return { kind: 'codex', model: name }
+  if (lower.startsWith('deepseek')) return { kind: 'dsh-seam', model: name }
+  // 认不出来的名字按 claude 处理：默认大脑就是 claude-*，宁可报「没装 claude CLI」也不要静默挑错腿
+  return { kind: 'claude-cli', model: name }
+}
+
+/** 团队会话状态（进程内，最近 TEAM_MESSAGE_LIMIT 条，重启即失效——大脑侧不依赖历史）。 */
+const teamSessions = new Map()
+/** 正在跑的团队 turn：runId → { sessionId, unit, listeners:Set, stopped } */
+const teamRuns = new Map()
+
+function teamSessionState(sessionId) {
+  const key = normalizeSessionId(sessionId) || String(sessionId || '')
+  if (!teamSessions.has(key)) {
+    teamSessions.set(key, { model: '', brainKind: '', convId: undefined, messages: [], turns: 0, persisted: false })
+  }
+  return teamSessions.get(key)
+}
+
+/** 往团队会话里追加一条消息（超过上限丢最早的）。 */
+function teamPushMessage(entry, role, text) {
+  entry.messages.push({ role, text: String(text ?? ''), at: Date.now() })
+  if (entry.messages.length > TEAM_MESSAGE_LIMIT) entry.messages.splice(0, entry.messages.length - TEAM_MESSAGE_LIMIT)
+}
+
+/**
+ * 把一条团队消息写进 DSH 会话日志（`plugin:council/team` 记录），失败返回 false。
+ * 拿不到会话（agent 不在 / 已在团队 turn 之外被回收）时由调用方降级成插件内存态。
+ */
+function persistTeamMessage(ctx, sessionId, message) {
+  try {
+    const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    if (!agents || typeof agents.get !== 'function' || !sessionId) return false
+    let agent = agents.get(sessionId)
+    if (!agent && !String(sessionId).startsWith('session-')) agent = agents.get('session-' + sessionId)
+    const session = agent && agent.session
+    if (!session || typeof session.append !== 'function') return false
+    session.append('plugin:council/team', Object.assign({ at: Date.now() }, message))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 默认大脑模型：页面配置 > 默认常量。 */
+function teamModelDefault() {
+  const configured = String((state && state.config && state.config.teamModel) || '').trim()
+  return configured || DEFAULT_TEAM_MODEL
+}
+
+/** 团队模式 MCP 配置：只挂 council 一个服务器，其它一律不给（配合 --strict-mcp-config）。 */
+function councilMcpConfig() {
+  const self = fileURLToPath(new URL('./council-mcp.mjs', import.meta.url))
+  const env = { COUNCIL_API: process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api' }
+  if (process.env.COUNCIL_TOKEN) env.COUNCIL_TOKEN = process.env.COUNCIL_TOKEN
+  return JSON.stringify({ mcpServers: { council: { command: process.execPath, args: [self], env } } })
+}
+
+/** 团队模式禁止大脑用的工具（它只准编排，不准自己动手）。 */
+const TEAM_BRAIN_DISALLOWED = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'WebFetch', 'WebSearch']
+
+/**
+ * 工具表：把 bindAgent 里 register 的那些 name→execute 摘出来，供 /internal/tool 按名字转发。
+ * 这里只登记「无状态、按 args 干活」的工具；council_delegate / council_collect 需要活着的
+ * agent 上下文（后台任务表绑在具体会话上），转发过来时给出明确错误而不是炸掉。
+ */
+function teamToolRegistry() {
+  return {
+    council_delegate: {
+      async execute() {
+        return { ok: false, error: 'council_delegate 不能经由 MCP 转发：它需要活的会话上下文。请由 DSH 会话内的模型直接调用。' }
+      },
+    },
+    council_collect: {
+      async execute() {
+        return { ok: false, error: 'council_collect 不能经由 MCP 转发：后台任务表绑在具体会话上。' }
+      },
+    },
+    council_tell: {
+      async execute(args, exec) {
+        const text = String((args && args.text) || '').trim()
+        if (!text) return { ok: false, error: 'text 不能为空' }
+        const callId = String((args && args.callId) || sessionIdOf(exec) || '')
+        const member = String((args && args.member) || '')
+        // 复用既有插话通道：callId 精确命中优先，否则取任意在跑目标（member 名由 * 通配键兜底）
+        const result = await steerRunningMember(callId, text, member || undefined)
+        return result && typeof result === 'object'
+          ? { ok: Boolean(result.ok), via: result.via ?? null, memberName: result.memberName ?? null, error: result.error ?? null }
+          : { ok: false, error: '插话通道无响应' }
+      },
+    },
+    council_member: {
+      async execute(args, exec) {
+        const a = args && typeof args === 'object' ? args : {}
+        const sessionId = sessionIdOf(exec)
+        const group = (sessionId && groupForSession(state, sessionId)) || activeGroup()
+        if (!group) return { ok: false, error: '还没有小组，先在页面上建一个' }
+        return await runMemberAction(group, a, ctx0, state.config || {})
+      },
+    },
+    council_status: {
+      async execute() {
+        return {
+          ok: true,
+          members: state.members.map((m) => ({ id: m.id, name: m.name, kind: m.kind, model: m.model ?? null, roleId: m.roleId ?? null })),
+          groups: state.groups.map((g) => ({ id: g.id, name: g.name, sessionId: g.sessionId ?? null, memberCount: (g.memberIds || []).length })),
+          running: steerTargets.size,
+          teamModel: teamModelDefault(),
+        }
+      },
+    },
+  }
+}
+
+/**
+ * 跑一个团队 turn。三条腿都收敛成同一个返回形状，调用方不用关心底层。
+ *
+ * @param {{sessionId: string, model?: string, text: string, onDelta?: (text: string) => void,
+ *          signal?: AbortSignal, cwd?: string, scopeUnit?: string}} options
+ * @returns {Promise<{ok: boolean, text: string, convId: string|null, error: string|null, kind: string}>}
+ */
+async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUnit } = {}) {
+  const session = teamSessionState(sessionId)
+  const brain = resolveBrain(model || session.model || teamModelDefault())
+  session.model = brain.model
+  session.brainKind = brain.kind
+  const prompt = String(text ?? '')
+  const workdir = cwd || process.env.COUNCIL_TEAM_CWD || process.cwd()
+  if (!prompt.trim()) return { ok: false, text: '', convId: null, error: 'text 不能为空', kind: brain.kind }
+  const delta = (chunk) => {
+    if (typeof onDelta !== 'function' || !chunk) return
+    try { onDelta(String(chunk)) } catch { /* 监听方出错不影响主流程 */ }
+  }
+
+  if (brain.kind === 'dsh-seam') {
+    // DSH 腿需要父 agent；团队模式的 turn 由客户端的 /team/send 触发，没有父 agent
+    const result = await runDeepseekViaSeam(ctx0, { name: '脑子', kind: 'deepseek', model: brain.model }, prompt, state.config || {}, null, memberMaxMinutesMs(state.config || {}))
+    const out = String(result?.text || '')
+    if (out) delta(out)
+    return {
+      ok: Boolean(result?.ok),
+      text: out,
+      convId: result?.convId ?? null,
+      error: result?.ok ? null : String(result?.error || 'DSH seam 不可用（团队 turn 没有父 agent）'),
+      kind: brain.kind,
+    }
+  }
+
+  if (brain.kind === 'codex') {
+    const codexExtra = [
+      '-c', 'sandbox_mode="read-only"',
+      '-c', 'mcp_servers.council.command="' + process.execPath + '"',
+      '-c', 'mcp_servers.council.args=["' + fileURLToPath(new URL('./council-mcp.mjs', import.meta.url)) + '"]',
+      '-c', 'mcp_servers.council.env.COUNCIL_API="' + (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api') + '"',
+    ]
+    const result = await runCodex({
+      cwd: workdir,
+      model: brain.model,
+      resume: session.convId || undefined,
+      prompt,
+      signal,
+      scopeUnit,
+      extraArgs: codexExtra,
+      // 团队 turn 没有父 agent：内存上限只走 systemd scope
+      maxDurationMs: memberMaxMinutesMs(state.config || {}) || undefined,
+      config: state.config,
+      memberName: '脑子',
+    })
+    if (!session.convId && result.convId) session.convId = result.convId
+    if (result.text) delta(result.text)
+    return {
+      ok: Boolean(result.ok),
+      text: String(result.text || ''),
+      convId: result.convId ?? null,
+      error: result.ok ? null : String(result.error || 'codex 失败'),
+      kind: brain.kind,
+    }
+  }
+
+  // claude CLI 腿（默认）。runClaude 自己处理「没装 claude」的中文报错与 scope 内存上限。
+  const result = await runClaude({
+    cwd: workdir,
+    model: brain.model,
+    resume: session.convId || undefined,
+    prompt,
+    signal,
+    scopeUnit,
+    config: state.config,
+    memberName: '脑子',
+    noTools: false,
+    allowMcp: true, // 关键：不让 runClaude 塞空 --mcp-config，council 服务器由 extraArgs 带进去
+    maxDurationMs: memberMaxMinutesMs(state.config || {}) || undefined,
+    extraArgs: ['--strict-mcp-config', '--mcp-config', councilMcpConfig(), '--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')],
+  })
+  if (!session.convId && result.convId) session.convId = result.convId
+  if (result.text) delta(result.text)
+  return {
+    ok: Boolean(result.ok),
+    text: String(result.text || ''),
+    convId: result.convId ?? null,
+    error: result.ok ? null : String(result.error || 'claude 失败'),
+    kind: brain.kind,
+  }
+}
+
 export function apply(ctx, config = {}) {
   ctx0 = ctx
   ctx.inject(['webServer'], (scope) => {
@@ -3990,6 +4227,154 @@ export function createHandler(ctx, config = {}) {
           }
           if (req.method === 'POST' && route === '/providers/refresh') {
             return send(res, 200, await listProviders(ctx, config, { refresh: true }))
+          }
+          // ── 团队模式（Team Mode）────────────────────────────────────────────
+          // 大脑只发文本、只调 council_* 工具；这条路把 turn 跑起来并转成 SSE 推给页面。
+          if (req.method === 'POST' && route === '/team/send') {
+            const body = await readBody(req)
+            const text = String(body.text ?? '')
+            const sessionId = normalizeSessionId(body.sessionId || '')
+            if (!sessionId) return send(res, 400, { error: 'team/send 需要 sessionId' })
+            if (!text.trim()) return send(res, 400, { error: 'team/send 需要非空 text' })
+            const entry = teamSessionState(sessionId)
+            const model = String(body.model || entry.model || teamModelDefault())
+            entry.model = model
+            entry.brainKind = resolveBrain(model).kind
+            entry.turns += 1
+            const runId = 'tr_' + randomUUID().slice(0, 8)
+            const controller = new AbortController()
+            const events = []
+            const listeners = new Set()
+            const emit = (event, data) => {
+              const payload = { event, data, at: Date.now() }
+              events.push(payload)
+              if (events.length > 2000) events.splice(0, events.length - 2000)
+              for (const listener of listeners) {
+                try { listener(payload) } catch { /* 单个订阅者出错不影响别的 */ }
+              }
+            }
+            teamPushMessage(entry, 'user', text)
+            const userPersisted = persistTeamMessage(ctx, sessionId, { role: 'user', text, model })
+            entry.persisted = entry.persisted || userPersisted
+            const slot = { sessionId, runId, controller, listeners, events, stopped: false, emit, entry }
+            teamRuns.set(runId, slot)
+            // 后台跑：立即回 runId，页面靠 /team/stream 收增量
+            ;(async () => {
+              try {
+                const result = await runBrain({
+                  sessionId,
+                  model,
+                  text,
+                  signal: controller.signal,
+                  onDelta: (chunk) => emit('delta', { text: chunk }),
+                })
+                if (!slot.stopped) {
+                  teamPushMessage(entry, 'assistant', result.text)
+                  const okPersist = persistTeamMessage(ctx, sessionId, { role: 'assistant', text: result.text, model, kind: result.kind })
+                  entry.persisted = entry.persisted || okPersist
+                  if (result.error) emit('error', { error: result.error, kind: result.kind })
+                  else emit('done', { text: result.text, convId: result.convId, kind: result.kind })
+                }
+              } catch (error) {
+                if (!slot.stopped) emit('error', { error: String(error?.message ?? error) })
+              } finally {
+                teamRuns.delete(runId)
+                slot.listeners.clear()
+              }
+            })()
+            return send(res, 200, { runId, model, brainKind: resolveBrain(model).kind, persisted: Boolean(entry.persisted) })
+          }
+          if (req.method === 'GET' && route === '/team/stream') {
+            const runId = url.searchParams.get('runId') || ''
+            res.writeHead(200, {
+              'content-type': 'text/event-stream; charset=utf-8',
+              'cache-control': 'no-cache, no-transform',
+              connection: 'keep-alive',
+              'x-accel-buffering': 'no',
+            })
+            res.flushHeaders?.()
+            let cursor = 0
+            let closed = false
+            const writeFrame = (frame) => {
+              if (closed) return
+              try {
+                res.write(`event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`)
+              } catch { closed = true }
+            }
+            const flush = (frame) => writeFrame(frame)
+            const timer = setInterval(() => {
+              if (closed) return
+              try { res.write(': ping\n\n') } catch { closed = true }
+            }, 15_000)
+            timer.unref?.()
+            const listener = (frame) => { flush(frame) }
+            const slot = teamRuns.get(runId)
+            // 先把当前 turn 已经发生的事件补发一遍（页面可能晚连上来）
+            if (slot) {
+              for (const frame of slot.events) { flush(frame); cursor += 1 }
+              slot.listeners.add(listener)
+            } else {
+              writeFrame({ event: 'error', data: { error: 'runId 不存在或已结束：' + runId } })
+            }
+            const cleanup = () => {
+              closed = true
+              clearInterval(timer)
+              if (slot) slot.listeners.delete(listener)
+            }
+            req.on('close', cleanup)
+            res.on('close', cleanup)
+            return undefined
+          }
+          if (req.method === 'POST' && route === '/team/stop') {
+            const body = await readBody(req)
+            const runId = String(body.runId || '')
+            const slot = teamRuns.get(runId)
+            if (!slot) return send(res, 404, { error: 'runId 不存在或已结束：' + runId })
+            slot.stopped = true
+            try { slot.controller.abort() } catch { /* ignore */ }
+            slot.emit('error', { error: '已由用户停止' })
+            slot.listeners.clear()
+            teamRuns.delete(runId)
+            return send(res, 200, { ok: true, runId })
+          }
+          if (req.method === 'GET' && route === '/team/state') {
+            const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
+            if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
+            const entry = teamSessions.get(sessionId)
+            const model = (entry && entry.model) || teamModelDefault()
+            const brain = resolveBrain(model)
+            const running = [...teamRuns.values()].filter((slot) => slot.sessionId === sessionId)
+            return send(res, 200, {
+              sessionId,
+              model,
+              brainKind: brain.kind,
+              running: running.length > 0,
+              runIds: running.map((slot) => slot.runId),
+              // 会话日志写入成功过 → true；否则只是插件内存态（重启即失效）
+              persisted: Boolean(entry && entry.persisted),
+              messages: (entry ? entry.messages : []).map((m) => ({ role: m.role, text: m.text, at: m.at })),
+            })
+          }
+          if (req.method === 'POST' && route === '/team/takeover') {
+            // 预留：把团队会话接管成主对话（客户端半还没做）
+            return send(res, 501, { error: '接管主对话尚未实现（预留接口）' })
+          }
+          if (req.method === 'POST' && route === '/internal/tool') {
+            // 只给本机的 council-mcp.mjs 用：按名字转发到既有 council_* 工具。
+            const remote = String(req.socket?.remoteAddress || '')
+            if (!(remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1')) {
+              return send(res, 403, { error: 'internal/tool 只接受本机调用' })
+            }
+            const body = await readBody(req)
+            const name = String(body.tool || '')
+            const impl = teamToolRegistry()[name]
+            if (!impl) return send(res, 404, { error: 'no tool ' + (name || '(empty)') })
+            const sessionId = normalizeSessionId(body.sessionId || url.searchParams.get('sessionId') || '')
+            const group = (sessionId && groupForSession(state, sessionId)) || activeGroup()
+            if (!group) return send(res, 409, { error: '还没有小组，先在页面上建一个' })
+            const exec = sessionId ? { agent: { id: sessionId } } : undefined
+            const result = await impl.execute(body.args && typeof body.args === 'object' ? body.args : {}, exec)
+            return send(res, 200, { result: result ?? null })
           }
           return send(res, 404, { error: `no route ${req.method} ${route}` })
         } catch (error) {
@@ -5335,6 +5720,80 @@ function rosterText(group) {
 }
 
 /** Register the delegate tool and roster prompt on one live chat session. */
+/** council_member 的实现：抽成模块级函数，既能给 agent 工具用，也能给 /internal/tool 转发用。 */
+async function runMemberAction(group, args, ctx, config) {
+      const live = state.groups.find((g) => g.id === group.id) || group
+      if (args.action === 'prune') {
+        const result = pruneOrphanMembers({ dryRun: Boolean(args.dryRun) })
+        if (!result.dryRun && result.removed.length) await save()
+        return toolResult(result)
+      }
+      if (args.action === 'list') {
+        const members = (live.memberIds || [])
+          .map((id) => state.members.find((m) => m.id === id))
+          .filter(Boolean)
+          .map((m) => {
+            const role = m.roleId ? state.roles.find((r) => r.id === m.roleId) : undefined
+            // 宁可给 null 也不产 undefined：成员缺 model / roleId / roleName / cwd 时，
+            // undefined 会让 DSH 判「value is not lossless JSON」并整条工具调用失败。
+            return { id: m.id, name: m.name, kind: m.kind, model: m.model ?? null, roleId: m.roleId ?? null, roleName: role?.name ?? null, cwd: m.cwd ?? null }
+          })
+        return toolResult({ members })
+      }
+      if (args.action === 'create') {
+        const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
+        const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
+        // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
+        const persistent = args.persistent !== false
+        const member = {
+          id: `m_${randomUUID().slice(0, 8)}`,
+          name: args.name || '新成员',
+          kind,
+          model: args.model || defaultModels[kind],
+          provider: kind === 'deepseek' ? deepseekMemberProvider(config) : undefined,
+          roleId: args.roleId,
+          cwd: args.cwd || undefined,
+          updatedAt: Date.now(),
+        }
+        if (!persistent) member.ephemeral = true
+        state.members.push(member)
+        if (!live.memberIds.includes(member.id)) live.memberIds.push(member.id)
+        await save()
+        return toolResult({ ok: true, persistent, member: { id: member.id, name: member.name, kind: member.kind, model: member.model, persistent } })
+      }
+      if (args.action === 'update') {
+        if (!args.id) return toolResult({ ok: false, error: 'id required for update' })
+        const member = state.members.find((m) => m.id === args.id)
+        if (!member) return toolResult({ ok: false, error: 'member not found: ' + args.id })
+        if (args.name !== undefined) member.name = args.name
+        if (args.kind !== undefined && args.kind !== member.kind) {
+          member.kind = args.kind
+          delete member.convId
+        }
+        if (args.model !== undefined) member.model = args.model
+        if (args.roleId !== undefined) member.roleId = args.roleId || undefined
+        if (args.cwd !== undefined) member.cwd = args.cwd || undefined
+        member.updatedAt = Date.now()
+        await save()
+        return toolResult({ ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model ?? null } })
+      }
+      if (args.action === 'delete') {
+        if (!args.id) return toolResult({ ok: false, error: 'id required for delete' })
+        const inGroup = (live.memberIds || []).includes(args.id)
+        if (!inGroup) return toolResult({ ok: false, error: 'member not in this group' })
+        if (live.memberIds.length <= 1) return toolResult({ ok: false, error: 'cannot delete the last member' })
+        const agents = ctx.get('agents')
+        const parentAgent = agents ? agents.get(live.sessionId) : undefined
+        if (parentAgent && args.id === parentAgent.id) return toolResult({ ok: false, error: 'cannot delete the parent session' })
+        state.members = state.members.filter((m) => m.id !== args.id)
+        live.memberIds = live.memberIds.filter((id) => id !== args.id)
+        delete state.usage[args.id]
+        await save()
+        return toolResult({ ok: true })
+      }
+      return toolResult({ ok: false, error: 'unknown action' })
+}
+
 function bindAgent(ctx, config, group, agent) {
   const key = group.id + '\u0000' + agent.id
   // 重复绑定时先释放旧的 disposer，避免"already registered"错误
@@ -5897,7 +6356,7 @@ function bindAgent(ctx, config, group, agent) {
           return [{ type: 'text', text: '未能转达：' + String(value && value.error || '未知原因') }]
         },
       },
-      async execute(args) {
+      async execute(args, exec) {
         const text = String(args && args.text || '').trim()
         if (!text) return { ok: false, error: 'text 不能为空' }
         const sessionId = normalizeSessionId(exec && exec.agent && exec.agent.id)
@@ -5967,76 +6426,7 @@ function bindAgent(ctx, config, group, agent) {
         },
       },
 async execute(args) {
-        const live = state.groups.find((g) => g.id === group.id) || group
-        if (args.action === 'prune') {
-          const result = pruneOrphanMembers({ dryRun: Boolean(args.dryRun) })
-          if (!result.dryRun && result.removed.length) await save()
-          return toolResult(result)
-        }
-        if (args.action === 'list') {
-          const members = (live.memberIds || [])
-            .map((id) => state.members.find((m) => m.id === id))
-            .filter(Boolean)
-            .map((m) => {
-              const role = m.roleId ? state.roles.find((r) => r.id === m.roleId) : undefined
-              // 宁可给 null 也不产 undefined：成员缺 model / roleId / roleName / cwd 时，
-              // undefined 会让 DSH 判「value is not lossless JSON」并整条工具调用失败。
-              return { id: m.id, name: m.name, kind: m.kind, model: m.model ?? null, roleId: m.roleId ?? null, roleName: role?.name ?? null, cwd: m.cwd ?? null }
-            })
-          return toolResult({ members })
-        }
-        if (args.action === 'create') {
-          const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
-          const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
-          // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
-          const persistent = args.persistent !== false
-          const member = {
-            id: `m_${randomUUID().slice(0, 8)}`,
-            name: args.name || '新成员',
-            kind,
-            model: args.model || defaultModels[kind],
-            provider: kind === 'deepseek' ? deepseekMemberProvider(config) : undefined,
-            roleId: args.roleId,
-            cwd: args.cwd || undefined,
-            updatedAt: Date.now(),
-          }
-          if (!persistent) member.ephemeral = true
-          state.members.push(member)
-          if (!live.memberIds.includes(member.id)) live.memberIds.push(member.id)
-          await save()
-          return toolResult({ ok: true, persistent, member: { id: member.id, name: member.name, kind: member.kind, model: member.model, persistent } })
-        }
-        if (args.action === 'update') {
-          if (!args.id) return toolResult({ ok: false, error: 'id required for update' })
-          const member = state.members.find((m) => m.id === args.id)
-          if (!member) return toolResult({ ok: false, error: 'member not found: ' + args.id })
-          if (args.name !== undefined) member.name = args.name
-          if (args.kind !== undefined && args.kind !== member.kind) {
-            member.kind = args.kind
-            delete member.convId
-          }
-          if (args.model !== undefined) member.model = args.model
-          if (args.roleId !== undefined) member.roleId = args.roleId || undefined
-          if (args.cwd !== undefined) member.cwd = args.cwd || undefined
-          member.updatedAt = Date.now()
-          await save()
-          return toolResult({ ok: true, member: { id: member.id, name: member.name, kind: member.kind, model: member.model ?? null } })
-        }
-        if (args.action === 'delete') {
-          if (!args.id) return toolResult({ ok: false, error: 'id required for delete' })
-          const inGroup = (live.memberIds || []).includes(args.id)
-          if (!inGroup) return toolResult({ ok: false, error: 'member not in this group' })
-          if (live.memberIds.length <= 1) return toolResult({ ok: false, error: 'cannot delete the last member' })
-          const agents = ctx.get('agents')
-          const parentAgent = agents ? agents.get(live.sessionId) : undefined
-          if (parentAgent && args.id === parentAgent.id) return toolResult({ ok: false, error: 'cannot delete the parent session' })
-          state.members = state.members.filter((m) => m.id !== args.id)
-          live.memberIds = live.memberIds.filter((id) => id !== args.id)
-          delete state.usage[args.id]
-          await save()
-          return toolResult({ ok: true })
-        }
-        return toolResult({ ok: false, error: 'unknown action' })
+        return runMemberAction(group, args, ctx, config)
       },
     }))
     disposers.push(agentCtx.tools.register({

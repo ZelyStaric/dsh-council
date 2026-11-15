@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4136,6 +4136,32 @@ try {
     return 'reuseAgents:false → false'
   })
 
+  /* ── 团队模式：大脑持久化 + codex 只读沙箱 ─────────────────────────── */
+  await check('团队模式：persistTeamMessage 写入会话 plugin 记录（拿不到会话时返回 false）', async () => {
+    const appended = []
+    const fakeCtx = {
+      get: (name) => (name === 'agents' ? {
+        get: (id) => (id === 'session-x' || id === 'x' ? { session: { append: (type, data) => { appended.push([type, data]) } } } : undefined),
+      } : undefined),
+    }
+    assert.equal(mod.persistTeamMessage(fakeCtx, 'x', { role: 'user', text: 'hi' }), true, '裸会话 id 也能写')
+    assert.equal(appended.length, 1, '写了一条')
+    assert.equal(appended[0][0], 'plugin:council/team', '事件类型')
+    assert.equal(appended[0][1].role, 'user', '记录角色')
+    assert.equal(mod.persistTeamMessage({ get: () => undefined }, 'y', { role: 'user', text: 'x' }), false, '无 agents 服务 → false')
+    assert.equal(mod.persistTeamMessage(fakeCtx, 'session-x', { role: 'assistant', text: 'ok' }), true, '带前缀也能写')
+    return '裸 id / 带前缀都能写 · 无服务时 false · 事件类型 plugin:council/team'
+  })
+
+  await check('团队模式：codex 大脑腿带只读沙箱 + council MCP（源码断言）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(src.includes('sandbox_mode=\"read-only\"'), 'codex 大脑腿必须只读沙箱')
+    assert.ok(src.includes("mcp_servers.council.command"), '必须挂 council MCP')
+    assert.ok(src.includes("TEAM_BRAIN_DISALLOWED"), 'claude 腿必须有 disallowedTools 列表')
+    assert.ok(src.includes("'--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')"), 'claude 腿实际拼了 disallowedTools')
+    return 'codex→read-only + council MCP · claude→disallowedTools 已接线'
+  })
+
   /* ── 运行中成员注册表 + 追加消息（council_tell 复用） ───────────────── */
   await check('runningMembers：注册/查找/卸载（同一成员按最新 startedAt 命中）', async () => {
     mod.__setRunningMembers([])
@@ -4428,6 +4454,171 @@ try {
       mod.__setRunKind(undefined)
     }
   })
+
+
+  /* ── 团队模式（Host 半）：路由 / MCP / 大脑路由 ─────────────────────── */
+
+  await check('resolveBrain：claude-* → claude-cli / gpt-* → codex / deepseek-* → dsh-seam', () => {
+    const claude = mod.resolveBrain('claude-fable-5-2')
+    const codex = mod.resolveBrain('gpt-6.1-sol')
+    const seam = mod.resolveBrain('deepseek-flash')
+    assert.equal(claude.kind, 'claude-cli')
+    assert.equal(claude.model, 'claude-fable-5-2')
+    assert.equal(codex.kind, 'codex')
+    assert.equal(seam.kind, 'dsh-seam')
+    assert.equal(mod.resolveBrain('Claude-Opus-5-5').kind, 'claude-cli', '大小写不敏感')
+    return `claude-fable-5-2→${claude.kind} / gpt-6.1-sol→${codex.kind} / deepseek-flash→${seam.kind}`
+  })
+
+  await check('DEFAULT_TEAM_MODEL / TEAM_MESSAGE_LIMIT / TEAM_BRAIN_DISALLOWED 常量', () => {
+    assert.equal(mod.DEFAULT_TEAM_MODEL, 'claude-fable-5-2')
+    assert.equal(mod.TEAM_MESSAGE_LIMIT, 200)
+    assert.ok(Array.isArray(mod.TEAM_BRAIN_DISALLOWED))
+    for (const name of ['Bash', 'Edit', 'Write', 'Read']) {
+      assert.ok(mod.TEAM_BRAIN_DISALLOWED.includes(name), `应禁 ${name}`)
+    }
+    assert.ok(!mod.TEAM_BRAIN_DISALLOWED.includes('mcp__council__council_delegate'), '只禁文件/shell 类，不禁 council 编排工具')
+    return `默认 ${mod.DEFAULT_TEAM_MODEL} · 上限 ${mod.TEAM_MESSAGE_LIMIT} 条 · 禁 ${mod.TEAM_BRAIN_DISALLOWED.length} 个工具`
+  })
+
+  await check('councilMcpConfig：只挂 council 一个 stdio 服务器，指向 council-mcp.mjs', () => {
+    const parsed = JSON.parse(mod.councilMcpConfig())
+    const servers = Object.keys(parsed.mcpServers)
+    assert.deepEqual(servers, ['council'])
+    const entry = parsed.mcpServers.council
+    assert.equal(entry.command, process.execPath)
+    assert.ok(entry.args[0].endsWith('council-mcp.mjs'), `args[0]=${entry.args[0]}`)
+    assert.ok(/^https?:\/\//.test(entry.env.COUNCIL_API), 'COUNCIL_API 必须是 URL')
+    assert.ok(entry.env.COUNCIL_API.endsWith('/council/api'))
+    return `command=${path.basename(entry.command)} args=${path.basename(entry.args[0])} api=${entry.env.COUNCIL_API}`
+  })
+
+  await check('teamSessionState / teamPushMessage：环形缓冲裁到 200 条，最新在后', () => {
+    const entry = mod.teamSessionState('session-ring')
+    assert.deepEqual(entry.messages, [])
+    for (let i = 0; i < mod.TEAM_MESSAGE_LIMIT + 25; i += 1) mod.teamPushMessage(entry, i % 2 ? 'user' : 'assistant', 'm' + i)
+    assert.equal(entry.messages.length, mod.TEAM_MESSAGE_LIMIT)
+    assert.equal(entry.messages.at(-1).text, 'm' + (mod.TEAM_MESSAGE_LIMIT + 24))
+    assert.equal(entry.messages[0].text, 'm25', '最老的 25 条被挤掉')
+    assert.ok(entry.messages.every((m) => typeof m.at === 'number' && (m.role === 'user' || m.role === 'assistant')))
+    assert.equal(mod.teamSessionState('session-ring'), entry, '同 sessionId 复用同一个 entry')
+    return `200 条 · 首条 ${entry.messages[0].text} · 末条 ${entry.messages.at(-1).text}`
+  })
+
+  await check('GET /team/state 空态：结构齐全、messages 为空数组、running=false', async () => {
+    const res = await fetch(base + '/team/state?sessionId=session-team-empty')
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    // Host 会把 session- 前缀规范化掉（与小组绑定用的是同一套 id）
+    assert.equal(body.sessionId, 'team-empty', 'session- 前缀会被规范化掉')
+    assert.equal(typeof body.model, 'string')
+    assert.equal(typeof body.brainKind, 'string')
+    assert.equal(body.running, false)
+    assert.deepEqual(body.messages, [])
+    assert.deepEqual(body.runIds, [])
+    return `model=${body.model} brainKind=${body.brainKind} messages=0`
+  })
+
+  await check('POST /team/send 缺参：没 sessionId / 空 text → 400 且带中文原因', async () => {
+    const noSession = await post('/team/send', { text: '你好' })
+    assert.equal(noSession.status, 400)
+    assert.match((await noSession.json()).error, /sessionId/)
+    const noText = await post('/team/send', { sessionId: 'session-team-empty', text: '   ' })
+    assert.equal(noText.status, 400)
+    assert.match((await noText.json()).error, /text/)
+    return '缺 sessionId → 400 / 空 text → 400'
+  })
+
+  await check('POST /team/takeover：预留接口返回 501 并说明尚未实现', async () => {
+    const res = await post('/team/takeover', { sessionId: 'session-team-empty' })
+    assert.equal(res.status, 501)
+    assert.match((await res.json()).error, /接管主对话尚未实现/)
+    return '501 · 接管主对话尚未实现（预留接口）'
+  })
+
+  await check('POST /internal/tool：未知工具 404 / 转发 council_status 返回成员表', async () => {
+    const missing = await post('/internal/tool', { tool: 'nope', args: {} })
+    assert.equal(missing.status, 404)
+    assert.match((await missing.json()).error, /nope/)
+    const res = await post('/internal/tool', { tool: 'council_status', args: {} })
+    assert.equal(res.status, 200)
+    const { result } = await res.json()
+    assert.equal(result.ok, true)
+    assert.ok(Array.isArray(result.members))
+    assert.ok(result.members.every((m) => 'model' in m && m.model !== undefined), '不许出现 undefined（DSH 会判 non-lossless JSON）')
+    assert.ok(Array.isArray(result.groups))
+    assert.equal(result.teamModel, mod.DEFAULT_TEAM_MODEL)
+    return `${missing.status} 未知工具 / ${result.members.length} 成员 · ${result.groups.length} 组`
+  })
+
+  await check('council-mcp.mjs：工具表 5 个 council_* 且名字与 Host registry 对齐', async () => {
+    const mcp = await import(pathToFileURL(path.join(ROOT, 'council-mcp.mjs')).href)
+    const names = mcp.TOOLS.map((t) => t.name).sort()
+    assert.deepEqual(names, ['council_collect', 'council_delegate', 'council_member', 'council_status', 'council_tell'])
+    const registry = Object.keys(mod.teamToolRegistry()).sort()
+    assert.deepEqual(names, registry, 'MCP 暴露的工具名必须和 /internal/tool 的 registry 完全一致')
+    for (const tool of mcp.TOOLS) {
+      assert.ok(tool.description && tool.description.length > 4, `${tool.name} 要有描述`)
+      assert.equal(tool.inputSchema.type, 'object')
+      assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} 要严格 schema`)
+    }
+    return `${names.length} 个工具 · 与 registry 一致`
+  })
+
+  await check('council-mcp.mjs：tools/call 转发到 /internal/tool，失败时返回 isError', async () => {
+    const mcp = await import(pathToFileURL(path.join(ROOT, 'council-mcp.mjs')).href)
+    assert.ok(mcp.apiUrl('/internal/tool').endsWith('/council/api/internal/tool'), mcp.apiUrl('/internal/tool'))
+    assert.ok(!mcp.apiUrl('/state').includes('//council/api'), '不能出现双斜杠')
+
+    const realFetch = globalThis.fetch
+    const calls = []
+    // 用 council_member 而不是 council_status：后者走 /state，不走 /internal/tool
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body })
+      const sent = JSON.parse(init.body)
+      return { ok: true, status: 200, text: async () => JSON.stringify({ result: { ok: true, echoed: sent.tool } }) }
+    }
+    // handle() 直接往 stdout 写帧、不返回对象 —— 抓 stdout 再按 id 取
+    const written = []
+    const realWrite = process.stdout.write.bind(process.stdout)
+    const frames = () => written.map((line) => JSON.parse(line))
+    const byId = (id) => frames().filter((f) => f.id === id)[0]
+    process.stdout.write = (chunk) => { written.push(String(chunk).trim()); return true }
+    try {
+      await mcp.handle({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'council_member', arguments: { action: 'list' } } })
+      assert.equal(calls.length, 1, '只发一次请求')
+      assert.match(calls[0].url, /\/internal\/tool$/, calls[0].url)
+      const sent = JSON.parse(calls[0].body)
+      assert.equal(sent.tool, 'council_member')
+      assert.equal(sent.args.action, 'list')
+      // 服务端挂掉 → isError:true 而不是把异常抛给宿主
+      globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
+      await mcp.handle({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'council_member', arguments: { action: 'list' } } })
+      await mcp.handle({ jsonrpc: '2.0', id: 8, method: 'tools/list' })
+      // 未知工具走 JSON-RPC 错误（-32602），不是 isError 结果
+      await mcp.handle({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'unknown_tool', arguments: {} } })
+    } finally {
+      globalThis.fetch = realFetch
+      process.stdout.write = realWrite
+    }
+    const ok = byId(7)
+    assert.equal(ok.result.isError, false)
+    assert.match(ok.result.content[0].text, /council_member/, '应带回服务端 result')
+    const down = byId(9)
+    assert.equal(down.result.isError, true)
+    assert.match(down.result.content[0].text, /无法连接 council 服务/, '连不上要有中文原因')
+    assert.equal(byId(8).result.tools.length, 5, 'tools/list 回到 5 个工具')
+    const bad = byId(10)
+    assert.equal(bad.error.code, -32602)
+    assert.match(bad.error.message, /unknown tool/)
+    return '转发 1 次 → /internal/tool · 断连 isError · tools/list 5 个 · 未知工具 -32602'
+  })
+
+  // 最后打印一行汇总（放 finally 里，前面任一条抛未捕获异常也能看到总数）
+  console.log('\n' + (results.filter((r) => !r.ok).length
+    ? `FAILED ${results.filter((r) => !r.ok).length}/${results.length}`
+    : `all ${results.length} checks passed`))
+  process.exitCode = results.some((r) => !r.ok) ? 1 : 0
 
 } finally {
   await new Promise((resolve) => server.close(resolve))

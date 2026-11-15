@@ -2,6 +2,23 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] — 2026-11-15
+
+### 新增：团队模式（Host 半）
+- **大脑运行器 `runBrain()`**：按模型名前缀自动选腿
+  - `claude-*` → Claude Code CLI（headless，`-p --output-format stream-json`，`--strict-mcp-config` 只挂 council MCP）
+  - `gpt-*` / `o<数字>*` → Codex CLI（`exec --json`，`-c sandbox_mode="read-only"`）
+  - `deepseek-*` → 现有 DSH subagent seam
+- **大脑没有本地工具**：claude 腿 `--disallowedTools Bash Read Edit Write NotebookEdit Glob Grep WebFetch WebSearch`；codex 腿只读沙箱。
+- **`council-mcp.mjs`**（stdio MCP，5 个工具）：`council_delegate` / `council_collect` / `council_tell` / `council_member` / `council_status`，内部转发到本地 `/internal/tool`（仅 localhost）。
+- **路由**：`POST /team/send`、`GET /team/stream`(SSE: delta/tool/done/error)、`POST /team/stop`、`GET /team/state`、`POST /team/takeover`（501，预留接管主对话）、`POST /internal/tool`（localhost only）。
+- **持久化**：团队 user/assistant 消息写入 DSH 会话日志（事件 `plugin:council/team`），`/team/state` 用真实 `persisted` 标记；拿不到会话时降级为插件内存态并如实标记。
+- 默认大脑 `claude-fable-5-2`（`state.config.teamModel` 可改，`/team/send` 也能逐次指定）。
+
+### 修复
+- 后台任务完成唤醒父会话：`sessionId` 裸 uuid 与 `session-` 前缀两种形式都能定位 agent。
+- `request` 拆解失败时回执写 `## 拆解失败（原因：…）`，不再静默返回空成员。
+
 ## [0.2.69] - 2026-11-15
 
 ### 修复
