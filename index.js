@@ -4733,7 +4733,8 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/team/state') {
             const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
             if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
-            const entry = teamSessions.get(sessionId)
+            // 不能直接 teamSessions.get：那样会绕过「首次创建时从磁盘恢复」的逻辑（重启后消息就没了）
+            const entry = teamSessionState(sessionId)
             // 大脑模型优先级：内存态 → 组级（持久化）→ 全局默认
             const group = groupForSession(state, sessionId)
             const model = (entry && entry.model) || (group && group.brainModel) || teamModelDefault()
