@@ -4869,6 +4869,21 @@ try {
     return 'IP 或 token 二选一 · claude/codex 双腿都传 token'
   })
 
+  await check('council_tell 经 MCP（/internal/tool）也能插话：registry 直通 steerRunningMember', async () => {
+    mod.__setRunningMembers([{ sessionId: 'session-mcp-tell', memberId: 'm1', name: '测试员', kind: 'deepseek', convId: 'conv-1', startedAt: Date.now() }])
+    const registry = mod.teamToolRegistry()
+    const out = await registry.council_tell.execute(
+      { text: '插一句补充说明', member: '测试员' },
+      { agent: { id: 'session-mcp-tell' }, __mcp: true },
+    )
+    mod.__setRunningMembers([])
+    // 没起真实子代理时会返回错误，但**不能**是「不支持/未实现」那类硬拒绝
+    assert.ok(out && typeof out === 'object', '必须返回结构化结果')
+    const msg = String(out.error || '')
+    assert.ok(!/不能经由 MCP 转发/.test(msg), 'MCP 路径不该是硬拒绝，实际：' + msg)
+    return 'registry 直通（error=' + (msg.slice(0, 40) || '无') + '）'
+  })
+
   await check('council-mcp.mjs：工具表 5 个 council_* 且名字与 Host registry 对齐', async () => {
     const mcp = await import(pathToFileURL(path.join(ROOT, 'council-mcp.mjs')).href)
     const names = mcp.TOOLS.map((t) => t.name).sort()
