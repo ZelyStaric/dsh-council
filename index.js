@@ -4410,7 +4410,8 @@ export function createHandler(ctx, config = {}) {
               // providerByKind: 各框架默认使用的 provider
               if (body.providerByKind && typeof body.providerByKind === 'object') {
                 next.providerByKind = {}
-                for (const kind of ['claude', 'codex', 'deepseek', 'image']) {
+                // gemini 是给「指挥大脑」用的；成员 kind 的 gemini 腿在 P3 接线
+                for (const kind of ['claude', 'codex', 'deepseek', 'image', 'gemini']) {
                   if (typeof body.providerByKind[kind] === 'string' && body.providerByKind[kind]) {
                     next.providerByKind[kind] = body.providerByKind[kind]
                   }
