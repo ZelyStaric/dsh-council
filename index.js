@@ -3637,13 +3637,16 @@ function teamModelDefault() {
 }
 
 /** 团队模式 MCP 配置：只挂 council 一个服务器，其它一律不给（配合 --strict-mcp-config）。 */
-function councilMcpConfig() {
+function councilMcpConfig(sessionId) {
   const self = fileURLToPath(new URL('./council-mcp.mjs', import.meta.url))
   const env = {
     COUNCIL_API: process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api',
     // 内部 token：/internal/tool 用它鉴权（loopback 反代会改写源 IP，见 INTERNAL_TOKEN 注释）
     COUNCIL_INTERNAL_TOKEN: INTERNAL_TOKEN,
   }
+  // 会话提示：MCP 协议里 claude CLI 不会带 sessionId，只能走环境变量。
+  // 没有它，/internal/tool 只能靠 activeGroup() 兜底，派活会落到别的组（job.sessionId=null）。
+  if (sessionId) env.COUNCIL_SESSION_ID = String(sessionId)
   if (process.env.COUNCIL_TOKEN) env.COUNCIL_TOKEN = process.env.COUNCIL_TOKEN
   return JSON.stringify({ mcpServers: { council: { command: process.execPath, args: [self], env } } })
 }
@@ -3801,6 +3804,7 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
       '-c', 'mcp_servers.council.args=["' + fileURLToPath(new URL('./council-mcp.mjs', import.meta.url)) + '"]',
       '-c', 'mcp_servers.council.env.COUNCIL_API="' + (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api') + '"',
       '-c', 'mcp_servers.council.env.COUNCIL_INTERNAL_TOKEN="' + INTERNAL_TOKEN + '"',
+      '-c', 'mcp_servers.council.env.COUNCIL_SESSION_ID="' + String(sessionId || '') + '"',
     ]
     const codexEnv = await envFor({ kind: 'codex' }, state.config).catch(() => undefined)
     const result = await runCodex({
@@ -3846,7 +3850,7 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
     maxDurationMs: memberMaxMinutesMs(state.config || {}) || undefined,
     // closed（默认）：disallowedTools 去掉一切本地工具，大脑只能走 council MCP
     // open：不禁任何工具，大脑可以自己动手
-    extraArgs: ['--strict-mcp-config', '--mcp-config', councilMcpConfig(),
+    extraArgs: ['--strict-mcp-config', '--mcp-config', councilMcpConfig(sessionId),
       ...(brainOpen ? [] : ['--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')])],
   })
   if (!session.convId && result.convId) session.convId = result.convId

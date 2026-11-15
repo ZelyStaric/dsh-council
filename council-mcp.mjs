@@ -165,7 +165,8 @@ function write(frame) {
   process.stdout.write(JSON.stringify(frame) + '\n')
 }
 
-let sessionHint = ''
+// 会话提示：优先用宿主注入的环境变量（claude CLI 不会在 MCP initialize 里带 sessionId）
+let sessionHint = String(process.env.COUNCIL_SESSION_ID || '')
 
 async function handle(frame) {
   const { id, method, params } = frame || {}
