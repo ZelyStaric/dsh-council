@@ -4140,6 +4140,7 @@ export function createHandler(ctx, config = {}) {
                 codex: 'gpt-6.1-sol',
                 claude: 'claude-sonnet-5',
                 deepseek: DEEPSEEK_MEMBER_MODEL,
+                gemini: 'gemini-3.8-flash',
                 image: 'gpt-image-2.6-flare',
               }
               const kind = defaultModels[body.kind] ? body.kind : 'codex'
