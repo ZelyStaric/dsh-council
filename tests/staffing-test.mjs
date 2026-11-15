@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, modelGuideText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4696,6 +4696,24 @@ try {
     assert.equal(out.kind, 'invalid')
     assert.match(String(out.error), /出图模型/, '要指出是出图模型，实际：' + out.error)
     return out.error.slice(0, 36) + '…'
+  })
+
+  await check('模型定位表可编辑：config.modelGuide 优先于内置默认，空值回落到默认', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(src.includes("String((state.config && state.config.modelGuide) || '').trim()"),
+      'modelGuideText 必须优先读用户维护的表')
+    assert.ok(src.includes("modelGuide: String(own.modelGuide || '')"), 'configView 要暴露 modelGuide 供编辑器回填')
+    assert.ok(src.includes('modelGuideDefault: MODEL_GUIDE.map'), 'configView 要暴露内置默认（编辑器的占位内容）')
+    assert.ok(src.includes("if (typeof body.modelGuide === 'string')"), '/config POST 要能写 modelGuide')
+    assert.ok(src.includes('else delete next.modelGuide'), '传空字符串要能恢复内置默认')
+    // 行为：写入后立刻反映到注入文本
+    const prev = mod.state.config
+    mod.state.config = Object.assign({}, prev, { modelGuide: '- 自定义模型：测试用' })
+    const text = mod.modelGuideText ? mod.modelGuideText() : ''
+    mod.state.config = prev
+    assert.ok(/用户维护/.test(text) && /自定义模型：测试用/.test(text),
+      '注入文本必须用自定义表，实际：' + String(text).slice(0, 80))
+    return '读/写/回填 + 注入文本切换都正确'
   })
 
   await check('gemini 腿：STAFF_KINDS 含 gemini / 默认模型 / envFor 注入三个必需变量', async () => {

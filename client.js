@@ -260,6 +260,9 @@ window.__ModuleLoader__.load({
       const [archivedPruneNote, setArchivedPruneNote] = useState(null)
       const [childrenPrune, setChildrenPrune] = useState(null)
       const [childrenPruneNote, setChildrenPruneNote] = useState(null)
+      // 模型定位表编辑器（v0.4 P3）：注入给指挥，帮它自动建成员时选模型
+      const [guideEditing, setGuideEditing] = useState(false)
+      const [guideDraft, setGuideDraft] = useState('')
 
       const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
 
@@ -738,6 +741,34 @@ window.__ModuleLoader__.load({
             h('div', {
               style: { display: 'inline-flex', gap: 2, padding: 2, borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)' },
             }, [seg('closed', '只派活'), seg('open', '可动手')])),
+          row('模型定位表',
+            '注入给指挥，帮它自动建成员时选模型（性能 / 性价比）',
+            h(Button, {
+              onClick: () => {
+                setGuideDraft(String(cur.modelGuide || cur.modelGuideDefault || ''))
+                setGuideEditing(!guideEditing)
+              },
+            }, guideEditing ? '收起' : '编辑')),
+          guideEditing
+            ? h('div', { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
+              h('textarea', {
+                value: guideDraft,
+                onChange: (e) => setGuideDraft(e.target.value),
+                placeholder: '每行一条，例如：- claude-opus-5-5：代码顶尖，贵',
+                style: {
+                  width: '100%', minHeight: 180, padding: 8, borderRadius: 8, fontSize: 12,
+                  fontFamily: 'ui-monospace, monospace', resize: 'vertical',
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  background: 'transparent', color: 'var(--dsw-alias-label-primary)',
+                },
+              }),
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                h(Button, { primary: true, onClick: () => { saveTeam({ modelGuide: guideDraft }); setGuideEditing(false) } }, '保存'),
+                h(Button, { onClick: () => { saveTeam({ modelGuide: '' }); setGuideDraft(String(cur.modelGuideDefault || '')) } }, '恢复默认'),
+                h(Button, { onClick: () => setGuideEditing(false) }, '取消')),
+              h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
+                cur.modelGuide ? '当前：使用自定义表格' : '当前：内置默认表格'))
+            : null,
         )
       }
       if (!state) {

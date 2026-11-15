@@ -969,6 +969,9 @@ function configView(config, source) {
     imageTimeoutSeconds: imageTimeoutSeconds(config),
     // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
     authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
+    // 用户维护的模型定位表（空 = 用内置默认）
+    modelGuide: String(own.modelGuide || ''),
+    modelGuideDefault: MODEL_GUIDE.map(([id, desc]) => '- ' + id + '：' + desc).join('\n'),
     // providerByKind: 各框架默认使用的 provider
     providerByKind: own.providerByKind || {},
     source,
@@ -3414,15 +3417,8 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   let reworkFailed = false
 
   if (result.ok) {
-    if (requirePrelim) {
-      if (onStage) onStage('初审（审校）')
-      review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
-      review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
-    }
-    if (requireCommander) {
-      if (onStage) onStage('终审（指挥）')
-      review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
-    }
+    // v0.4 P3：审校与指挥**并行**（Wall clock = max 而不是 sum）
+    await runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
     acceptance = acceptanceOf()
 
     // 被否 / 未判定 一律返工，次数由 maxRework 控制（0 = 不返工，仅标记）
@@ -3450,14 +3446,7 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
       }
       result = second
       review.reworkError = undefined
-      if (requirePrelim) {
-        review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
-        review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
-      }
-      if (requireCommander) {
-        if (onStage) onStage('终审（指挥）')
-        review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
-      }
+      await runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
       acceptance = acceptanceOf()
       reworkFailed = false
       reworkError = undefined
@@ -4488,6 +4477,11 @@ export function createHandler(ctx, config = {}) {
               if (typeof body.strictReview === 'boolean') next.authoritativeReviewer = body.strictReview ? 'any' : 'commander'
               if (body.brainPermissions === 'open' || body.brainPermissions === 'closed') next.brainPermissions = body.brainPermissions
               if (typeof body.requireCommanderReview === 'boolean') next.requireCommanderReview = body.requireCommanderReview
+              // 模型定位表：字符串（多行文本）；传空字符串 = 恢复内置默认
+              if (typeof body.modelGuide === 'string') {
+                if (body.modelGuide.trim()) next.modelGuide = body.modelGuide
+                else delete next.modelGuide
+              }
               if (typeof body.failOnRejectedAcceptance === 'boolean') next.failOnRejectedAcceptance = body.failOnRejectedAcceptance
               if (typeof body.backgroundDelegations === 'boolean') next.backgroundDelegations = body.backgroundDelegations
               // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
@@ -5177,6 +5171,14 @@ const MODEL_GUIDE_TIEBREAK = '不确定就选 gpt-6.1-sol 或 deepseek-v4.1-flas
  * 纯同步字符串拼接（systemPrompt 的 section.text 不能是 Promise）。
  */
 function modelGuideText() {
+  // 用户可在「小组」页编辑这张表（state.config.modelGuide），改了立刻影响指挥的选模型决策
+  const custom = String((state.config && state.config.modelGuide) || '').trim()
+  if (custom) {
+    return [
+      '## 模型定位速查（**用户维护**：性能 / 性价比，来源：用户经验，不是官方基准）',
+      custom,
+    ].join('\n')
+  }
   return [
     '## 模型定位速查（来源：用户经验，不是官方基准；选模型时优先看这里，不要凭旧印象）',
     ...MODEL_GUIDE.map(([id, desc]) => `- ${id}：${desc}`),
@@ -6078,6 +6080,35 @@ function rosterText(group) {
 
 /** Register the delegate tool and roster prompt on one live chat session. */
 /** council_member 的实现：抽成模块级函数，既能给 agent 工具用，也能给 /internal/tool 转发用。 */
+/**
+ * 初审（审校）+ 终审（指挥）**并行**跑（v0.4 P3，用户明确要求两者同时发生）。
+ *
+ * 之前是串行：审校跑完才跑指挥，单个成员的总审核耗时是两者之和；
+ * 现在 Promise.all 并发，墙钟时间取两者的最大值。
+ *
+ * 注意：两段审核都没开 resume（各有自己的全新会话），所以并发不会互相踩上下文。
+ */
+async function runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage) {
+  const jobs = []
+  if (requirePrelim) {
+    jobs.push((async () => {
+      review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
+      review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
+    })())
+  }
+  if (requireCommander) {
+    jobs.push((async () => {
+      review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
+    })())
+  }
+  if (!jobs.length) return
+  if (onStage) {
+    onStage(requirePrelim && requireCommander ? '审核中（审校 + 指挥并行）'
+      : requirePrelim ? '初审（审校）' : '终审（指挥）')
+  }
+  await Promise.all(jobs)
+}
+
 async function runMemberAction(group, args, ctx, config) {
       const live = state.groups.find((g) => g.id === group.id) || group
       if (args.action === 'prune') {
