@@ -3695,19 +3695,24 @@ function teamPushMessage(entry, role, text, meta) {
  * 把一条团队消息写进 DSH 会话日志（`plugin:council/team` 记录），失败返回 false。
  * 拿不到会话（agent 不在 / 已在团队 turn 之外被回收）时由调用方降级成插件内存态。
  */
-function persistTeamMessage(ctx, sessionId, message) {
-  try {
-    const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
-    if (!agents || typeof agents.get !== 'function' || !sessionId) return false
-    let agent = agents.get(sessionId)
-    if (!agent && !String(sessionId).startsWith('session-')) agent = agents.get('session-' + sessionId)
-    const session = agent && agent.session
-    if (!session || typeof session.append !== 'function') return false
-    session.append('plugin:council/team', Object.assign({ at: Date.now() }, message))
-    return true
-  } catch {
-    return false
-  }
+/**
+ * 团队消息的持久化入口 —— **故意不写会话日志，恒返回 false**。
+ *
+ * 曾经用 `session.append()` 把一条自定义类型（plugin:council 命名空间）的团队对话写进会话日志。
+ * 2026-11-16 实测踩到严重后果：DSH 的日志校验要求「实验性插件事件」必须带
+ * `ignorable` 标记（正解是 `appendPluginRecord`，它从 `@deepseek-ai/dsh-session` 导出 —— 该包
+ * 在插件侧 node_modules 里**不可见**，import 不到）。不带标记的自定义事件会让
+ * **整个会话历史加载失败**：
+ *
+ *   failed to observe session "…": contains event type "plugin:council/team" (seq 22)
+ *   unknown to this harness and not marked ignorable; refusing to interpret the log
+ *
+ * 所以这里改成**只写内存**（teamPushMessage）。代价是团队对话历史重启即清，
+ * 但「对话」页的会话记录、成员回执的产出（写在成员自己的会话里）都不受影响。
+ * 这是刻意的安全取舍：宁可丢团队气泡，也不能把用户的会话日志写坏。
+ */
+function persistTeamMessage() {
+  return false
 }
 
 /** 默认大脑模型：页面配置 > 默认常量。 */

@@ -4155,20 +4155,21 @@ try {
   })
 
   /* ── 团队模式：大脑持久化 + codex 只读沙箱 ─────────────────────────── */
-  await check('团队模式：persistTeamMessage 写入会话 plugin 记录（拿不到会话时返回 false）', async () => {
+  await check('团队模式：persistTeamMessage 恒返回 false（不写会话日志，防止写坏历史）', async () => {
+    // 2026-11-16 教训：曾经用 session.append('plugin:council/team') 写自定义事件，
+    // 但 DSH 要求实验性插件事件带 ignorable 标记；不带标记会让**整个会话历史加载失败**。
+    // 正确 API(appendPluginRecord) 在插件侧不可见，所以改成只写内存。
     const appended = []
     const fakeCtx = {
       get: (name) => (name === 'agents' ? {
-        get: (id) => (id === 'session-x' || id === 'x' ? { session: { append: (type, data) => { appended.push([type, data]) } } } : undefined),
+        get: () => ({ session: { append: (type, data) => { appended.push([type, data]) } } }),
       } : undefined),
     }
-    assert.equal(mod.persistTeamMessage(fakeCtx, 'x', { role: 'user', text: 'hi' }), true, '裸会话 id 也能写')
-    assert.equal(appended.length, 1, '写了一条')
-    assert.equal(appended[0][0], 'plugin:council/team', '事件类型')
-    assert.equal(appended[0][1].role, 'user', '记录角色')
-    assert.equal(mod.persistTeamMessage({ get: () => undefined }, 'y', { role: 'user', text: 'x' }), false, '无 agents 服务 → false')
-    assert.equal(mod.persistTeamMessage(fakeCtx, 'session-x', { role: 'assistant', text: 'ok' }), true, '带前缀也能写')
-    return '裸 id / 带前缀都能写 · 无服务时 false · 事件类型 plugin:council/team'
+    assert.equal(mod.persistTeamMessage(fakeCtx, 'session-x', { role: 'user', text: 'hi' }), false, '恒 false')
+    assert.equal(appended.length, 0, '绝不调用 session.append（那会写坏日志）')
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(!src.includes("session.append('plugin:council/team'"), '源码里不该再有这条 append')
+    return '恒 false · 零 append 调用 · 团队消息只走内存'
   })
 
   await check('团队模式：codex 大脑腿带只读沙箱 + council MCP（源码断言）', async () => {
