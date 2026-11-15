@@ -1862,8 +1862,15 @@ window.__ModuleLoader__.load({
     }
 
 
-    /* 团队模式：大脑（CLI/DSH 腿）对话面板 —— 只调 council_* 编排工具，没有本地工具 */
-    function TeamBrainChat(props) {
+    /* ── 团队群聊（v0.4 P2）：微信式时间线 ─────────────────────────────
+     * 用户 / 指挥 / 成员回执混在一条时间线里：用户靠右，其余靠左带头像。
+     * 数据来自 `/team/state.messages`：
+     *   {role:'user'}      你说的
+     *   {role:'assistant'} 指挥（大脑）的回复
+     *   {role:'member'}    成员回执（带 name/kind/model/image/审校结论）
+     * 输入区固定在底部：发出去的消息由 Host 转给指挥，指挥拆解→派活→回执回流。
+     */
+    function CouncilChatView(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : ''
       const [team, setTeam] = useState(null)
       const [providers, setProviders] = useState(null)
@@ -1872,23 +1879,45 @@ window.__ModuleLoader__.load({
       const [streamText, setStreamText] = useState('')
       const [busy, setBusy] = useState(false)
       const [note, setNote] = useState('')
+      const scrollerRef = useRef(null)
       const esRef = useRef(null)
 
-      useEffect(() => {
+      const refreshTeam = () => {
         if (!sessionId) return
         call('/team/state?sessionId=' + encodeURIComponent(sessionId))
           .then((d) => { setTeam(d); if (d && d.model) setModel(d.model) })
-          .catch(() => setTeam(null))
-        call('/providers').then((d) => setProviders(d.providers || [])).catch(() => setProviders(null))
+          .catch(() => { /* 未绑定小组时 400，忽略 */ })
+      }
+
+      useEffect(() => {
+        refreshTeam()
+        call('/providers').then((d) => setProviders((d && d.providers) || [])).catch(() => setProviders(null))
+        let alive = true
+        const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 3000)
+        return () => { alive = false; clearInterval(timer) }
       }, [sessionId])
+
+      const messages = (team && team.messages) || []
+
+      // 新消息到达 → 贴着底部
+      useEffect(() => {
+        const node = scrollerRef.current
+        if (!node) return
+        const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 120
+        if (nearBottom && typeof node.scrollTo === 'function') {
+          try { node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' }) } catch { node.scrollTop = node.scrollHeight }
+        }
+      }, [messages.length, streamText])
 
       const brainModels = (() => {
         const out = []
         for (const p of (providers || [])) {
           for (const m of (p.models || [])) {
-            if (!/^(claude|gpt|o\d|deepseek)/i.test(m)) continue
-            if (out.indexOf(m) >= 0) continue
-            out.push(m)
+            const s = String(m || '')
+            if (s.startsWith('gpt-image')) continue
+            if (!/^(claude|gpt|o\d|deepseek|gemini)/i.test(s)) continue
+            if (out.indexOf(s) >= 0) continue
+            out.push(s)
           }
         }
         return out
@@ -1899,17 +1928,23 @@ window.__ModuleLoader__.load({
         esRef.current = null
       }
 
+      const pickModel = async (next) => {
+        setModel(next)
+        if (!sessionId || !next) return
+        try { await call('/team/model', { sessionId, model: next }) } catch (e) { setNote(String(e.message || e)) }
+      }
+
       const send = async () => {
         const text = draft.trim()
         if (!text || !sessionId || busy) return
         setDraft('')
         setStreamText('')
-        setBusy(true)
         setNote('')
+        setBusy(true)
         try {
           const r = await call('/team/send', { sessionId, model: model || undefined, text })
           const runId = r && r.runId
-          if (!runId) throw new Error(r && r.error ? r.error : '没有拿到 runId')
+          if (!runId) throw new Error((r && r.error) || '没有拿到 runId')
           if (typeof EventSource === 'function') {
             stopStream()
             const es = new EventSource('/council/api/team/stream?runId=' + encodeURIComponent(runId))
@@ -1920,33 +1955,26 @@ window.__ModuleLoader__.load({
                 if (data && data.text) setStreamText((prev) => prev + data.text)
               } catch { /* ignore */ }
             })
-            es.addEventListener('done', () => { stopStream(); setBusy(false); refreshTeam() })
+            const finish = () => { stopStream(); setBusy(false); setStreamText(''); refreshTeam() }
+            es.addEventListener('done', finish)
             es.addEventListener('error', (event) => {
               let msg = '出错'
               try { const data = JSON.parse(event.data); if (data && data.error) msg = data.error } catch { /* ignore */ }
               setNote(msg)
-              stopStream()
-              setBusy(false)
-              refreshTeam()
+              finish()
             })
           } else {
             setNote('当前环境不支持 SSE 流式渲染')
             setBusy(false)
           }
         } catch (error) {
-          setNote(String(error && error.message || error))
+          setNote(String((error && error.message) || error))
           setBusy(false)
         }
       }
 
-      const refreshTeam = () => {
-        if (!sessionId) return
-        call('/team/state?sessionId=' + encodeURIComponent(sessionId)).then((d) => setTeam(d)).catch(() => {})
-      }
-
       const stop = async () => {
-        const runs = (team && team.runIds) || []
-        const runId = runs[0]
+        const runId = ((team && team.runIds) || [])[0]
         stopStream()
         setBusy(false)
         if (!runId) return
@@ -1954,178 +1982,98 @@ window.__ModuleLoader__.load({
         refreshTeam()
       }
 
-      const messages = (team && team.messages) || []
       const running = Boolean(team && team.running) || busy
+      // 指挥气泡的头像种类：按 brainKind 推断
+      const brainKind = team && team.brainKind === 'codex' ? 'codex'
+        : team && team.brainKind === 'dsh-seam' ? 'deepseek'
+          : team && team.brainKind === 'gemini-cli' ? 'codex'
+            : 'claude'
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' } },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('strong', null, '团队大脑'),
-          h('select', {
-            style: Object.assign({}, styles.input, { width: 220 }),
-            value: model || '',
-            onChange: (event) => setModel(event.target.value),
-          }, (brainModels.length ? brainModels : ['claude-fable-5-2']).map((m) => h('option', { key: m, value: m }, m))),
-          h('span', { style: styles.muted },
-            (team && team.brainKind ? team.brainKind : '…') + (team && team.persisted ? ' · 已持久化' : ' · 仅内存')),
-          h('span', { style: { flex: 1 } }),
-          running ? h(Button, { onClick: stop }, '停止') : null),
-        messages.length
-          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' } },
-            messages.map((m, i) => h('div', {
-              key: 'tm' + i,
-              style: Object.assign({}, styles.bubble, m.role === 'user' ? styles.mine : {}, { maxWidth: '90%' }),
-            }, h('div', { style: styles.who }, (m.role === 'user' ? '你' : '大脑') + ' · ' + new Date(m.at).toLocaleTimeString()),
-              h('div', { style: { whiteSpace: 'pre-wrap' } }, m.text))))
-          : h('div', { style: styles.muted }, '还没有团队对话。选一个大脑模型，直接发消息。'),
-        streamText ? h('div', { style: Object.assign({}, styles.bubble, { maxWidth: '90%', opacity: 0.9 }) },
-          h('div', { style: styles.who }, '大脑 · 生成中'),
-          h('div', { style: { whiteSpace: 'pre-wrap' } }, streamText)) : null,
-        note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)' }) }, note) : null,
-        h('div', { style: { display: 'flex', gap: 6 } },
-          h('input', {
-            style: Object.assign({}, styles.input, { flex: 1 }),
-            placeholder: '对着团队大脑说话（它只会拆解/派活，不会自己动手）',
-            value: draft,
-            onChange: (event) => setDraft(event.target.value),
-            onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey) send() },
-          }),
-          h(Button, { onClick: send }, running ? '发送中…' : '发送')),
-        h('div', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
-          '大脑只能调 council_* 工具（没有 bash/edit）；成员照旧各自原生执行。「接管主对话」即将支持。'))
-    }
-
-    /* 群聊视图：本会话的完整成员发言时间线（微信式） */
-    function CouncilChatView(props) {
-      const sessionId = props && props.sessionId ? String(props.sessionId) : undefined
-      const [state, setState] = useState(null)
-      const [now, setNow] = useState(Date.now())
-      const [atBottom, setAtBottom] = useState(true)
-      const [toast, setToast] = useState('')
-      const scrollerRef = useRef(null)
-
-      useEffect(() => {
-        let alive = true
-        const load = () => call('/state').then((d) => { if (alive) { setState(d.state); setNow(Date.now()) } }).catch(() => {})
-        load()
-        const timer = setInterval(() => { if (!document.hidden) load() }, 4000)
-        return () => { alive = false; clearInterval(timer) }
-      }, [])
-
-      const history = (state && state.delegations && state.delegations[sessionId]) || null
-      const entries = (history && history.entries) || []
-
-      const jump = () => {
-        setAtBottom(true)
-        setToast(Date.now().toString())
-        if (typeof setTimeout === 'function') {
-          setTimeout(() => setToast((prev) => (prev ? '' : prev)), 1200)
-        }
-        const node = scrollerRef.current
-        // 1) 原生平滑滚动：无论真正滚动的是这一层还是外层页面，都能落到底
-        const last = node && node.lastElementChild
-        if (last && typeof last.scrollIntoView === 'function') {
-          try { last.scrollIntoView({ block: 'end', behavior: 'smooth' }) } catch { /* fall through */ }
-        }
-        if (!node) return
-        const target = node.scrollHeight - node.clientHeight
-        const from = node.scrollTop
-        const distance = target - from
-        if (Math.abs(distance) < 4) return
-        if (typeof requestAnimationFrame !== 'function') { node.scrollTop = target; return }
-        const duration = 360
-        const started = Date.now()
-        const ease = (t) => 1 - Math.pow(1 - t, 3)
-        const tick = () => {
-          const el = scrollerRef.current
-          if (!el) return
-          const progress = Math.min(1, (Date.now() - started) / duration)
-          el.scrollTop = from + distance * ease(progress)
-          if (progress < 1) requestAnimationFrame(tick)
-          else el.scrollTop = el.scrollHeight - el.clientHeight
-        }
-        requestAnimationFrame(tick)
-      }
-
-      useEffect(() => {
-        const handler = () => jump()
-        jumpListeners.add(handler)
-        return () => jumpListeners.delete(handler)
-      })
-
-      useEffect(() => {
-        if (atBottom) jump()
-      }, [entries.length])
-
-      useEffect(() => {
-        setChatActive(true)
-        return () => setChatActive(false)
-      }, [])
-
-      if (!state) return h('div', { style: Object.assign({}, styles.root, { padding: 16 }) }, h('div', { style: styles.muted }, '加载中…'))
-      if (!entries.length) {
-        return h('div', { style: Object.assign({}, styles.root, { padding: 16 }) },
-          h(TeamBrainChat, { sessionId }),
-          h('div', { style: styles.muted }, '这个会话还没有成员回执。切成「团队」后先跟大脑说一句，它会按需派活。'))
-      }
-
-      const rounds = entries.map(function (entry, index) {
-        const sections = parseCouncilText(entry.text || '')
-        const items = []
-        if (entry.request) {
-          items.push(h('div', { key: 'u' + index, style: Object.assign({}, styles.bubble, styles.mine) }, entry.request))
-        }
-        sections.forEach(function (item, i) {
-          const who = item.who + (item.kind ? ' · ' + item.kind : '')
-          const reviewLines = (item.review || []).map(function (r, ri) {
-            return h('div', { key: ri, style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, r[0] + '：' + r[1])
-          })
-          items.push(h('div', {
-            key: index + '-' + i,
-            style: { display: 'flex', alignItems: 'flex-start', maxWidth: '86%', marginTop: 6 },
+      const bubble = (m, key) => {
+        const isUser = m.role === 'user'
+        const isMember = m.role === 'member'
+        const kind = isMember ? (m.kind || 'deepseek') : brainKind
+        const who = isUser ? '你' : (isMember ? (m.name || '成员') : '指挥')
+        const sub = isMember
+          ? [m.name || '成员', m.kind, m.model].filter(Boolean).join(' · ')
+          : (isUser ? '你' : '指挥 · ' + (model || (team && team.model) || ''))
+        const verdictLine = isMember && (m.reviewOk !== null || m.commanderOk !== null)
+          ? [
+            m.reviewOk === true ? '审校：通过' : m.reviewOk === false ? '审校：不通过' : null,
+            m.commanderOk === true ? '指挥审核：通过' : m.commanderOk === false ? '指挥审核：不通过' : null,
+          ].filter(Boolean).join(' · ')
+          : ''
+        const reasons = isMember
+          ? [m.reviewReason, m.commanderReason].filter(Boolean).join(' / ')
+          : ''
+        return h('div', {
+          key,
+          style: {
+            display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10,
+            flexDirection: isUser ? 'row-reverse' : 'row',
+            maxWidth: '92%', alignSelf: isUser ? 'flex-end' : 'flex-start',
           },
-          h(Avatar, { kind: item.kind, name: item.who }),
-          h('div', { style: Object.assign({}, styles.bubble, { flex: 1 }) },
-            h('div', { style: styles.who }, who + ' · ' + new Date(entry.at).toLocaleTimeString()),
-            item.body ? h(Collapsible, { text: item.body }) : null,
-            item.image ? h('img', {
-              src: item.image, alt: 'generated',
-              style: { display: 'block', maxWidth: 360, marginTop: 6, borderRadius: 8 },
-            }) : null,
-            reviewLines)))
-        })
-        const label = entry.request ? '' : (entry.brief ? '任务：' + entry.brief : '')
-        return h('div', { key: 'round' + index, style: { display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8 } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-            h('span', { style: { flex: '0 0 auto', fontSize: 11, color: 'var(--dsw-alias-label-secondary)', fontWeight: 600 } },
-              '第 ' + (index + 1) + ' 轮 · ' + new Date(entry.at).toLocaleTimeString() + ' · ' + sections.length + ' 条回执' + (label ? ' · ' + label : '')),
-            h('span', { style: { flex: 1, height: 1, background: 'var(--dsw-alias-border-l1)' } })),
-          items)
-      })
+        },
+        isUser ? null : h(Avatar, { kind, name: who }),
+        h('div', { style: Object.assign({}, styles.bubble, isUser ? styles.mine : {}, { flex: 1, minWidth: 0 }) },
+          h('div', { style: styles.who }, sub + ' · ' + new Date(m.at || Date.now()).toLocaleTimeString()),
+          h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(m.text || '')),
+          m.image ? h('img', {
+            src: m.image, alt: 'member output',
+            style: { display: 'block', maxWidth: 360, marginTop: 6, borderRadius: 8 },
+          }) : null,
+          verdictLine ? h('div', { style: { marginTop: 6, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, verdictLine) : null,
+          reasons ? h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85 } }, reasons) : null))
+      }
 
       return h('div', {
         style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: 12, gap: 8, overflow: 'hidden' },
       },
-      h(TeamBrainChat, { sessionId }),
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' } },
-        h('strong', null, '成员回执'),
-        h('span', { style: styles.muted }, entries.length + ' 轮 · 更新于 ' + new Date(now).toLocaleTimeString())),
+      /* 工具栏 */
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: '0 0 auto' } },
+        h('strong', null, '团队'),
+        h('span', { style: styles.muted, fontSize: 12 }, messages.length + ' 条消息'),
+        h('select', {
+          style: Object.assign({}, styles.input, { width: 230, fontSize: 12 }),
+          value: model || '',
+          title: '指挥大脑用哪个模型（本会话持久化）',
+          onChange: (event) => pickModel(event.target.value),
+        }, (brainModels.length ? brainModels : [model || 'claude-fable-5-2']).map((m) => h('option', { key: m, value: m }, m))),
+        h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
+          (team && team.brainKind ? team.brainKind : '…') + (team && team.persisted ? ' · 已持久化' : ' · 仅内存')),
+        h('span', { style: { flex: 1 } }),
+        running ? h(Button, { onClick: stop }, '停止') : null),
+      /* 时间线 */
       h('div', {
         ref: (node) => { scrollerRef.current = node },
         'data-council-scroller': '1',
-        onScroll: (event) => {
-          const node = event.currentTarget
-          setAtBottom(node.scrollHeight - node.scrollTop - node.clientHeight < 48)
-        },
-        style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 4 },
-      }, rounds),
-      toast ? h('div', {
-        style: {
-          position: 'absolute', left: '50%', bottom: 16, transform: 'translateX(-50%)',
-          padding: '4px 12px', borderRadius: 999, fontSize: 12,
-          background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-          border: '1px solid var(--dsw-alias-border-l1)', boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
-        },
-      }, '已跳到底部') : null)
+        style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', paddingRight: 4 },
+      },
+      messages.length || streamText
+        ? messages.map((m, i) => bubble(m, 'm' + i)).concat(
+          streamText
+            ? [h('div', {
+              key: 'streaming',
+              style: { display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, maxWidth: '92%' },
+            },
+            h(Avatar, { kind: brainKind, name: '指挥' }),
+            h('div', { style: Object.assign({}, styles.bubble, { flex: 1, minWidth: 0, opacity: 0.92 }) },
+              h('div', { style: styles.who }, '指挥 · 生成中'),
+              h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, streamText)))]
+            : [])
+        : h('div', { style: Object.assign({}, styles.muted, { padding: 12 }) },
+          '还没有团队对话。直接在下面说你要做什么——指挥会拆解、选人、派活，成员的回执会回到这里。')),
+      note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
+      /* 输入区 */
+      h('div', { style: { display: 'flex', gap: 6, flex: '0 0 auto' } },
+        h('input', {
+          style: Object.assign({}, styles.input, { flex: 1 }),
+          placeholder: '对指挥说话：说清你要什么，它会拆解并派给成员',
+          value: draft,
+          onChange: (event) => setDraft(event.target.value),
+          onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey) send() },
+        }),
+        h(Button, { onClick: running ? stop : send }, running ? '停止' : '发送')))
     }
 
     function registerAll(ctx) {

@@ -3595,8 +3595,9 @@ function teamSessionState(sessionId) {
 }
 
 /** 往团队会话里追加一条消息（超过上限丢最早的）。 */
-function teamPushMessage(entry, role, text) {
-  entry.messages.push({ role, text: String(text ?? ''), at: Date.now() })
+function teamPushMessage(entry, role, text, meta) {
+  // meta 可选：成员回执带 name/kind/model/image/acceptance/reviewOk…（团队页群聊气泡用）
+  entry.messages.push(Object.assign({ role, text: String(text ?? ''), at: Date.now() }, meta || {}))
   if (entry.messages.length > TEAM_MESSAGE_LIMIT) entry.messages.splice(0, entry.messages.length - TEAM_MESSAGE_LIMIT)
 }
 
@@ -4576,7 +4577,8 @@ export function createHandler(ctx, config = {}) {
               runIds: running.map((slot) => slot.runId),
               // 会话日志写入成功过 → true；否则只是插件内存态（重启即失效）
               persisted: Boolean(entry && entry.persisted),
-              messages: (entry ? entry.messages : []).map((m) => ({ role: m.role, text: m.text, at: m.at })),
+              // 全字段带出：成员回执要 name/kind/model/image/acceptance/reviewOk… 才能渲染成群聊气泡
+              messages: (entry ? entry.messages : []).map((m) => Object.assign({}, m)),
             })
           }
           // v0.4：选择本会话的「指挥大脑」模型（持久化到组上，重启不丢）
@@ -6500,6 +6502,29 @@ function bindAgent(ctx, config, group, agent) {
         const acceptanceSummary = summarizeAcceptance(response.members)
         response.acceptanceStatus = acceptanceSummary.acceptanceStatus
         response.acceptanceNote = acceptanceSummary.acceptanceNote
+        // v0.4 P2：成员回执也进「团队」群聊时间线（微信式：用户/指挥/成员混排）。
+        // 只对已绑定小组的会话推；单人会话没有 group，不产生团队消息。
+        try {
+          const sid = normalizeSessionId(sessionIdOf(exec) || '')
+          if (sid && groupForSession(state, sid)) {
+            const entry = teamSessionState(sid)
+            for (const m of response.members || []) {
+              const self = m.review && m.review.self ? m.review.self : null
+              const commander = m.review && m.review.commander ? m.review.commander : null
+              teamPushMessage(entry, 'member', String(m.text || m.error || '（无产出）'), {
+                name: m.name || '成员',
+                kind: m.kind || 'deepseek',
+                model: m.model || null,
+                image: m.image || null,
+                acceptance: m.acceptance || m.acceptanceStatus || null,
+                reviewOk: self && typeof self.ok === 'boolean' ? self.ok : null,
+                reviewReason: self && self.reason ? String(self.reason) : null,
+                commanderOk: commander && typeof commander.ok === 'boolean' ? commander.ok : null,
+                commanderReason: commander && commander.reason ? String(commander.reason) : null,
+              })
+            }
+          }
+        } catch { /* 群聊推送失败不影响派活结果 */ }
         if (ACCEPTANCE_BLOCKED.has(acceptanceSummary.acceptanceStatus) && failOnRejectedAcceptance()) {
           const receipt = delegateReceiptText(response)
           throw new Error(

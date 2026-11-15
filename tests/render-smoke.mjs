@@ -61,7 +61,7 @@ const CARD_PROPS = {
 }
 
 const EXPECT = {
-  live: { council: ['职位', '成员', '总画师风格', 'API key 用量'], 'council-thread': ['位成员', '发送'] },
+  live: { council: ['职位', '成员', '总画师风格'], 'council-thread': ['位成员', '发送'], 'council-chat': ['做个登录页面', '登录页写好了', '审校：通过', '指挥审核：通过'] },
   empty: { council: ['单人模式'], 'council-mode': ['单人', '小组'] },
   'with-review': { council: ['职位', '成员'], 'council-card': ['画师', '自审', '指挥审核', '[img]'], 'council-mode': ['单人', '小组'] },
 }
@@ -73,6 +73,24 @@ const SEEDS = {
   council: (state) => [state, null, null, null, { deepseek: null, reason: 'signed-out' }, KEY_USAGE, MODELS, null, null, null],
   'council-mode': () => [null, false, null],
   'council-tail': (state) => [state, false],
+  // v0.4 P2 团队群聊：注入一份「用户 / 指挥 / 成员回执」混排的时间线
+  'council-chat': () => [
+    {
+      model: 'claude-fable-5-2',
+      brainKind: 'claude-cli',
+      running: false,
+      messages: [
+        { role: 'user', text: '做个登录页面', at: Date.now() },
+        { role: 'assistant', text: '我先拆解成两步', at: Date.now() },
+        {
+          role: 'member', name: '代码', kind: 'deepseek', model: 'deepseek-flash',
+          text: '登录页写好了，含校验', at: Date.now(),
+          reviewOk: true, reviewReason: '符合要求', commanderOk: true, commanderReason: '可以',
+        },
+      ],
+    },
+    null, 'claude-fable-5-2', '', '', false, '',
+  ],
 
 }
 
