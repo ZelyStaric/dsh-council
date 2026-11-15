@@ -6110,7 +6110,7 @@ function bindAgent(ctx, config, group, agent) {
       order: 1500,
       text: () => rosterText(state.groups.find((g) => g.id === group.id) || group),
     }))
-    disposers.push(agentCtx.tools.register({
+    const delegateTool = {
       name: 'council_delegate',
       description: '把任务派给这个小组的成员（各自跑在自己的框架里），返回每个成员的产出、图片与两段审校结论。多成员/多步任务用 request 交给指挥拆解；assignments 直派只用于单成员单任务的简单转派。',
       parameters: {
@@ -6601,7 +6601,10 @@ function bindAgent(ctx, config, group, agent) {
         if (job.promise && typeof job.promise.catch === 'function') job.promise.catch(() => {})
         return toolResult({ background: true, runId, status: 'running', members: [] })
       },
-    }))
+    }
+    // 注册即登记：大脑经 MCP 回调时不必等 DSH 侧先执行过一次
+    try { delegateImplByGroup.set(group.id, delegateTool.execute) } catch { /* 登记失败不影响正常功能 */ }
+    disposers.push(agentCtx.tools.register(delegateTool))
     disposers.push(agentCtx.tools.register({
       name: 'council_collect',
       description: '取回后台派活的结果：council_delegate 以 background 模式派活时会立刻返回 runId，成员在后台跑；完成后用这个工具收结果（可带等待秒数）。',
