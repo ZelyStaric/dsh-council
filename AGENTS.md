@@ -12,9 +12,11 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
 ## 本插件当前形态（2026-10-28）
 
 - 会话即群聊：`council_delegate` 由「指挥」拆解 → 成员并发干活 → 「审校」初审 → 指挥终审 → 不合格自动返工一次。
-- 视图：`对话`（原生）/`群聊`（成员发言时间线，每 1.5s 刷新）/`小组`（编排：成员、职位、风格、API、用量）。
+- 视图：`对话`（原生）/`团队`（原「群聊」，v0.3.1 改名：顶部团队大脑面板 + 成员发言时间线）/
+  `小组`（编排：成员、职位、风格、API、用量）。
 - 输入框上方有实时进度条（谁在哪个阶段、多少秒）；回合末尾有群聊回执块。
 - 职位 8 个：指挥 / 代码 / 全栈 / 审校 / 画师 / 配乐 / 3D建模 / 动画（都只是预设，可自由改名/改提示词）。
+  实际名册里另有「提示词」「材质」等自建职位（存在 `council.json`，不是代码里的预设）。
 - 头像：用户提供的三张立绘（claude=橘发大小姐、deepseek=蓝鲸女仆、codex/gpt+画师=白发龙娘），
   192×192 裁切版放在 `~/.dsh/storages/council-images/avatar-*-small.png`，经 `/council/api/image/…` 提供。
 
@@ -22,6 +24,9 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
 
 1. **Host 半（`index.js` / `cordis.patch.yml`）改了必须重启**：`systemctl --user restart dsh-web`
    （重启会打断当前会话的 turn）。Client 半（`client.js`）只需刷新页面。
+   ⛔ **只 restart，绝不 `stop`**（2026-11-15 教训）：**DSH 自己就跑在这个服务里**，
+   `systemctl --user stop dsh-web` 会把正在跟你对话的进程一起停掉，用户当场失联、只能手动重启。
+   要「改完再重启」就用 `setsid nohup bash -c 'sleep 3; systemctl --user restart dsh-web'`。
 2. **Client 半改完必须跑渲染冒烟**（离线假 React，抓未定义标识符/括号错这类硬 bug）：
    ```bash
    cd ~/LLM/dsh-council
@@ -29,6 +34,13 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
    node tests/render-smoke.mjs            # 无参时从服务端取 /state；也可传一份 state.json 当夹具
    ```
    ⚠️ 曾经因为漏跑冒烟把整个客户端插件搞崩过一次（`ReferenceError` / 括号不匹配），别再犯。
+3. **动 `load()`/`save()` 必须跑存储测试**：
+   ```bash
+   node tests/storage-guard-test.mjs      # 坏读只读保护 / 原子写 / 空态 / 正常加载
+   ```
+   ⚠️ 2026-11-15 真出过事：`save()` 非原子 + `load()` 坏读静默回退空态，
+   把 546 KB 的 `council.json` 覆盖成 1.4 KB（10 职位 / 39 成员 / 9 组全丢）。
+   细节见 [`~/docs/dsh-council.md`](/home/nanami/docs/dsh-council.md) 的「council.json 的数据安全」。
 
 
 ## 包名变更 checklist（改一次踩过两次坑，必须四处同步）
