@@ -2038,6 +2038,28 @@ function deepseekMemberModel(config, member, provider) {
  * `agent-default-model` 在 profile patch 里独立配置，插件这边不会改它。
  * @returns {{members:number,total:number}}
  */
+/**
+ * 一次性迁移（幂等）：**清掉职位上的 kind / model**。
+ *
+ * 2026-11-16 用户决定：职位只是「提示词模板」，框架由成员选的模型自动推断
+ * （inferKindFromModel）。职位钉死框架会导致「同一个职位没法同时有 deepseek 和 codex 成员」。
+ */
+async function migrateRolesDropKindModel() {
+  let dropped = 0
+  for (const role of state.roles || []) {
+    if (role && ('kind' in role || 'model' in role)) {
+      delete role.kind
+      delete role.model
+      dropped += 1
+    }
+  }
+  if (dropped) {
+    await save()
+    console.error('[council] 迁移：清掉 ' + dropped + ' 个职位上的 kind/model（框架改由模型推断）')
+  }
+  return dropped
+}
+
 async function migrateDeepseekMembers() {
   STAFF_MODELS.deepseek = DEEPSEEK_MEMBER_MODEL
   let members = 0
@@ -4031,6 +4053,7 @@ export function apply(ctx, config = {}) {
   // 先 load 再迁移，补绑也挂在这条链上 —— 两个 load() 并发会把迁移后的内存状态覆盖回旧值。
   const boot = load()
     // .then(() => migrateImageModels())  // 已停用：让用户自己选模型
+    .then(() => migrateRolesDropKindModel())
     .then(() => migrateDeepseekMembers())
     .catch((error) => console.error('[council] startup migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
@@ -4187,6 +4210,12 @@ export function createHandler(ctx, config = {}) {
                 if (!member) return send(res, 404, { error: 'member not found: ' + body.id })
                 if (member) {
                   const kindChanged = body.kind !== undefined && body.kind !== member.kind
+                  // 改了模型就按模型重新推框架（模型名无效 → 400，不静默改）
+                  if (typeof body.model === 'string' && body.model.trim()) {
+                    const inferred = inferKindFromModel(body.model)
+                    if (!inferred) return send(res, 400, { error: unknownModelError(body.model, modelCatalogIds()) })
+                    body.kind = inferred
+                  }
                   Object.assign(member, pick(body, ['name', 'kind', 'model', 'provider', 'providerId', 'roleId', 'cwd']))
                   // v0.4 P3：长久/临时 可随时切换（false = 临时，每轮重发上下文）
                   if (typeof body.persistent === 'boolean') member.persistent = body.persistent
@@ -4203,12 +4232,20 @@ export function createHandler(ctx, config = {}) {
                 gemini: 'gemini-3.8-flash',
                 image: 'gpt-image-2.6-flare',
               }
+              // 2026-11-16：**框架由模型推断**。给了 model 就必须认得出框架，认不出直接 400 报错，
+              // 绝不静默兜底成某个框架（那会跑到错误的腿上，比报错更难查）。
+              const wantModel = String(body.model || '').trim()
+              if (wantModel) {
+                const inferred = inferKindFromModel(wantModel)
+                if (!inferred) return send(res, 400, { error: unknownModelError(wantModel, modelCatalogIds()) })
+                body.kind = inferred
+              }
               const kind = defaultModels[body.kind] ? body.kind : 'codex'
               const member = {
                 id: `m_${randomUUID().slice(0, 8)}`,
                 name: body.name || '新成员',
                 kind,
-                model: body.model || defaultModels[kind],
+                model: wantModel || defaultModels[kind],
                 provider: body.provider || (kind === 'deepseek' ? deepseekMemberProvider(config) : undefined),
                 roleId: body.roleId,
                 cwd: body.cwd || undefined,
@@ -5219,6 +5256,47 @@ const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek
 const STAFF_KINDS = Object.keys(STAFF_MODELS)
 
 /**
+ * **模型名 → 成员框架**（2026-11-16 用户要求：框架由模型自动决定，不再让职位钉死）。
+ *
+ * 规则（顺序有意义）：
+ *  1. `gpt-image-*` / `nano-banana-*` → `image`  ← **必须先判**，否则会被下面的 gpt 前缀吃掉
+ *  2. `claude-*` → `claude`（Claude Code CLI）
+ *  3. `gpt-*` / `o<数字>*` → `codex`（Codex CLI）
+ *  4. `deepseek-*` → `deepseek`（DSH 原生会话）
+ *  5. `gemini-*` → `gemini`（Gemini CLI）
+ *  6. 认不出来 → `null`
+ *
+ * 返回 null 时**必须报错**，不要静默兜底成 claude —— 那会跑到错误的腿上，比直接报错更难查。
+ */
+function inferKindFromModel(model) {
+  const name = String(model || '').trim().toLowerCase()
+  if (!name) return null
+  if (name.startsWith('gpt-image') || name.startsWith('nano-banana') || name.startsWith('nano_banana')) return 'image'
+  if (name.startsWith('claude')) return 'claude'
+  if (name.startsWith('gpt') || /^o\d/.test(name)) return 'codex'
+  if (name.startsWith('deepseek')) return 'deepseek'
+  if (name.startsWith('gemini')) return 'gemini'
+  return null
+}
+
+/** 当前模型缓存里的全部 id（扁平），用于「模型名无效」时的提示。 */
+function modelCatalogIds() {
+  const value = (catalog && catalog.value) || {}
+  const out = []
+  for (const kind of Object.keys(value)) {
+    for (const id of value[kind] || []) if (id) out.push(String(id))
+  }
+  return out
+}
+
+/** 模型名无效时的统一错误文案（补员 / 建成员 / 改成员都走它）。 */
+function unknownModelError(model, available) {
+  const list = (available || []).filter(Boolean)
+  const sample = list.length ? '当前可用：' + list.slice(0, 12).join('、') : '（模型清单为空，先在「小组」页刷新模型列表）'
+  return '无法识别模型「' + String(model || '') + '」对应的框架：请用 claude-* / gpt-* / o<数字>* / deepseek-* / gemini-* / gpt-image-* / nano-banana-* 之一。' + sample
+}
+
+/**
  * 「模型定位速查」表：模型 id → 定位（**来源是用户经验，不是官方基准，未做线上核实**）。
  *
  * 为什么要有它：`catalogText()` 原来只列「各框架有哪些 id」，指挥（拆解者）不知道它们擅长什么，
@@ -5245,17 +5323,24 @@ const MODEL_GUIDE_TIEBREAK = '不确定就选 gpt-6.1-sol 或 deepseek-v4.1-flas
  * 传给指挥的「模型定位速查」整段。
  * 纯同步字符串拼接（systemPrompt 的 section.text 不能是 Promise）。
  */
+/** 选模型的通用择一原则（用户 2026-11-16 要求写进提示词）。 */
+const MODEL_GUIDE_RULE = '**选型原则**：如果没有特殊需求，只选择同型号最新的模型（例如 claude-opus-5-5 优于 claude-opus-4-8，gemini-3.8-flash 优于 gemini-3.5-flash）；只有在价格/延迟有明确要求时才退到旧型号。'
+
 function modelGuideText() {
   // 用户可在「小组」页编辑这张表（state.config.modelGuide），改了立刻影响指挥的选模型决策
   const custom = String((state.config && state.config.modelGuide) || '').trim()
   if (custom) {
     return [
       '## 模型定位速查（**用户维护**：性能 / 性价比，来源：用户经验，不是官方基准）',
+      MODEL_GUIDE_RULE,
+      '',
       custom,
     ].join('\n')
   }
   return [
     '## 模型定位速查（来源：用户经验，不是官方基准；选模型时优先看这里，不要凭旧印象）',
+    MODEL_GUIDE_RULE,
+    '',
     ...MODEL_GUIDE.map(([id, desc]) => `- ${id}：${desc}`),
   ].join('\n')
 }
@@ -5297,11 +5382,25 @@ function roleKind(role) {
   return STAFF_MODELS[role?.kind] ? role.kind : 'claude'
 }
 
-/** 补员目标的 kind/model：staffing 显式值 > 职位默认 > 框架默认模型。 */
+/**
+ * 补员目标的 kind/model（2026-11-16 改：**框架由模型推断**，职位不再提供框架/模型默认）。
+ *
+ * 优先级：
+ *   ① 显式 model → 用 inferKindFromModel 推出框架；**推不出来就返回 null**（调用方必须报错）
+ *   ② 只给了 kind → 用该框架的默认模型
+ *   ③ 都没给 → claude + 它的默认模型
+ *
+ * @returns {{kind: string, model: string} | null} null = 模型名无法识别
+ */
 function staffTarget(role, kind, model) {
-  const nextKind = STAFF_KINDS.includes(kind) ? kind : roleKind(role)
-  const roleModel = roleKind(role) === nextKind ? role.model : undefined
-  return { kind: nextKind, model: model || roleModel || STAFF_MODELS[nextKind] }
+  const explicitModel = String(model || '').trim()
+  if (explicitModel) {
+    const inferred = inferKindFromModel(explicitModel)
+    if (!inferred) return null
+    return { kind: inferred, model: explicitModel }
+  }
+  const nextKind = STAFF_KINDS.includes(kind) ? kind : 'claude'
+  return { kind: nextKind, model: STAFF_MODELS[nextKind] }
 }
 
 /**
@@ -5374,6 +5473,11 @@ async function ensureStaffing(group, staffing, createdIds, config) {
     }
     if (!member) {
       const target = staffTarget(role, wantKind, wantModel)
+      if (!target) {
+        dirty = true
+        changes.push('- 跳过 ' + role.name + '：' + unknownModelError(wantModel, modelCatalogIds()))
+        continue
+      }
       member = {
         id: `m_${randomUUID().slice(0, 8)}`, name: role.name, roleId: role.id,
         kind: target.kind, model: target.model,
@@ -5410,9 +5514,14 @@ async function ensureStaffing(group, staffing, createdIds, config) {
         // 只改 kind 且与现状相同 → 不动模型（保留成员自己选的模型）；
         // 换 kind 才回落到职位默认/框架默认，除非显式给了新模型。
         const nextKind = wantKind || member.kind
-        const target = nextKind === member.kind
-          ? { kind: nextKind, model: wantModel || member.model }
+        const target = nextKind === member.kind && !wantModel
+          ? { kind: nextKind, model: member.model }
           : staffTarget(role, nextKind, wantModel)
+        if (!target) {
+          changes.push('- 跳过调整 ' + role.name + '：' + unknownModelError(wantModel, modelCatalogIds()))
+          dirty = true
+          break
+        }
         if (member.kind !== target.kind || member.model !== target.model) {
           delete member.convId
           member.kind = target.kind
@@ -6147,7 +6256,8 @@ function rosterText(group) {
     '成员名册：',
     members || '（暂无成员）',
     '岗位目录：',
-    ...(state.roles || []).map((r) => `- ${r.name}（默认框架=${roleKind(r)}，默认模型=${staffTarget(r, undefined, undefined).model}）${r.prompt ? '：' + r.prompt : ''}`),
+    // 职位只是「提示词模板」：框架由成员选的模型自动推断，职位不再带默认框架/模型
+    ...(state.roles || []).map((r) => `- ${r.name}${r.prompt ? '：' + r.prompt : ''}`),
     '成员会跑在各自的原生框架里，回执会以工具结果的形式回到这个对话。',
     '需要拆解时，把用户原话作为 request 传给 council_delegate：会由持有「指挥」职位的成员拆解、成员干活、持有「审校」职位的成员初审，最后指挥终审。',
   ].filter(Boolean).join('\n')
@@ -6962,14 +7072,13 @@ async execute(args) {
           additionalProperties: true,
           properties: {roles: { type: 'array', items: { type: 'object', additionalProperties: true } }, ok: { type: 'boolean' }, error: { type: 'string' }},
         },
-        render(_args, value) { const rows = (value.roles || []).map((r) => `- ${r.name}（默认：${r.defaultKind || r.kind || 'claude'} / ${r.defaultModel || r.model || '默认'}）`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无职位）') }] },
+        render(_args, value) { const rows = (value.roles || []).map((r) => `- ${r.name}${r.prompt ? '：' + String(r.prompt).slice(0, 40) : ''}`); return [{ type: 'text', text: value.error ? ('失败：' + value.error) : (rows.join('\n') || '（无职位）') }] },
       },
 async execute(args) {
         if (args.action === 'list') {
           const roles = state.roles.map((r) => ({
+            // 职位只剩「名字 + 提示词」（2026-11-16）：框架由成员选的模型自动推断
             id: r.id, name: r.name, prompt: r.prompt ?? null, color: r.color ?? null,
-            kind: r.kind ?? null, model: r.model ?? null,
-            defaultKind: roleKind(r) ?? null, defaultModel: staffTarget(r, undefined, undefined).model ?? null,
           }))
           return toolResult({ roles })
         }

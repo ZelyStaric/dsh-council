@@ -486,21 +486,8 @@ window.__ModuleLoader__.load({
           nameRow,
           h('span', { style: { flex: 1 } }),
           h(Button, { onClick: () => mutate('/roles/delete', { id: role.id }) }, '删')),
-        h('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
-          h('select', {
-            'aria-label': '职位默认运行框架', title: '成员用哪个 agent 运行时跑（claude=Claude Code / codex=Codex / deepseek=DSH 会话 / gemini=Gemini CLI / image=出图 API）',
-            value: role.kind || '', style: Object.assign({}, styles.input, { width: 132, flexShrink: 0 }),
-            onChange: (event) => mutate('/roles', { id: role.id, kind: event.target.value, model: '' }),
-          }, h('option', { value: '' }, '运行时：claude'),
-          ['claude', 'codex', 'deepseek', 'gemini', 'image'].map((kind) => h('option', { key: kind, value: kind },
-            // 把「引擎」写出来，避免只看到 claude/codex 这种代号不知所谓
-            '运行时：' + kind + (RUNNER_LABEL[kind] ? '（' + RUNNER_LABEL[kind] + '）' : '')))),
-          h('select', {
-            'aria-label': '职位默认模型', title: '职位默认模型（补员时用它）',
-            value: role.model || '', style: Object.assign({}, styles.input, { flex: 1, minWidth: 0 }),
-            onChange: (event) => mutate('/roles', { id: role.id, model: event.target.value }),
-          }, h('option', { value: '' }, '模型：默认'),
-          Array.from(new Set([role.model, ...modelOptions(role.kind || 'claude')].filter(Boolean))).map((model) => h('option', { key: model, value: model }, model)))),
+        h('div', { style: Object.assign({}, styles.muted, { marginTop: 6, fontSize: 11 }) },
+          '职位只提供提示词模板；成员用哪个框架由它选的模型自动决定（claude-*→Claude Code，gpt-*/o*→Codex，deepseek-*→DSH，gemini-*→Gemini，gpt-image-*/nano-banana-*→出图）'),
         h('textarea', {
           style: Object.assign({}, styles.input, { marginTop: 6, minHeight: 54, resize: 'vertical' }),
           defaultValue: role.prompt, placeholder: '职位提示词（派活时注入）',
@@ -1414,17 +1401,18 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         // ⚠️ 只有「会话内那个实例」才管 tab 可见性。
         // 这个组件同时挂在 conversation.session.header.actions 和 conversation.hero.options 两处；
-        // hero 实例没有 sessionId → bound 恒为 false → 它会把刚显示出来的「团队/小组」又藏掉，
-        // 表现就是「切到小组后 tab 闪一下就没了」（实测踩到）。
+        // hero 实例没有 sessionId → bound 恒为 false → 它会把刚显示出来的「团队/小组」又藏掉。
         if (!sessionId) return
         if (!state) return
-        applyTabVisibility(!bound, 'effect sessionId=' + sessionId.slice(0, 8) + ' bound=' + bound)
-        // 兜底复核：建组/绑定过程中 state 会刷新几次，中间某一帧可能短暂 bound=false。
-        // 有它就不会停在错误状态（tab 被误隐藏后 1.2 秒内自动纠正）。
+        // 防抖 300ms：新建小组会话时 bound 会抖动几帧（建组→绑定→state 刷新），
+        // 每帧都立刻应用会让内容区在「对话 / 团队」之间来回闪（2026-11-16 用户实测）。
+        let recheck = null
         const timer = setTimeout(() => {
-          applyTabVisibility(!bound, 'recheck bound=' + bound)
-        }, 1200)
-        return () => clearTimeout(timer)
+          applyTabVisibility(!bound, 'effect bound=' + bound)
+          // 兜底复核：万一中间被别的路径改错，1.2 秒后再纠正一次
+          recheck = setTimeout(() => applyTabVisibility(!bound, 'recheck bound=' + bound), 1200)
+        }, 300)
+        return () => { clearTimeout(timer); if (recheck) clearTimeout(recheck) }
       }, [sessionId, bound, Boolean(state)])
 
       /* hero 预选 → 会话建立后自动启用小组模式 */
@@ -2056,6 +2044,7 @@ window.__ModuleLoader__.load({
     // "Cannot access before initialization"；var 会提升成 undefined，逻辑本身能跑。
     var councilSoloMode = false
     var tabWatchTimer = null
+    var tabSwitching = false   // 正在切视图（防 click 重入）
 
     function applyTabVisibility(solo, why) {
       councilSoloMode = Boolean(solo)
@@ -2084,8 +2073,12 @@ window.__ModuleLoader__.load({
         const show = solo ? dialog : mine
         // 先把选中项挪到「会被显示」的那一边，再隐藏——否则内容区会变成空白
         const activeHidden = hide.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
-        if (activeHidden && show[0]) {
+        // 切换锁：click 会触发 DSH 切视图 → 重渲染 → MutationObserver 再进来，
+        // 没有锁会在「对话 ↔ 团队」之间反复横跳（用户看到的闪烁）。
+        if (activeHidden && show[0] && !tabSwitching) {
+          tabSwitching = true
           try { show[0].click() } catch { /* ignore */ }
+          setTimeout(() => { tabSwitching = false }, 500)
         }
         for (const b of hide) b.style.display = 'none'
         for (const b of show) b.style.display = ''

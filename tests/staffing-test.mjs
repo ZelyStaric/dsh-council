@@ -257,15 +257,16 @@ await check('出图默认值④：新建 image 成员 / 职位默认模型都是
     .filter((line) => /'gpt-image-2\.5/.test(line) && !/OLD_IMAGE_MODELS|IMAGE_LEGACY_PREFIX|旧集|→ gpt-image-2/.test(line))
   assert.deepEqual(legacyHardcoded, [], '还有硬编码的 2.5 默认值：\n' + legacyHardcoded.join('\n'))
   const group = { id: 'g_img', name: 'IMG', memberIds: [] }
-  const imgRole = { id: 'r_img', name: '出图', prompt: 'x', kind: 'image' }
+  // 2026-11-16：职位不再带框架/模型，出图成员靠**显式 model** 推断出 image 框架
+  const imgRole = { id: 'r_img', name: '出图', prompt: 'x' }
   mod.state.groups.push(group)
   mod.state.roles.push(imgRole)
-  await mod.ensureStaffing(group, [{ role: '出图' }])
+  await mod.ensureStaffing(group, [{ role: '出图', model: 'gpt-image-2.6-flare' }])
   const created = mod.state.members.find((m) => m.roleId === 'r_img')
   assert.ok(created, 'ensureStaffing 没给 image 职位补员')
-  assert.equal(created.kind, 'image')
-  assert.equal(created.model, 'gpt-image-2.6-flare', '新建 image 成员默认模型不对：' + created.model)
-  return created.name + ' / ' + created.model
+  assert.equal(created.kind, 'image', 'gpt-image-* 必须推断成 image 框架')
+  assert.equal(created.model, 'gpt-image-2.6-flare')
+  return created.name + ' / ' + created.kind + ' / ' + created.model
 })
 
 /* ── DeepSeek 提供商与模型解析 ───────────────────────────────────────────── */
@@ -318,13 +319,14 @@ await check('DeepSeek③：迁移不再覆盖显式 relay 配置', async () => {
   return `迁移 ${result.members} 成员 + ${result.roles} 职位 · relay 成员保持 ${relay.model}`
 })
 
-await check('rosterText 每个职位后带 默认框架/默认模型', () => {
+await check('rosterText 职位只写名字 + 提示词（不再有默认框架/模型）', () => {
   setState(structuredClone(fixture))
   const text = mod.rosterText(fixture.groups[0])
-  assert.match(text, /- 代码（默认框架=deepseek，默认模型=deepseek-flash）/)
-  assert.match(text, /- 审校（默认框架=claude，默认模型=claude-opus-5-5）/)
-  assert.match(text, /- 画师（默认框架=claude，默认模型=claude-sonnet-5）/) // 无 kind/model → 走 claude 默认
-  return '逐职位注入'
+  // 2026-11-16：框架由成员模型推断，职位只是提示词模板
+  assert.ok(!/默认框架=/.test(text), '不该再输出「默认框架=」：' + text.slice(0, 200))
+  assert.match(text, /- 代码：写代码/)
+  assert.match(text, /- 审校：审查/)
+  return '只注入名字 + 提示词'
 })
 
 /* ── ensureStaffing ─────────────────────────────────────────────────────── */
@@ -1092,15 +1094,16 @@ try {
     return `removed=${result.removed.length} kept=${result.kept}`
   })
 
-  await check('council_role：list 返回 kind/model 与默认值', async () => {
+  await check('council_role：list 只返回职位本身（无默认框架/模型）', async () => {
     const tool = registered.council_role
     const { roles } = await tool.execute({ action: 'list' })
     const code = roles.find((r) => r.name === '代码')
-    assert.equal(code.kind, 'deepseek')
-    assert.equal(code.defaultModel, 'deepseek-flash')
-    const art = roles.find((r) => r.name === '画师')
-    assert.equal(art.defaultKind, 'claude')
-    return 'kind/model + 默认值'
+    assert.ok(code, '应能列出「代码」职位')
+    assert.equal(code.kind, undefined, '职位不该再有 kind')
+    assert.equal(code.defaultModel, undefined, '职位不该再有 defaultModel')
+    assert.equal(code.defaultKind, undefined, '职位不该再有 defaultKind')
+    assert.ok(typeof code.prompt === 'string', '提示词还要有')
+    return '只有 name/prompt/id'
   })
 
   /* ── lossless JSON 出口（council_member / council_role / council_policy）─────────
@@ -1184,7 +1187,8 @@ try {
       const roles = await roleTool.execute({ action: 'list' })
       const bare = roles.roles.find((r) => r.id === 'r_bare')
       assert.ok(bare, 'role list 没返回 r_bare')
-      for (const key of ['prompt', 'color', 'kind', 'model']) assert.equal(bare[key], null, `缺 ${key} 必须回落 null`)
+      // 2026-11-16：职位不再有 kind/model 字段（框架由成员模型推断），只校验剩下的
+      for (const key of ['prompt', 'color']) assert.equal(bare[key], null, `缺 ${key} 必须回落 null`)
       const policy = await policyTool.execute({ action: 'get' })
       for (const [key, value] of Object.entries(policy)) assert.notEqual(value, undefined, 'policy.' + key + ' 是 undefined')
       for (const [label, value] of [['council_role list', roles], ['council_policy get', policy]]) {
