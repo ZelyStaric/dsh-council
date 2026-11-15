@@ -57,6 +57,7 @@ function tokenUrl() {
   return DSH + '/'
 }
 
+const SHOT_DIR = process.env.SHOT_DIR || '/tmp/pw/shots'
 const results = []
 function check(name, ok, detail) {
   results.push({ name, ok })
@@ -78,6 +79,16 @@ const readTabs = () => page.evaluate(() => {
   }
   return out
 })
+
+/** 整屏截图（证据）：动作与断言分开，截图只在采样结束后拍 */
+async function shot(name) {
+  try {
+    await page.screenshot({ path: `${SHOT_DIR}/tab-${name}.png` })
+    console.log(`shot ${SHOT_DIR}/tab-${name}.png`)
+  } catch (e) {
+    console.log(`shot ${name} FAILED: ${e && e.message}`)
+  }
+}
 
 /** 连续采样，返回是否出现过抖动（同一签名在 3 秒内变化过） */
 async function sampleStability(ms = 3000, step = 150) {
@@ -122,6 +133,7 @@ try {
     check('① 单人模式：轨迹可见', t['轨迹'] === 'show', `轨迹=${t['轨迹']}`)
     check('① 单人模式：团队隐藏', t['团队'] === 'hidden', `团队=${t['团队']}`)
     check('① 单人模式：小组隐藏', t['小组'] === 'hidden', `小组=${t['小组']}`)
+    await shot('1-solo')
   }
 
   /* ── ② 切到小组 ─────────────────────────────────────── */
@@ -137,6 +149,7 @@ try {
     check('② 小组模式：小组可见', t['小组'] === 'show', `小组=${t['小组']}`)
     check('② 小组模式：轨迹可见（用户要求保留）', t['轨迹'] === 'show', `轨迹=${t['轨迹']}`)
     check('② 小组模式：对话隐藏', t['对话'] === 'hidden', `对话=${t['对话']}`)
+    await shot('2-group')
   }
 
   /* ── ③ 切回单人 ─────────────────────────────────────── */
@@ -149,6 +162,7 @@ try {
     check('③ 切回单人：对话恢复', t['对话'] === 'show', `对话=${t['对话']}`)
     check('③ 切回单人：团队/小组隐藏', t['团队'] === 'hidden' && t['小组'] === 'hidden',
       `团队=${t['团队']} 小组=${t['小组']}`)
+    await shot('3-back-solo')
   }
 
   /* ── ④ 刷新后保持一致 ───────────────────────────────── */
@@ -160,9 +174,11 @@ try {
     check('④ 刷新后状态稳定', s.stable, s.stable ? '' : '抖动：' + s.signatures.join(' → '))
     check('④ 刷新后仍是单人形态', t['对话'] === 'show' && t['团队'] === 'hidden',
       `对话=${t['对话']} 团队=${t['团队']}`)
+    await shot('4-after-reload')
   }
 } catch (error) {
   check('冒烟执行', false, String(error && error.message || error))
+  await shot('x-failure')
 } finally {
   await browser.close()
 }
