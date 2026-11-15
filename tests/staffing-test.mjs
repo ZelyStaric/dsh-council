@@ -521,41 +521,50 @@ const getState = async (query = '') => (await fetch(base + '/state' + query)).js
 
 let tempId
 try {
-  await check('POST /roles 新建带 kind/model 的职位，读回一致', async () => {
+  await check('POST /roles 新建职位：只存 name/prompt/color（kind/model 被丢弃）', async () => {
+    // 2026-11-16：职位不再有框架/模型，传了也丢掉
     const res = await post('/roles', { name: '自测职位', prompt: 'x', kind: 'codex', model: 'gpt-6.1-sol' })
     assert.equal(res.status, 200)
     const { role } = await res.json()
     tempId = role.id
     const state = await getState()
     const saved = state.state.roles.find((r) => r.id === tempId)
-    assert.equal(saved.kind, 'codex')
-    assert.equal(saved.model, 'gpt-6.1-sol')
-    return `${saved.name}: ${saved.kind} / ${saved.model}`
+    assert.equal(saved.name, '自测职位')
+    assert.equal(saved.prompt, 'x')
+    assert.equal(saved.kind, undefined, '不该有 kind')
+    assert.equal(saved.model, undefined, '不该有 model')
+    return saved.name + '（无 kind/model）'
   })
 
-  await check('POST /roles 更新 kind/model 并读回', async () => {
+  await check('POST /roles 传 kind/model 会被忽略（职位只留提示词）', async () => {
+    // 2026-11-16：职位不再有 kind/model —— 框架由成员选的模型自动推断。
+    // 旧版前端仍可能传，服务端必须丢弃而不是写回。
     const res = await post('/roles', { id: tempId, kind: 'claude', model: 'claude-opus-5-5' })
     assert.equal(res.status, 200)
     const state = await getState()
     const saved = state.state.roles.find((r) => r.id === tempId)
-    assert.equal(saved.kind, 'claude')
-    assert.equal(saved.model, 'claude-opus-5-5')
-    return `${saved.kind} / ${saved.model}`
+    assert.equal(saved.kind, undefined, '不该写回 kind')
+    assert.equal(saved.model, undefined, '不该写回 model')
+    return 'kind/model 已忽略'
   })
 
-  await check('POST /roles 换 kind 未给 model → 清掉旧模型', async () => {
-    await post('/roles', { id: tempId, kind: 'deepseek' })
+  await check('POST /roles 仍能改名字与提示词', async () => {
+    const res = await post('/roles', { id: tempId, name: '改名后', prompt: '新的提示词' })
+    assert.equal(res.status, 200)
     const state = await getState()
     const saved = state.state.roles.find((r) => r.id === tempId)
-    assert.equal(saved.kind, 'deepseek')
-    assert.equal(saved.model, undefined)
-    return '旧模型已清空'
+    assert.equal(saved.name, '改名后')
+    assert.equal(saved.prompt, '新的提示词')
+    return saved.name
   })
 
-  await check('POST /roles 非法 kind → 400', async () => {
+  await check('POST /roles 非法 kind 也被忽略（400 已不再适用）', async () => {
     const res = await post('/roles', { id: tempId, kind: 'ruby' })
-    assert.equal(res.status, 400)
-    return 'HTTP 400'
+    assert.equal(res.status, 200, '现在直接忽略 kind，不再校验')
+    const state = await getState()
+    const saved = state.state.roles.find((r) => r.id === tempId)
+    assert.equal(saved.kind, undefined)
+    return '已忽略'
   })
 
   await check('GET/POST /config 暴露 strictDelegate（默认 true，可关可开）', async () => {

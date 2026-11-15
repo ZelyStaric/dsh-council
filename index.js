@@ -2045,8 +2045,9 @@ function deepseekMemberModel(config, member, provider) {
  * （inferKindFromModel）。职位钉死框架会导致「同一个职位没法同时有 deepseek 和 codex 成员」。
  */
 async function migrateRolesDropKindModel() {
+  const roles = state.roles || []
   let dropped = 0
-  for (const role of state.roles || []) {
+  for (const role of roles) {
     if (role && ('kind' in role || 'model' in role)) {
       delete role.kind
       delete role.model
@@ -2056,6 +2057,8 @@ async function migrateRolesDropKindModel() {
   if (dropped) {
     await save()
     console.error('[council] 迁移：清掉 ' + dropped + ' 个职位上的 kind/model（框架改由模型推断）')
+  } else {
+    console.error('[council] 迁移检查：' + roles.length + ' 个职位都已无 kind/model')
   }
   return dropped
 }
@@ -4178,22 +4181,21 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'POST') {
             const body = await readBody(req)
             if (route === '/roles') {
-              // kind 只接受四种框架；空字符串表示“回到默认（claude）”并清掉模型。
-              if (body.kind !== undefined && body.kind !== '' && !STAFF_KINDS.includes(body.kind)) {
-                return send(res, 400, { error: 'unknown kind: ' + body.kind + '（可用：' + STAFF_KINDS.join('/') + '）' })
-              }
+              // 2026-11-16：职位**只剩** name/prompt/color。
+              // 框架由成员选的模型自动推断（inferKindFromModel），职位上的 kind/model 一律忽略并主动清除
+              // （旧版前端或缓存页面可能还在传；不主动删会留下「看着像配置、其实不生效」的死字段）。
               if (body.id) {
                 const role = state.roles.find((r) => r.id === body.id)
                 if (role) {
-                  const patch = pick(body, ['name', 'prompt', 'color', 'kind', 'model'])
-                  // 换框架但没给模型：清掉旧框架的模型，回落到新框架的默认模型
-                  if (patch.kind !== undefined && patch.kind !== role.kind && patch.model === undefined) delete role.model
+                  const patch = pick(body, ['name', 'prompt', 'color'])
                   Object.assign(role, patch)
+                  delete role.kind
+                  delete role.model
                 }
                 await save()
                 return send(res, 200, { state })
               }
-              const role = { id: `r_${randomUUID().slice(0, 8)}`, name: body.name || '新职位', prompt: body.prompt || '', color: body.color, ...pick(body, ['kind', 'model']) }
+              const role = { id: `r_${randomUUID().slice(0, 8)}`, name: body.name || '新职位', prompt: body.prompt || '', color: body.color }
               state.roles.push(role)
               await save()
               return send(res, 200, { state, role })
@@ -7102,7 +7104,9 @@ async execute(args) {
           if (args.prompt !== undefined) role.prompt = args.prompt
           if (args.color !== undefined) role.color = args.color
           // 换框架但没给模型：清掉旧框架的模型，回落到新框架的默认模型
-          if (args.kind !== undefined && args.kind !== role.kind && args.model === undefined) delete role.model
+          // 职位不再有 kind/model（2026-11-16）
+          delete args.kind
+          delete args.model
           Object.assign(role, pick(args, ['kind', 'model']))
           await save()
           return toolResult({ ok: true, role: { id: role.id, name: role.name } })
