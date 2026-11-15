@@ -2,6 +2,26 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.69] - 2026-11-15
+
+### 修复
+
+- **后台派活完成后唤不醒主会话（日志刷屏 `parent agent not found`）**：`backgroundJobs` 里存的是裸
+  uuid（如 `a7ec8dbb-…`），而宿主注册的 agent id 带 `session-` 前缀（`session-a7ec8dbb-…`），
+  `notifyParentJobDone()` 只按裸 id 查 `agents.get()` 永远查不到 → `~/dsh-web.log` 反复刷
+  `[council] background job done: parent agent not found (<uuid>)`，且后台任务跑完**不会**给父会话推消息。
+  现在依次尝试：原值 → 加 `session-` 前缀（已带则不加）→ 扫 `agents.list()` 做相等／后缀匹配，
+  只有全部落空才打那条 error。
+- **拆解失败时没有任何消息**：`request` 交给指挥拆解、但指挥返回空计划（或调用失败）时，
+  `council_delegate` 只回「无成员产出」，看不出是没拆解还是成员没跑。现在这种情况会带回
+  结构化字段 `plannerError`，回执里多一节「## 拆解失败 → - 指挥没有给出可执行任务（原因：…）」。
+
+### 测试
+
+- `tests/staffing-test.mjs` 新增 2 条（167 → 169）：裸 uuid／已带前缀／只有 `list()` 三种情形都能定位
+  父会话并推送（mock 的 `agents.get` 只认带前缀的 id，证明兜底策略真的生效）／`request` 路径拆不出任务时
+  返回 `plannerError` 且回执含「## 拆解失败」。
+
 ## [0.2.68] - 2026-11-15
 
 ### 变更

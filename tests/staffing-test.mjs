@@ -4270,6 +4270,42 @@ try {
     }
   })
 
+  /* ── Bug1：job.sessionId 是裸 uuid，agent id 带 session- 前缀也要能找到父会话 ── */
+  await check('notifyParentJobDone：job.sessionId 是裸 uuid 时也要按 session- 前缀找到父会话并推送', async () => {
+    const pushes = []
+    const fakeAgent = {
+      id: 'session-a7ec8dbb-1111-2222-3333-444455556666',
+      followup(msg) { pushes.push(msg) },
+      steer() { throw new Error('不该走 steer') },
+    }
+    // 只认带前缀的 id（模拟宿主真实的 agents 注册表）
+    const agents = {
+      get: (id) => (id === fakeAgent.id ? fakeAgent : undefined),
+      list: () => [fakeAgent],
+    }
+    const ctx = { get: (name) => (name === 'agents' ? agents : undefined) }
+    const saved = mod.state
+    mod.__setState(Object.assign({}, saved, { config: Object.assign({}, saved.config, { backgroundDelegations: true }) }))
+    try {
+      // ① 裸 uuid
+      const bare = { runId: 'job_bare0001', status: 'done', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'a7ec8dbb-1111-2222-3333-444455556666', response: { members: [] }, notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(ctx, bare), true, '裸 uuid 也必须找到父会话（原来会刷 parent agent not found）')
+      assert.equal(pushes.length, 1, '应推一条')
+      // ② 已带前缀（不能重复加前缀）
+      const prefixed = { runId: 'job_pref0001', status: 'done', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'session-a7ec8dbb-1111-2222-3333-444455556666', response: { members: [] }, notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(ctx, prefixed), true, '带前缀的 id 也该命中')
+      assert.equal(pushes.length, 2, '应推第二条')
+      // ③ 只有 list()、没有 get() 时也能靠后缀匹配兜住
+      const listOnly = { get: (name) => (name === 'agents' ? { list: () => [fakeAgent] } : undefined) }
+      const viaList = { runId: 'job_list0001', status: 'done', startedAt: Date.now(), finishedAt: Date.now(), sessionId: 'a7ec8dbb-1111-2222-3333-444455556666', response: { members: [] }, notified: false, background: true }
+      assert.equal(mod.notifyParentJobDone(listOnly, viaList), true, '只有 list() 时靠后缀匹配也要命中')
+      assert.equal(pushes.length, 3, '应推第三条')
+      return '裸 uuid / 带前缀 / 只有 list() 三种都能定位父会话并推送 · 不再打 parent agent not found'
+    } finally {
+      mod.__setState(saved)
+    }
+  })
+
   /* ── A+B：拆解职责归指挥（多任务直派被拦 / 单任务直派 / request 由指挥拆解） ── */
   const bindPlannerGroup = async () => {
     const next = structuredClone(fixture)
@@ -4362,6 +4398,32 @@ try {
       const rendered = tool.output.render({}, out)[0].text
       assert.match(rendered, /## 拆解\n- 由 指挥（claude \/ claude-fable-5-2） 拆解/)
       return 'plannedBy=commander · 回执「由 指挥（claude / claude-fable-5-2）拆解」'
+    } finally {
+      mod.__setRunKind(undefined)
+    }
+  })
+
+  await check('拆解失败：request 给了但指挥拆不出任务 → 返回 plannerError 且回执有「## 拆解失败」', async () => {
+    const tool = await bindPlannerGroup()
+    mod.__setRunKind(async (_ctx, _member, prompt) => {
+      if (String(prompt).includes('你是这个小组的指挥')) {
+        return { ok: true, text: JSON.stringify({ assignments: [] }) }
+      }
+      return { ok: true, text: '不该有成员跑' }
+    })
+    try {
+      const out = await tool.execute(
+        { request: '让代码写点东西' },
+        { callId: 'c-planner-empty', agent: { id: 'session-g5' } },
+      )
+      assert.equal(out.members.length, 0, '拆不出任务就不该有成员产出')
+      assert.ok(out.plannerError, '必须带回拆不出任务的原因（plannerError）')
+      assert.equal(out.plan.ok, false)
+      const rendered = tool.output.render({}, out)[0].text
+      assert.match(rendered, /## 拆解失败/)
+      assert.match(rendered, /- 指挥没有给出可执行任务（原因：/)
+      assert.match(rendered, new RegExp(out.plannerError.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 20)), '回执要写出真实原因')
+      return 'plannerError 已回传 · 回执「## 拆解失败 → 指挥没有给出可执行任务（原因：…）」'
     } finally {
       mod.__setRunKind(undefined)
     }

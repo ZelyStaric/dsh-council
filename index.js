@@ -597,12 +597,25 @@ function notifyParentJobDone(ctx, job) {
     if (!backgroundDelegations()) return false
     job.notified = true
     const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    // job.sessionId 存的是裸 uuid（如 a7ec8dbb-…），而 hosts 里注册的 agent id 带 `session-` 前缀
+    // （session-a7ec8dbb-…）；只按裸 id 查会永远查不到 → 日志刷屏「parent agent not found」，
+    // 后台完成也永远唤不醒主会话。所以依次试：原值 → 加前缀 → 扫 list() 的相等/后缀匹配。
+    const sid = job.sessionId ? String(job.sessionId) : ''
+    const sidCandidates = sid ? [sid, (sid.startsWith('session-') ? '' : 'session-' + sid)] : []
     let agent
     try {
-      if (agents && typeof agents.get === 'function' && job.sessionId) agent = agents.get(job.sessionId)
-      if (!agent && agents && typeof agents.list === 'function' && job.sessionId) {
+      if (agents && typeof agents.get === 'function') {
+        for (const id of sidCandidates) {
+          if (!id) continue
+          agent = agents.get(id)
+          if (agent) break
+        }
+      }
+      if (!agent && agents && typeof agents.list === 'function' && sid) {
         const all = agents.list()
-        agent = (Array.isArray(all) ? all : []).find((a) => a && a.id === job.sessionId)
+        const pool = (Array.isArray(all) ? all : []).filter((a) => a && typeof a.id === 'string')
+        agent = pool.find((a) => sidCandidates.includes(a.id))
+          || pool.find((a) => a.id.endsWith(sid))
       }
     } catch {
       agent = undefined
@@ -5470,6 +5483,12 @@ function bindAgent(ctx, config, group, agent) {
             return `## ${m.name}（${m.kind}${route}）\n${body}${image}${review}${accept}${noReview}${cont}${watchdog}`
           })
           const body = rows.join('\n\n') || (planLine ? '（没有成员回执）' : '（没有成员回执：既没给 assignments，也没能由指挥拆解）')
+          // 给了 request 但指挥没拆出任何可执行任务 → 明确写一节失败原因，
+          // 否则父会话只能看到「没有成员回执」，分不清是没拆解还是成员没跑。
+          const plannerError = String(value.plannerError || '')
+          const planFailed = plannerError
+            ? '## 拆解失败\n- 指挥没有给出可执行任务（原因：' + plannerError + '）'
+            : ''
           const head = notAccepted ? acceptanceBlockedLine(summary.acceptanceRounds) + '\n\n' : ''
           const staffing = value.staffing?.length ? '\n\n## 补员\n' + value.staffing.join('\n') : ''
           const pruned = value.pruned?.length ? '\n\n## 回收\n已回收：' + value.pruned.join('、') : ''
@@ -5512,7 +5531,7 @@ function bindAgent(ctx, config, group, agent) {
             return [{ type: 'text', text: plannerSection(value) }]
           }
           const planner = plannerSection(value)
-          return [{ type: 'text', text: head + (planner ? planner + '\n\n' : '') + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
+          return [{ type: 'text', text: head + (planner ? planner + '\n\n' : '') + (planFailed ? planFailed + '\n\n' : '') + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
         },
       },
       async execute(args, exec) {
@@ -5567,7 +5586,11 @@ function bindAgent(ctx, config, group, agent) {
           planRaw = planned.raw
           assignments = planned.assignments
           if (!assignments.length) {
-            Object.assign(response, { plan: { ok: false, raw: planned.raw || '', reason: planned.error || '指挥没有给出可用的拆分' }, members: [], staffing })
+            // 只给了 request 却拆不出东西（指挥调用失败 / 回了空计划）：必须把原因带回给父会话，
+            // 否则它只看到「无成员产出」，不知道是没拆解还是成员没跑。
+            const plannerError = planned.error || String(planned.raw || '').slice(0, 200)
+            Object.assign(response, { plan: { ok: false, raw: planned.raw || '', reason: plannerError || '指挥没有给出可用的拆分' }, members: [], staffing })
+            if (plannerError || !(planned.staffing || []).length) response.plannerError = plannerError || '指挥没有给出可用的拆分'
             break delegate
           }
         }
