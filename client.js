@@ -2047,14 +2047,17 @@ window.__ModuleLoader__.load({
         if (!list) return
         const tabs = Array.prototype.slice.call(list.querySelectorAll('button[role="tab"]'))
         const labelOf = (b) => String(b.textContent || '').trim()
-        const MINE = ['团队', '小组']      // 小组模式专属
-        const NATIVE = ['对话', '轨迹']    // 单人模式专属
+        // 用户 2026-11-16 明确：**「轨迹」两边都要保留**（工具执行轨迹在小模式下同样有用）。
+        // 所以只在「对话」与「团队/小组」之间互斥：
+        //   单人 → 显示 对话 + 轨迹，隐藏 团队/小组
+        //   小组 → 显示 团队/小组 + 轨迹，隐藏 对话（"对话窗口变为团队"）
+        const MINE = ['团队', '小组']
+        const DIALOG = ['对话']
         const mine = tabs.filter((b) => MINE.indexOf(labelOf(b)) >= 0)
-        const native = tabs.filter((b) => NATIVE.indexOf(labelOf(b)) >= 0)
+        const dialog = tabs.filter((b) => DIALOG.indexOf(labelOf(b)) >= 0)
         if (!mine.length) return
-        // 单人：只留 对话/轨迹；小组：只留 团队/小组（"对话窗口变为团队"，见用户需求）
-        const hide = solo ? mine : native
-        const show = solo ? native : mine
+        const hide = solo ? mine : dialog
+        const show = solo ? dialog : mine
         // 先把选中项挪到「会被显示」的那一边，再隐藏——否则内容区会变成空白
         const activeHidden = hide.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
         if (activeHidden && show[0]) {
