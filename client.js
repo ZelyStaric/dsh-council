@@ -1378,10 +1378,13 @@ window.__ModuleLoader__.load({
       const bound = Boolean(own)
       const pendingGroup = !sessionId && readPendingMode() === 'group'
 
-      // v0.4.17：单人模式隐藏「团队 / 小组」两个 tab（按绑定状态切换）
+      // v0.4.17：单人模式隐藏「团队 / 小组」两个 tab（按绑定状态切换）。
+      // ⚠️ 必须等 state 就绪再判断：初次渲染时 state === null，bound 必然是 false，
+      // 急着隐藏会把「已绑定小组的会话」也一起藏掉（实测踩到）。
       useEffect(() => {
+        if (!state) return
         applyTabVisibility(!bound)
-      }, [bound])
+      }, [bound, Boolean(state)])
 
       /* hero 预选 → 会话建立后自动启用小组模式 */
       useEffect(() => {
