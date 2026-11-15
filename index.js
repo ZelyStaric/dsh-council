@@ -1346,6 +1346,65 @@ function claudeCliModel(model) {
   return CLAUDE_CLI_MODEL_ALIASES[id] || id
 }
 
+/**
+ * 清掉 gemini CLI 混进 stdout 的启动噪音（实测有这几类）：
+ *   `Warning: Basic terminal detected…`、`Ripgrep is not available…`、`[STARTUP] …`。
+ * 这些不是模型输出，混进回执会让审校误判。
+ */
+function cleanGeminiOutput(raw) {
+  return String(raw || '')
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim()
+      if (!t) return false
+      if (/^Warning:/i.test(t)) return false
+      if (/^Ripgrep is not available/i.test(t)) return false
+      if (/^\[STARTUP\]/i.test(t)) return false
+      if (/^Loading extensions?/i.test(t)) return false
+      return true
+    })
+    .join('\n')
+    .trim()
+}
+
+/**
+ * 跑一轮 Gemini CLI（headless）。
+ *
+ * 实测踩到的三个坑（2026-11-15）：
+ *  ① headless 必须 `--skip-trust`（或 GEMINI_CLI_TRUST_WORKSPACE=true），否则直接拒绝；
+ *  ② 光有 `GEMINI_API_KEY` 不够：还要 `~/.gemini/settings.json` 里
+ *     `security.auth.selectedType = "gemini-api-key"`，不然报 `Invalid auth method selected.`；
+ *  ③ 第三方端点用 `GOOGLE_GEMINI_BASE_URL`（**不能带 /v1**，CLI 自己拼 `/v1beta/...`）。
+ *
+ * 权限：成员要能干活 → `--approval-mode yolo`；审核位（noTools）→ `plan`（只读）。
+ */
+async function runGemini({ cwd, model, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config, scopeUnit = '' }) {
+  const geminiBin = process.env.COUNCIL_GEMINI_BIN || 'gemini'
+  if (!(await commandExists(geminiBin))) {
+    return {
+      ok: false, text: '', usage: null,
+      error: '未找到 gemini CLI（' + geminiBin + '）。装 `@google/gemini-cli`，或用 COUNCIL_GEMINI_BIN 指定绝对路径。',
+    }
+  }
+  const args = ['-p', prompt, '--skip-trust']
+  if (model) args.push('--model', String(model))
+  args.push('--approval-mode', noTools ? 'plan' : 'yolo')
+
+  const { code, out, err, reason, error: killedError } = await run(geminiBin, args, {
+    cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName, scopeUnit,
+  })
+  const text = cleanGeminiOutput(out)
+  if (killedError || (code !== 0 && !text)) {
+    const detail = String(err || '').trim().split('\n').slice(-4).join(' ').slice(0, 300)
+    return {
+      ok: false, text: text || '', usage: null,
+      reason: reason || undefined,
+      error: (reason ? '（' + reason + '）' : '') + (detail || ('gemini exited ' + code)),
+    }
+  }
+  return { ok: Boolean(text), text, usage: null }
+}
+
 async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false, extraArgs = null, scopeUnit = '' }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
@@ -2703,6 +2762,15 @@ async function envFor(kindOrMember, config) {
     const home = await ensureCodexHome(config, { base: endpoint.baseURL, key: endpoint.key })
     return Object.assign({}, home ? { CODEX_HOME: home } : {}, proxyEnv(config))
   }
+  if (endpoint && member.kind === 'gemini') {
+    // gemini CLI 认 GEMINI_API_KEY；第三方端点走 GOOGLE_GEMINI_BASE_URL（不能带 /v1，它自己拼 /v1beta）
+    return Object.assign({
+      GEMINI_API_KEY: endpoint.key || undefined,
+      GOOGLE_GEMINI_BASE_URL: rootUrl(endpoint.baseURL) || undefined,
+      // headless 必须信任工作区，否则直接拒绝运行
+      GEMINI_CLI_TRUST_WORKSPACE: 'true',
+    }, proxyEnv(config))
+  }
   return envForLegacy(member.kind, config)
 }
 
@@ -2926,7 +2994,13 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
         return { ok: false, text: '', error: '未配置 claude 的 API 地址或密钥（在「小组」页 ① 选一个 provider，或填 claude base URL + key）' }
       }
     }
-    const runner = member.kind === 'claude' ? runClaude : runCodex
+    if (member.kind === 'gemini') {
+      const endpoint = await memberEndpoint(member, config).catch(() => null)
+      if (!endpoint || !endpoint.baseURL || !endpoint.key) {
+        return { ok: false, text: '', error: '未配置 gemini 的 API 地址或密钥（在「小组」页给成员选 relay-gemini 之类 provider）' }
+      }
+    }
+    const runner = member.kind === 'claude' ? runClaude : member.kind === 'gemini' ? runGemini : runCodex
     result = await runner({
       cwd,
       model: member.model || undefined,
@@ -5071,7 +5145,7 @@ function makeSelfWorkGuard(group, config) {
   }
 }
 
-const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
+const STAFF_MODELS = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, gemini: 'gemini-3.8-flash', image: 'gpt-image-2.6-flare' }
 const STAFF_KINDS = Object.keys(STAFF_MODELS)
 
 /**
@@ -6121,7 +6195,7 @@ function makeDelegateTool(ctx, config, group) {
         properties: {
           request: { type: 'string', description: '用户的原话。给了它就由“验收指挥”成员先拆解成任务，再派给成员。' },
           staffing: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['role'], properties: {
-            role: { type: 'string' }, kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'] }, model: { type: 'string' },
+            role: { type: 'string' }, kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'gemini', 'image'] }, model: { type: 'string' },
             persistent: { type: 'boolean', description: 'true = 建持久成员（派活结束后不回收）；默认 false = 临时成员，用完即回收' },
           } } },
           assignments: {
@@ -6728,7 +6802,7 @@ function bindAgent(ctx, config, group, agent) {
           action: { type: 'string', enum: ['list', 'create', 'update', 'delete', 'prune'], description: '操作类型（prune = 清理不属于任何组的孤立成员）' },
           id: { type: 'string', description: 'update/delete 时的成员 id' },
           name: { type: 'string', description: '成员名字' },
-          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'], description: '成员类型' },
+          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'gemini', 'image'], description: '成员类型' },
           model: { type: 'string', description: '模型名称' },
           roleId: { type: 'string', description: '职位 id' },
           cwd: { type: 'string', description: '工作目录' },
@@ -6769,7 +6843,7 @@ async execute(args) {
           name: { type: 'string', description: '职位名称' },
           prompt: { type: 'string', description: '职位提示词' },
           color: { type: 'string', description: '职位颜色' },
-          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'image'] },
+          kind: { type: 'string', enum: ['codex', 'claude', 'deepseek', 'gemini', 'image'] },
           model: { type: 'string', description: '职位默认模型' },
           memberId: { type: 'string', description: 'assign 时的成员 id' },
         },
