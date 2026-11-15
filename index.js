@@ -6,7 +6,7 @@
  * /council/api that the Client half calls with same-origin fetch.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
@@ -128,13 +128,56 @@ const EMPTY = { roles: [], members: [], groups: [], usage: {}, runs: [], config:
 
 let state = structuredClone(EMPTY)
 let loaded = false
+/**
+ * 「文件在、但读不出来」的只读保护。
+ *
+ * 只有**文件不存在**（ENOENT，全新安装）才允许空态继续跑并写盘。
+ * 文件存在却读不了 / JSON 解析失败，说明用户数据八成还在（或可修），
+ * 此时内存里只有空态，**任何 save() 都会把名册/职位/组永久覆盖**。
+ *
+ * 2026-11-15 真实事故：`systemctl restart` 打断 writeFile 留下半个 JSON →
+ * `load()` 静默回退空态 → 6 分钟后某次 save() 把 546 KB 覆盖成 1.4 KB。
+ * 所以这里改成：坏读 → 备份坏文件 + 置只读 + 大声报错，绝不静默自愈。
+ */
+let storageBroken = false
+let storageBrokenReason = ''
+let storageBrokenReported = false
 
 async function load() {
   if (loaded) return
+  let rawText = null
   try {
-    state = { ...structuredClone(EMPTY), ...JSON.parse(await readFile(STATE_FILE, 'utf8')) }
-  } catch {
+    rawText = await readFile(STATE_FILE, 'utf8')
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      rawText = null // 全新安装：还没有状态文件，空态继续
+    } else {
+      storageBroken = true
+      storageBrokenReason = '读取失败：' + String((error && error.message) || error)
+    }
+  }
+  if (storageBroken) {
     state = structuredClone(EMPTY)
+  } else if (rawText === null) {
+    state = structuredClone(EMPTY)
+  } else {
+    try {
+      state = { ...structuredClone(EMPTY), ...JSON.parse(rawText) }
+    } catch (error) {
+      storageBroken = true
+      storageBrokenReason = 'JSON 解析失败：' + String((error && error.message) || error)
+      state = structuredClone(EMPTY)
+      // 留一份坏文件的证据，免得它被后续写盘吃掉
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const keep = STATE_FILE + '.corrupt-' + stamp
+      try {
+        await copyFile(STATE_FILE, keep)
+        storageBrokenReason += '（坏文件已备份为 ' + path.basename(keep) + '）'
+      } catch { /* 备份失败不影响只读保护 */ }
+    }
+  }
+  if (storageBroken) {
+    reportStorageBroken()
   }
   // A restart kills in-flight runs; never leave them "running" forever.
   let repaired = 0
@@ -226,11 +269,33 @@ async function pruneArchivedGroups({ dryRun = false, keepDays = ARCHIVED_KEEP_DA
 }
 
 let saving = Promise.resolve()
+
+/** 只读保护下的固定提示（只报一次，别刷日志）。 */
+function reportStorageBroken() {
+  if (storageBrokenReported) return
+  storageBrokenReported = true
+  console.error(
+    '[council] 状态文件不可用，已进入只读保护，**不会写盘覆盖**：' + storageBrokenReason
+    + ' · 文件：' + STATE_FILE
+    + ' · 处理：修好它（或用备份覆盖）后重启 dsh-web',
+  )
+}
+
 function save() {
+  if (storageBroken) {
+    // 内存里是空态，写回去等于毁数据。这里宁可这次改动不落盘。
+    reportStorageBroken()
+    return Promise.resolve()
+  }
   const body = JSON.stringify(state, null, 2)
   saving = saving.then(async () => {
     await mkdir(path.dirname(STATE_FILE), { recursive: true })
-    await writeFile(STATE_FILE, body, 'utf8')
+    // 原子写：先写同目录 .tmp 再 rename。
+    // 直接 writeFile 到目标文件时，进程在写入中途被 kill（systemctl restart 就是 SIGTERM）
+    // 会留下半个 JSON —— 下一次启动就变成上面那个事故。
+    const tmp = STATE_FILE + '.tmp'
+    await writeFile(tmp, body, 'utf8')
+    await rename(tmp, STATE_FILE)
   }).catch((error) => { ctx0?.logger?.('council').warn?.(`save failed: ${error?.message ?? error}`) })
   return saving
 }
@@ -6653,10 +6718,19 @@ async function fetchCatalog(ctx, config, only, base) {
     }
   } catch (error) { fail('codex', error) }
   if (want('claude')) try {
-    const claudeModelsBase = (apiSettings(config).claudeBase || '').replace(/\/$/, '')
+    // 凭据和成员调用保持一致：优先 providerByKind.claude 的 provider（relay-claude），
+    // 其次才是页面里的 claudeKey / profile 的 claudeApiKey。
+    // 2026-11-15：之前只读 settings.claudeKey，而它已经空了（配置迁到 provider），
+    // 结果成员能正常跑、下拉却报「HTTP 401 / 未配置 claude base URL」。
+    const claudeProviderId = ((state && state.config && state.config.providerByKind) || {}).claude || ''
+    const providerEp = claudeProviderId ? await providerEndpoint(claudeProviderId, ctx) : null
+    const claudeKey = settings.claudeKey || (providerEp && providerEp.key) || ''
+    const claudeModelsBase = (settings.claudeBase || rootUrl(providerEp && providerEp.baseURL) || '').replace(/\/$/, '')
     if (!claudeModelsBase) throw new Error('未配置 claude base URL')
     const response = await fetch(claudeModelsBase + '/v1/models', {
-      headers: { 'x-api-key': settings.claudeKey, 'anthropic-version': '2023-06-01' },
+      // 第三方端点多是 openai-completions 风格（认 Bearer），官方 Anthropic 端点认 x-api-key：
+      // 两个都带上，谁认哪个都能通。
+      headers: { authorization: 'Bearer ' + claudeKey, 'x-api-key': claudeKey, 'anthropic-version': '2023-06-01' },
     })
     if (!response.ok) throw new Error('HTTP ' + response.status + '（claude 模型列表）')
     if (response.ok) {

@@ -2,6 +2,26 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.3] — 2026-11-15
+
+### 修复（数据安全，最重要）
+- **`council.json` 会被静默覆盖成空态**（当天真实事故：546 KB → 1.4 KB，10 职位/39 成员/9 组全丢）。
+  两条原因，一起修：
+  1. `save()` 原来直接 `writeFile` 到目标文件。`systemctl restart` 的 SIGTERM 若落在写入中途，
+     磁盘上就留下**半个 JSON**。→ 改成**原子写**：先写同目录 `.tmp` 再 `rename`。
+  2. `load()` 原来是 `try { … } catch { state = EMPTY }`，把「文件损坏」和「首次安装」当成一回事，
+     坏文件读完内存就是空态，**下一次 save() 就把用户数据写没了**。→ 现在只有 `ENOENT`
+     才走空态；**文件存在但读不出/解析失败 → 进入只读保护**：把坏文件备份成
+     `council.json.corrupt-<时间戳>`、`save()` 全部拒绝写盘、并打一条含处理办法的 error 日志。
+- `/models` 的 claude 列表改用 `providerByKind.claude`（`relay-claude`）的 base/key，
+  与成员调用保持一致。之前只读页面 `claudeKey`（配置迁到 provider 后已空）→ 成员能跑、
+  下拉却报「未配置 claude base URL / HTTP 401」。同时 `authorization: Bearer` 与
+  `x-api-key` 双头发，兼容 openai-completions 风格中转与官方 Anthropic 端点。
+
+### 测试
+- 新增 `tests/storage-guard-test.mjs`（5 条）：坏 JSON → 只读保护且磁盘一字未改 + 备份坏文件；
+  文件缺失 → 空态可写；原子写无 `.tmp` 残留；正常文件加载；只读下多次 `save()` 全部拦下。
+
 ## [0.3.2] — 2026-11-15
 
 ### 修复
