@@ -1,9 +1,24 @@
 node_modules/
 *.log
 .DS_Store
-# 本地状态与产物（绝不入库）
+
+# ── 本地状态与产物（绝不入库）───────────────────────────────
 *.local.json
 state.json
 screenshots/
 video-*/
 *.tgz
+
+# ── 凭据与机器相关配置（绝不入库）───────────────────────────
+# 插件的运行时状态里带 API key（imageKey 等），真源在 ~/.dsh/storages/，
+# 但万一有人把它拷进来调试，这里兜住。
+council.json
+*.council.json
+council*.bak*
+*.bak-*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets*
