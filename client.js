@@ -1128,7 +1128,16 @@ window.__ModuleLoader__.load({
             }, [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
               roles.map((r) => h('option', { key: r.id, value: r.id }, r.name)))),
             h(Button, { onClick: () => act('/members/delete', { id: member.id }) }, '删')),
-          h('div', { style: Object.assign({}, styles.muted, { marginTop: 4 }) }, '职位：' + roleName(member)))
+          h('div', { style: Object.assign({}, styles.muted, { marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }) },
+            h('span', null, '职位：' + roleName(member)),
+            // v0.4 P3：长久成员继承上下文；临时成员每轮由指挥重发上下文
+            h('span', {
+              style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
+              title: member.persistent === false
+                ? '临时成员：每轮都是新会话，上下文由指挥在任务里重新发'
+                : '长久成员：同一会话内继承上一轮上下文（可压缩）；点击切为临时',
+              onClick: () => act('/members', { id: member.id, persistent: member.persistent === false }),
+            }, member.persistent === false ? '临时' : '长久')))
       })
 
       const roleRows = roles.map((role) => h('div', {

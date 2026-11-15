@@ -589,10 +589,23 @@ function memberIdleMs(config) {
  * （`false` 之外的假值，如 `undefined`/`0`/`''`，一律视为默认开）。
  * `member.__reuse` 是强制语义——仅当显式关闭时才按它回落到原行为。
  */
+/**
+ * 成员这一轮要不要**继承上一轮的上下文**（v0.4 P3 的「长久 / 临时成员」语义）。
+ *
+ * 优先级：
+ *  1. **临时成员**（ephemeral === true，指挥按任务临时建的）→ **一律不复用**：
+ *     每轮都是全新会话，上下文由指挥在任务描述里重新发。这样同一个成员条目能被反复使用
+ *     而不会让上下文无限膨胀。
+ *  2. **长久成员**（persistent === true）→ **复用**：同一会话内接着上一轮的 convId 跑。
+ *     上下文增长由各框架自己的压缩机制管理（claude / codex / DSH 都有自动压缩）。
+ *  3. 都没标 → 退回全局开关 config.reuseAgents（历史行为），或调用方强制 __reuse。
+ *
+ * 插话命中「尚未交付的成员」的复用走 runningMembers 快路径（见 steerRunningMember），
+ * 不依赖这里的默认值。
+ */
 function reuseChildrenFor(member, config) {
-  // 默认**不复用**：只有显式打开 reuseAgents，或调用方强制 __reuse 时才复用。
-  // 插话命中「尚未交付的成员」的复用走 runningMembers 快路径（见 steerRunningMember），
-  // 不依赖这里的默认值。
+  if (member && member.ephemeral === true) return false
+  if (member && member.persistent === true) return true
   const explicitOn = (state.config && state.config.reuseAgents) === true || (config && config.reuseAgents) === true
   return explicitOn || Boolean(member && member.__reuse)
 }
@@ -4119,6 +4132,8 @@ export function createHandler(ctx, config = {}) {
                 if (member) {
                   const kindChanged = body.kind !== undefined && body.kind !== member.kind
                   Object.assign(member, pick(body, ['name', 'kind', 'model', 'provider', 'providerId', 'roleId', 'cwd']))
+                  // v0.4 P3：长久/临时 可随时切换（false = 临时，每轮重发上下文）
+                  if (typeof body.persistent === 'boolean') member.persistent = body.persistent
                   if (kindChanged) delete member.convId
                   member.updatedAt = Date.now()
                 }
@@ -4138,9 +4153,12 @@ export function createHandler(ctx, config = {}) {
                 name: body.name || '新成员',
                 kind,
                 model: body.model || defaultModels[kind],
-                provider: kind === 'deepseek' ? (body.provider || deepseekMemberProvider(config)) : undefined,
+                provider: body.provider || (kind === 'deepseek' ? deepseekMemberProvider(config) : undefined),
                 roleId: body.roleId,
                 cwd: body.cwd || undefined,
+                // v0.4 P3：长久成员（contextInherit）vs 临时成员（每轮重发上下文）
+                // 默认长久：页面手动建的成员本来就该记住上下文；指挥临时建的走 staffing 那条路（ephemeral）
+                persistent: body.persistent !== false,
                 updatedAt: Date.now(),
               }
               state.members.push(member)

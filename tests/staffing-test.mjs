@@ -4130,6 +4130,24 @@ try {
     return 'reuseAgents 未设 → false'
   })
 
+  await check('reuseChildrenFor：长久成员复用上下文 / 临时成员每轮新会话（v0.4 语义）', async () => {
+    setState(structuredClone(fixture))
+    // 临时成员：即使全局开了 reuseAgents 也不复用（每轮由指挥重发上下文）
+    assert.equal(reuseChildrenFor({ id: 'm1', ephemeral: true }, { reuseAgents: true }), false,
+      'ephemeral 必须压过全局开关')
+    assert.equal(reuseChildrenFor({ id: 'm1', ephemeral: true, persistent: true }, {}), false,
+      'ephemeral 优先于 persistent')
+    // 长久成员：即使全局关着也复用（同一会话内继承上下文）
+    assert.equal(reuseChildrenFor({ id: 'm1', persistent: true }, { reuseAgents: false }), true,
+      'persistent 必须压过全局开关')
+    assert.equal(reuseChildrenFor({ id: 'm1', persistent: true }, {}), true)
+    // 没标记：保持历史行为（看全局开关 / __reuse）
+    assert.equal(reuseChildrenFor({ id: 'm1' }, {}), false)
+    assert.equal(reuseChildrenFor({ id: 'm1' }, { reuseAgents: true }), true)
+    assert.equal(reuseChildrenFor({ id: 'm1' }, {}), false)
+    return 'ephemeral→false（压过全局）· persistent→true（压过全局）· 无标记→看开关'
+  })
+
   await check('reuseChildrenFor：reuseAgents:false → 不复用（false）', async () => {
     setState(structuredClone(fixture))
     assert.equal(reuseChildrenFor({ id: 'm1' }, { reuseAgents: false }), false)
