@@ -15,8 +15,31 @@
  * 依赖：playwright-core + 本机 chromium 缓存（见 handoff 文档）、服务在跑。
  * 这是**集成测试**（需要真服务 + 浏览器），不进 `node tests/staffing-test.mjs` 那一套单元测试。
  */
-import { chromium } from 'playwright-core'
 import { readFileSync } from 'node:fs'
+
+// playwright-core 不是本包的依赖（它是**集成测试**工具）。按顺序找：
+//   ① 本目录 node_modules（npm i --no-save playwright-core）
+//   ② PW_DIR 指定的目录
+//   ③ /tmp/pw（本机临时装过一次的位置）
+let chromium
+{
+  const candidates = [
+    'playwright-core',
+    process.env.PW_DIR ? process.env.PW_DIR + '/node_modules/playwright-core/index.mjs' : '',
+    '/tmp/pw/node_modules/playwright-core/index.mjs',
+  ].filter(Boolean)
+  let lastError = null
+  for (const spec of candidates) {
+    try { ({ chromium } = await import(spec)); break } catch (e) { lastError = e }
+  }
+  if (!chromium) {
+    console.error('需要 playwright-core 才能跑本集成测试。装一下：')
+    console.error('  cd ~/LLM/dsh-council && npm i --no-save playwright-core')
+    console.error('  # 或  PW_DIR=/some/dir node tests/tab-visibility-smoke.mjs')
+    console.error('原始错误：', String(lastError && lastError.message || lastError))
+    process.exit(2)
+  }
+}
 
 const CHROME = '/home/nanami/.cache/ms-playwright/chromium-1148/chrome-linux/chrome'
 const DSH = process.env.DSH_BASE || 'http://100.108.3.88:3080'
