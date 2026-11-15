@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4160,6 +4160,130 @@ try {
     assert.ok(src.includes("TEAM_BRAIN_DISALLOWED"), 'claude 腿必须有 disallowedTools 列表')
     assert.ok(src.includes("'--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')"), 'claude 腿实际拼了 disallowedTools')
     return 'codex→read-only + council MCP · claude→disallowedTools 已接线'
+  })
+
+  /* ── deepseek 腿：不依赖父 agent 的自建会话路线（2026-11-15） ──────────
+   * 起因：团队 turn（/team/send）与 POST /confirm 直派都**没有父 agent**，
+   * 而 runBrain 原来调 runDeepseekViaSeam（要求 parent）→ deepseek 腿必然报错。
+   * 修法是改用 agents.create 自建会话（不需要 parent），大脑再用 minimal preset 去掉 bash/edit。
+   */
+  await check('团队模式：deepseek 大脑腿走自建会话 + minimal preset（源码断言）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    const branch = src.match(/if \(brain\.kind === 'dsh-seam'\) \{[\s\S]*?\n  \}\n/)
+    assert.ok(branch, '应能找到 dsh-seam 分支')
+    assert.ok(!/await runDeepseekViaSeam\(/.test(branch[0]),
+      'dsh-seam 分支不得再调用 runDeepseekViaSeam（它要求父 agent，团队 turn 没有）')
+    assert.ok(branch[0].includes('runDeepseek('), '必须改调自建会话的 runDeepseek')
+    assert.ok(branch[0].includes("presetId: 'minimal'"), '大脑腿必须用 minimal preset（去掉 bash/edit）')
+    assert.ok(branch[0].includes('groupForSession'), '必须先校验小组：没有组就拿不到 council_* 派活工具')
+    assert.ok(branch[0].includes('session.convId'), '多轮要接在同一段会话历史上')
+    return '不走 seam · runDeepseek + minimal · 有 group 校验 · 复用 convId'
+  })
+
+  await check('runDeepseekViaSeam：没有父 agent 时降级到自建会话（HTTP 直派 deepseek 成员可用）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(!src.includes("'DSH subagent seam unavailable (no parent agent)'"),
+      '旧的无条件硬失败文案应已移除')
+    assert.ok(/if \(!subagents \|\| !parent\) \{[\s\S]{0,500}?return runDeepseek\(ctx, member, prompt, config, \{ presetId \}\)/.test(src),
+      '无 parent 时必须退回 runDeepseek（自建会话）而不是直接失败')
+    return '已降级到 agents.create 路线'
+  })
+
+  await check('runDeepseek：自建会话跑一轮（create → followup → whenIdle → 取文本/convId/usage）', async () => {
+    const events = []
+    const session = { snapshotEvents: () => events }
+    let created = null
+    const fakeAgent = {
+      id: 'session-fake-brain',
+      session,
+      followup(msg) {
+        events.push({ type: 'user/message', data: { message: msg } })
+        events.push({
+          type: 'assistant/message',
+          data: { message: { content: [{ type: 'text', text: '好的，我来拆解' }] }, usage: { inputTokens: 11, outputTokens: 3 } },
+        })
+      },
+      whenIdle: async () => {},
+    }
+    const agents = {
+      create: async (opts) => { created = opts; return { agent: fakeAgent, dispose: async () => {} } },
+    }
+    const ctx = { get: (k) => (k === 'agents' ? agents : undefined) }
+    const member = { name: '脑子', kind: 'deepseek', model: 'deepseek-v4.1-flash' }
+    const out = await mod.runDeepseek(ctx, member, '帮我把这件事拆一下', {})
+    assert.equal(out.ok, true, '应成功：' + JSON.stringify(out))
+    assert.equal(out.text, '好的，我来拆解')
+    assert.equal(out.convId, 'session-fake-brain')
+    assert.equal(member.convId, 'session-fake-brain', '应回写 convId 供下一轮 resume')
+    assert.ok(created && String(created.sessionId).startsWith('session-'), '应自建 session-xxx 会话')
+    assert.equal(created.meta.origin, 'subagent')
+    assert.equal(out.usage.input, 11, 'usage 应带出')
+    return '自建会话 → 一轮 → 文本/convId/usage 全对'
+  })
+
+  await check('runDeepseek：presetId 透传到 agentPresets.resolve(id) + meta.agentPreset', async () => {
+    const resolvedWith = []
+    const mountedWith = []
+    const events = []
+    const presets = {
+      resolve: async (id) => { resolvedWith.push(id); return { id: id || 'default-preset' } },
+      mount: async (agentCtx, id) => { mountedWith.push(id); return { id } },
+    }
+    const agents = {
+      create: async (opts) => {
+        // 调用方（DSH）会先跑 setup 再建 agent；这里手动跑一次以验证 mount 被调用
+        if (typeof opts.setup === 'function') await opts.setup({})
+        return {
+          agent: {
+            id: 'session-preset',
+            session: { snapshotEvents: () => events },
+            followup() {
+              events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'ok' }] } } })
+            },
+            whenIdle: async () => {},
+          },
+          dispose: async () => {},
+        }
+      },
+    }
+    const ctx = { get: (k) => (k === 'agents' ? agents : k === 'agentPresets' ? presets : undefined) }
+    const out = await mod.runDeepseek(ctx, { name: '脑子', kind: 'deepseek' }, 'hi', {}, { presetId: 'minimal' })
+    assert.equal(out.ok, true)
+    assert.deepEqual(resolvedWith, ['minimal'], 'resolve 必须收到 minimal')
+    assert.deepEqual(mountedWith, ['minimal'], 'mount 必须挂 minimal')
+    return 'resolve/mount 都拿到 minimal（大脑因此没有 bash/edit）'
+  })
+
+  await check('runDeepseek：末尾空文本不覆盖前面的结论（大脑先调工具再回答）', async () => {
+    const events = []
+    const agents = {
+      create: async () => ({
+        agent: {
+          id: 'session-two-replies',
+          session: { snapshotEvents: () => events },
+          followup() {
+            events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '结论：派给代码成员' }] } } })
+            // 末尾再来一条纯工具调用的空文本，不应吃掉结论
+            events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'tool_use', name: 'council_delegate' }] } } })
+          },
+          whenIdle: async () => {},
+        },
+        dispose: async () => {},
+      }),
+    }
+    const ctx = { get: (k) => (k === 'agents' ? agents : undefined) }
+    const out = await mod.runDeepseek(ctx, { name: '脑子', kind: 'deepseek' }, 'hi', {})
+    assert.equal(out.text, '结论：派给代码成员', '必须回溯到最近一条非空文本，实际：' + JSON.stringify(out.text))
+    return '回溯取最后一条非空文本'
+  })
+
+  await check('runBrain：deepseek 大脑 + 该会话没有小组 → 明确中文错误（不再报 seam 不可用）', async () => {
+    const out = await mod.runBrain({ sessionId: 'session-no-group-for-brain-test', model: 'deepseek-v4.1-flash', text: '你好' })
+    assert.equal(out.ok, false, '没有小组时必须失败')
+    assert.equal(out.kind, 'dsh-seam', 'deepseek-* 应路由到 dsh-seam 腿')
+    assert.match(String(out.error), /还没有小组/, '错误要指向真正的原因，实际：' + out.error)
+    assert.ok(!/seam unavailable/i.test(String(out.error)), '不该再出现 seam 不可用的措辞')
+    return 'reason=' + out.error.slice(0, 40) + '…'
   })
 
   /* ── 运行中成员注册表 + 追加消息（council_tell 复用） ───────────────── */

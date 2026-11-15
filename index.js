@@ -1528,6 +1528,24 @@ async function agentComposition(ctx) {
   } catch { return {} }
 }
 
+/**
+ * 取**指定** preset 的组合（`agentPreset` + mount），供「按 preset 自建会话」用。
+ *
+ * 团队大脑走这条：`minimal` preset 没有 bash/edit，大脑在结构上就无法自己动手。
+ * preset 解析不出来时返回 `{}`（退回部署默认），调用方不必处理异常。
+ */
+async function namedComposition(ctx, presetId) {
+  const presets = ctx.get('agentPresets')
+  if (!presets || typeof presets.resolve !== 'function') return {}
+  try {
+    const resolved = await presets.resolve(presetId)
+    return {
+      agentPreset: resolved.id,
+      setup: async (agentCtx) => { await presets.mount(agentCtx, resolved.id) },
+    }
+  } catch { return {} }
+}
+
 /** One turn on a real DSH agent session (DeepSeek family). */
 /** Run one DeepSeek member through the subagent seam (concurrency + cancellation owned by it). */
 
@@ -1982,7 +2000,10 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   const idleMs = memberIdleMs(config)
   const subagents = ctx.get('subagents')
   if (!subagents || !parent) {
-    return { ok: false, text: '', error: 'DSH subagent seam unavailable (no parent agent)', usage: null }
+    // 没有父 agent 的入口（`POST /confirm` 直派成员、团队 turn）：seam 用不了，
+    // 但 deepseek 本身完全能跑 —— 退回 `runDeepseek` 自建会话（agents.create）那条腿。
+    // 2026-11-15 修：之前这里直接返回 'no parent agent'，导致 HTTP 直派 deepseek 成员必然失败。
+    return runDeepseek(ctx, member, prompt, config, { presetId })
   }
   if (!subagents.getProvider('spawn')) {
     return { ok: false, text: '', error: 'spawn subagent provider is not registered', usage: null }
@@ -2347,7 +2368,26 @@ async function runDeepseekWithContinuation(ctx, member, prompt, config, parent, 
   return merged
 }
 
-async function runDeepseek(ctx, member, prompt, config) {
+/**
+ * 在**自建 DSH 会话**里跑一轮 deepseek（`agents.create` 路线）。
+ *
+ * 与 `runDeepseekViaSeam` 的分工：
+ *   - seam 是「父会话派生子代理」，`startActivation({ parent })` 要求**活的父会话**；
+ *   - 这里自己 create / resume 一个会话，**不需要 parent**，所以能被两条没有父 agent 的入口用：
+ *     ① 团队模式的 turn（`POST /team/send` 是服务进程里的独立 HTTP 调用）
+ *     ② `POST /council/api/confirm` 直派成员
+ *
+ * 建出来的 agent 会被 `agent/created` 监听器自动 `bindAgent`，所以**小组会话里自带 `council_*` 工具**；
+ * 团队大脑又通过 `presetId: 'minimal'` 去掉 bash/edit —— 这正是「结构上没有本地工具」的来源。
+ *
+ * 会话生命周期：本轮用完 `dispose()`（释放循环），但会话日志保留；
+ * 下一轮用 `member.convId` 走 `agents.resume()` 接回同一段历史，多轮上下文不丢。
+ *
+ * @param {object} [options]
+ * @param {string} [options.presetId] 指定 agent preset（团队大脑传 `minimal`）
+ * @param {(text: string) => void} [options.onDelta] 拿到回答后回调一次（agent 路线暂无真流式）
+ */
+async function runDeepseek(ctx, member, prompt, config, options = {}) {
   const agents = ctx.get('agents')
   if (!agents || typeof agents.create !== 'function') {
     return { ok: false, text: '', error: 'DSH agent service unavailable', usage: null }
@@ -2357,7 +2397,10 @@ async function runDeepseek(ctx, member, prompt, config) {
     provider,
     model: deepseekMemberModel(config, member, provider),
   }
-  const composition = await agentComposition(ctx)
+  // 显式 presetId 就按它挂载（大脑 → minimal）；否则沿用部署默认组合
+  const composition = options.presetId === undefined
+    ? await agentComposition(ctx)
+    : await namedComposition(ctx, options.presetId)
   let handle
   try {
     handle = member.convId
@@ -2391,12 +2434,21 @@ async function runDeepseek(ctx, member, prompt, config) {
     })
     await agent.whenIdle()
     const replies = sessionEvents(agent.session).slice(before).filter((e) => e.type === 'assistant/message')
-    const last = replies[replies.length - 1]
-    const text = last
-      ? (last.data.message.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim()
-      : ''
-    const usage = last?.data?.usage ?? {}
+    // 取最后一条**非空**文本：大脑可能先调工具再回答，末尾的空文本不该把结论吃掉
+    let text = ''
+    let usage = {}
+    for (let i = replies.length - 1; i >= 0; i -= 1) {
+      const blocks = (replies[i].data?.message?.content ?? []).filter((b) => b && b.type === 'text')
+      const joined = blocks.map((b) => b.text).join('\n').trim()
+      if (!joined) continue
+      text = joined
+      usage = replies[i].data?.usage ?? {}
+      break
+    }
     member.convId = agent.id
+    if (text && typeof options.onDelta === 'function') {
+      try { options.onDelta(text) } catch { /* 监听方出错不影响主流程 */ }
+    }
     return {
       ok: Boolean(text),
       text,
@@ -3620,15 +3672,44 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
   }
 
   if (brain.kind === 'dsh-seam') {
-    // DSH 腿需要父 agent；团队模式的 turn 由客户端的 /team/send 触发，没有父 agent
-    const result = await runDeepseekViaSeam(ctx0, { name: '脑子', kind: 'deepseek', model: brain.model }, prompt, state.config || {}, null, memberMaxMinutesMs(state.config || {}))
-    const out = String(result?.text || '')
-    if (out) delta(out)
+    // 团队 turn 由客户端的 /team/send 触发，是服务进程里的独立 HTTP 调用 —— **没有父 agent**，
+    // 所以不能走 subagent seam（`startActivation({ parent })` 会直接回 no parent agent）。
+    // 这里用 `runDeepseek` 自建会话（agents.create）：agent 建好后由 agent/created 自动 bindAgent，
+    // 于是它**自带 council_* 派活工具**；再用 minimal preset 去掉 bash/edit，
+    // 大脑就只能在结构上拆解/派活，不能自己动手。
+    //
+    // 2026-11-15 修：之前这里调的是 runDeepseekViaSeam(parent=null)，deepseek 大脑腿必然报
+    // 「DSH subagent seam unavailable (no parent agent)」—— 不是没凭据，是选错了腿。
+    const group = groupForSession(state, normalizeSessionId(sessionId))
+    if (!group) {
+      return {
+        ok: false,
+        text: '',
+        convId: null,
+        error: '这个会话还没有小组，大脑拿不到 council_* 派活工具：先在页面顶部胶囊里启用「小组/团队模式」再来。',
+        kind: brain.kind,
+      }
+    }
+    const member = {
+      name: '脑子',
+      kind: 'deepseek',
+      model: brain.model,
+      provider: state.config?.providerByKind?.deepseek,
+      cwd: workdir,
+      // 沿用团队会话的 convId：多轮对话接在同一段历史上
+      convId: session.convId || undefined,
+    }
+    const result = await runDeepseek(ctx0, member, prompt, state.config || {}, {
+      // minimal：没有 bash / edit / write，只有 council_* 编排工具
+      presetId: 'minimal',
+      onDelta: delta,
+    })
+    if (result?.convId) session.convId = result.convId
     return {
       ok: Boolean(result?.ok),
-      text: out,
+      text: String(result?.text || ''),
       convId: result?.convId ?? null,
-      error: result?.ok ? null : String(result?.error || 'DSH seam 不可用（团队 turn 没有父 agent）'),
+      error: result?.ok ? null : String(result?.error || 'DSH agent 腿失败'),
       kind: brain.kind,
     }
   }

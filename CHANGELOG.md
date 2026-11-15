@@ -2,6 +2,33 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.4] — 2026-11-15
+
+### 修复：deepseek 腿不再依赖父 agent（团队大脑 + HTTP 直派都能用）
+- **根因**：deepseek 有**两条**实现，`runBrain` 选错了那条。
+  - `runDeepseekViaSeam` 走 `subagents.startActivation({ parent })` —— **必须有活的父会话**；
+  - `runDeepseek` 走 `agents.create()` 自建会话 —— **不需要 parent**，但它是**死代码**（定义了从未被调用）。
+  而团队 turn 由 `POST /team/send` 触发、`POST /confirm` 直派走 HTTP，两者都**没有父 agent**，
+  于是 deepseek 必报 `DSH subagent seam unavailable (no parent agent)`。
+  **不是没凭据**——`deepseek-official` / `relay-deepseek` / `opencodego` 三个 provider 都在，
+  `relay-deepseek` 直连实测 HTTP 200。
+- **修法**：
+  1. `runBrain` 的 `dsh-seam` 分支改走 `runDeepseek`（`agents.create`），并传 `presetId: 'minimal'`
+     —— 大脑因此**没有 bash/edit**，只剩 `council_*` 编排工具（`agent/created` 会自动 `bindAgent`）。
+     多轮用 `session.convId` 接在同一段历史上。
+  2. 新增 `namedComposition(ctx, presetId)`：按指定 preset 取 `agentPreset` + mount（原来只能取部署默认）。
+  3. `runDeepseekViaSeam` 在**没有父 agent 时降级**到 `runDeepseek` —— 顺带修好
+     「`POST /council/api/confirm` 直派 deepseek 成员必然失败」这个同根因问题。
+  4. `runDeepseek` 取文本改为**回溯最近一条非空** assistant 文本：大脑常先调工具再回答，
+     末尾的空文本不该把结论吃掉。
+- **新增前置校验**：deepseek 大脑在**该会话没有小组**时直接返回中文原因
+  （「这个会话还没有小组，大脑拿不到 council_* 派活工具…」），不再抛 seam 错误。
+
+### 测试
+- `staffing-test` 新增 6 条 → **187 checks**：dsh-seam 分支不再调 seam 且带 `minimal`（源码断言）/
+  seam 无 parent 时降级 / `runDeepseek` 自建会话跑一轮（文本·convId·usage）/
+  `presetId` 透传到 `resolve`+`mount` / 末尾空文本不覆盖结论 / 无小组时给中文原因。
+
 ## [0.3.3] — 2026-11-15
 
 ### 修复（数据安全，最重要）
