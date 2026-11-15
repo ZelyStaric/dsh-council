@@ -1334,13 +1334,22 @@ window.__ModuleLoader__.load({
       borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)',
       background: 'var(--dsw-alias-bg-layer-1)',
     }
+    /**
+     * 胶囊分段样式（v0.4.21 修深色模式）。
+     *
+     * ⚠️ 曾经用 `background: var(--dsw-alias-brand-primary)` + `color: #fff`，
+     * 在**深色主题**下 brand-primary 解析成近白色（rgb(249,250,251)）→ **白底白字，完全看不清**。
+     * 现在改成「中性半透明底 + 主题前景色」：深色下是一块稍亮的灰、浅色下是一块稍深的灰，
+     * 文字始终跟随 --dsw-alias-label-primary，两种主题都清晰。
+     */
     const segStyle = (active) => ({
       padding: '2px 10px', borderRadius: 999, fontSize: 12, userSelect: 'none',
       cursor: active ? 'default' : 'pointer',
       fontWeight: active ? 600 : 400,
-      background: active ? 'var(--dsw-alias-brand-primary)' : 'transparent',
-      color: active ? '#fff' : 'var(--dsw-alias-label-secondary)',
-      transition: 'background .12s ease',
+      background: active ? 'rgba(127, 127, 127, 0.24)' : 'transparent',
+      color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+      boxShadow: active ? 'inset 0 0 0 1px rgba(127, 127, 127, 0.35)' : 'none',
+      transition: 'background .12s ease, color .12s ease',
     })
 
     function ModeToggle(props) {
