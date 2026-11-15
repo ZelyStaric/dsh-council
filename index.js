@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
