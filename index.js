@@ -3674,8 +3674,9 @@ function teamToolRegistry() {
       },
     },
     council_collect: {
-      async execute() {
-        return { ok: false, error: 'council_collect 不能经由 MCP 转发：后台任务表绑在具体会话上。' }
+      async execute(args, exec) {
+        // 后台任务表是模块级的：MCP 路径同样能取（sessionId 由 COUNCIL_SESSION_ID 注入）
+        return runCollectTool(args, exec)
       },
     },
     council_tell: {
@@ -6084,6 +6085,32 @@ async function runMemberAction(group, args, ctx, config) {
  * 导致 claude/codex 大脑永远无法派活。现在 /internal/tool 直接
  * makeDelegateTool(ctx0, config, group).execute(args, exec) 复用同一份逻辑。
  */
+/**
+ * 取回后台派活结果（council_collect 的实现）。
+ *
+ * 与 delegate 同理：团队大脑经 MCP 回调时没有 DSH agent，所以逻辑必须是自包含的
+ * （只依赖模块级的 backgroundJobs 表）。bindAgent 与 /internal/tool 共用这一份。
+ */
+async function runCollectTool(args, exec) {
+        const sessionId = sessionIdOf(exec)
+        const job = args && args.runId ? backgroundJobs.get(String(args.runId)) : latestBackgroundJob(sessionId)
+        if (!job) return { status: 'none', error: '没有后台派活记录' }
+        const waitSeconds = Math.max(0, Math.min(600, Number(args && args.waitSeconds) || 0))
+        if (waitSeconds > 0 && job.promise) {
+          await Promise.race([
+            job.promise.catch(() => {}),
+            new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000)),
+          ])
+        }
+        if (job.status === 'done') {
+          // 结果已被主会话取走：不再重复推送
+          job.notified = true
+          return toolResult(Object.assign({ runId: job.runId, status: 'done' }, job.response))
+        }
+        if (job.status === 'failed') return { status: 'failed', runId: job.runId, error: job.error }
+        return { status: 'running', runId: job.runId, message: '成员还在跑，稍后再收（或加 waitSeconds 等待）' }
+}
+
 function makeDelegateTool(ctx, config, group) {
   return {
       name: 'council_delegate',
@@ -6631,25 +6658,7 @@ function bindAgent(ctx, config, group, agent) {
           return [{ type: 'text', text: delegateReceiptText(value) }]
         },
       },
-      async execute(args, exec) {
-        const sessionId = sessionIdOf(exec)
-        const job = args && args.runId ? backgroundJobs.get(String(args.runId)) : latestBackgroundJob(sessionId)
-        if (!job) return { status: 'none', error: '没有后台派活记录' }
-        const waitSeconds = Math.max(0, Math.min(600, Number(args && args.waitSeconds) || 0))
-        if (waitSeconds > 0 && job.promise) {
-          await Promise.race([
-            job.promise.catch(() => {}),
-            new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000)),
-          ])
-        }
-        if (job.status === 'done') {
-          // 结果已被主会话取走：不再重复推送
-          job.notified = true
-          return toolResult(Object.assign({ runId: job.runId, status: 'done' }, job.response))
-        }
-        if (job.status === 'failed') return { status: 'failed', runId: job.runId, error: job.error }
-        return { status: 'running', runId: job.runId, message: '成员还在跑，稍后再收（或加 waitSeconds 等待）' }
-      },
+      execute: (args, exec) => runCollectTool(args, exec),
     }))
     disposers.push(agentCtx.tools.register({
       name: 'council_tell',
