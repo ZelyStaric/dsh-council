@@ -2,6 +2,24 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.5] — 2026-11-15
+
+### 修复：deepseek 大脑腿拿不到 `council_*` 派活工具
+v0.3.4 让 deepseek 大脑腿能跑起来了（不再要求父 agent），但实测发现它**没有 `council_delegate`**
+——只能聊天、不能派活，等于没有接管能力。两个原因，一起修：
+
+1. **补绑**：`agent/created` 监听器只绑「已属于某个小组」的会话（按 `agent.id` 查 `groupForSession`），
+   而 `agents.create()` 建的是**全新 session**，不在任何组里 → 永远绑不上。
+   现在 `runDeepseek` 接受 `bindGroup`，在 `followup` **之前**显式 `bindAgent`；
+   收尾时释放该次绑定的 disposer，避免 `boundAgents` 随每轮新会话无限增长。
+2. **补工具**：`bindAgent` 的 DSH 工具集一直缺 `council_status`（只有 MCP 侧有），
+   三条腿能力不一致。现在补上（只读，报**本组**成员 / 各组 / 运行中数量 / 默认大脑）。
+   → DSH 会话内工具集从 6 个变为 7 个。
+
+### 测试
+- 新增 1 条 → **188 checks**：`bindGroup` 补绑后必须拿到 `council_delegate`+`council_status`、
+  注入名册 systemPrompt、注册越权守卫、收尾后 `boundAgents` 不增长。
+
 ## [0.3.4] — 2026-11-15
 
 ### 修复：deepseek 腿不再依赖父 agent（团队大脑 + HTTP 直派都能用）

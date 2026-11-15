@@ -2422,8 +2422,22 @@ async function runDeepseek(ctx, member, prompt, config, options = {}) {
   } catch (error) {
     return { ok: false, text: '', error: 'agent start failed: ' + String(error?.message ?? error), usage: null }
   }
+  // 补绑的 disposer key 必须在 try 外声明：finally 里 dispose 之后 handle.agent 未必还可读
+  let boundCleanupKey = null
   try {
     const agent = handle.agent
+    // 大脑要真正拿到 council_* 派活工具。
+    // `agent/created` 监听器只绑「已属于某个小组」的会话（按 agent.id 查 groupForSession），
+    // 而这里 agents.create 建的是**全新 session**，不在任何组里 → 不会被自动绑定。
+    // 所以由调用方显式给 group，在这里补绑；必须在 followup 之前，模型一开始就得看得见工具。
+    if (options.bindGroup) {
+      try {
+        bindAgent(ctx, config, options.bindGroup, agent)
+        boundCleanupKey = options.bindGroup.id + '\u0000' + agent.id
+      } catch (error) {
+        console.error('[council] bindAgent 失败（大脑将拿不到 council_* 工具）:', String((error && error.stack) || error))
+      }
+    }
     const before = sessionEvents(agent.session).length
     agent.followup({
       id: 'msg_' + randomUUID(),
@@ -2459,6 +2473,12 @@ async function runDeepseek(ctx, member, prompt, config, options = {}) {
     return { ok: false, text: '', error: 'agent turn failed: ' + String(error?.message ?? error), usage: null }
   } finally {
     try { await handle.dispose() } catch { /* already gone */ }
+    // 释放本次补绑的 disposer，避免 boundAgents 随每轮新会话无限增长
+    if (boundCleanupKey && boundAgents.has(boundCleanupKey)) {
+      const cleanup = boundAgents.get(boundCleanupKey)
+      try { cleanup() } catch { /* ignore */ }
+      boundAgents.delete(boundCleanupKey)
+    }
   }
 }
 
@@ -3702,6 +3722,8 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
     const result = await runDeepseek(ctx0, member, prompt, state.config || {}, {
       // minimal：没有 bash / edit / write，只有 council_* 编排工具
       presetId: 'minimal',
+      // 显式补绑小组：新建的会话不在任何组里，agent/created 不会自动绑（见 runDeepseek）
+      bindGroup: group,
       onDelta: delta,
     })
     if (result?.convId) session.convId = result.convId
@@ -6713,6 +6735,52 @@ async execute(args) {
           })
         }
         return toolResult({ ok: false, error: 'unknown action' })
+      },
+    }))
+    // 只读状态：MCP 侧（teamToolRegistry）一直有 council_status，但 DSH 会话内的工具集
+    // 之前缺这一个 —— deepseek 大脑腿走的是这里的工具集，于是它查不到小组状态。
+    // 2026-11-15 补齐，让三条腿能力对齐。只报**本组**成员（大脑在自己组里干活）。
+    disposers.push(agentCtx.tools.register({
+      name: 'council_status',
+      description: '查看本组状态（只读）：本组成员名单、所有小组、正在运行的成员数、默认大脑模型。',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            ok: { type: 'boolean' },
+            memberCount: { type: 'number' },
+            members: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            groups: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            running: { type: 'number' },
+            teamModel: { type: 'string' },
+            error: { type: 'string' },
+          },
+        },
+        render(_args, value) {
+          if (value.error) return [{ type: 'text', text: '失败：' + value.error }]
+          const names = (value.members || []).map((m) => m.name + '（' + m.kind + (m.model ? ' / ' + m.model : '') + '）').join('、')
+          return [{
+            type: 'text',
+            text: '本组 ' + (value.memberCount ?? (value.members || []).length) + ' 位成员：' + (names || '（空）')
+              + '\n小组数：' + (value.groups || []).length + ' · 运行中：' + (value.running || 0)
+              + ' · 默认大脑：' + (value.teamModel || '-'),
+          }]
+        },
+      },
+      async execute() {
+        const live = state.groups.find((g) => g.id === group.id) || group
+        const ids = new Set(live.memberIds || [])
+        const members = state.members.filter((m) => ids.has(m.id))
+        return toolResult({
+          ok: true,
+          memberCount: members.length,
+          members: members.map((m) => ({ id: m.id, name: m.name, kind: m.kind, model: m.model ?? null, roleId: m.roleId ?? null })),
+          groups: state.groups.map((g) => ({ id: g.id, name: g.name, sessionId: g.sessionId ?? null, memberCount: (g.memberIds || []).length })),
+          running: steerTargets.size,
+          teamModel: teamModelDefault(),
+        })
       },
     }))
     // 方案 A：父会话（本组会话的 agent）不得自己执行写操作，由守卫硬拦截。

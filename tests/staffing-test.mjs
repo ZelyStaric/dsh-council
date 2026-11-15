@@ -4277,6 +4277,39 @@ try {
     return '回溯取最后一条非空文本'
   })
 
+  await check('runDeepseek：bindGroup 显式补绑（新建会话不在任何组，agent/created 不会自动绑）', async () => {
+    const registered = []
+    const guarded = []
+    const agentCtx = {
+      systemPrompt: { section: (spec) => { registered.push('prompt:' + spec.name); return () => {} } },
+      tools: {
+        register: (tool) => { registered.push('tool:' + tool.name); return () => {} },
+        guard: (fn) => { guarded.push(fn); return () => {} },
+      },
+    }
+    const events = []
+    const makeAgent = () => ({
+      id: 'session-bind-test',
+      ctx: agentCtx,
+      session: { snapshotEvents: () => events },
+      followup() { events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'ok' }] } } }) },
+      whenIdle: async () => {},
+    })
+    const agents = { create: async () => ({ agent: makeAgent(), dispose: async () => {} }) }
+    const ctx = { get: (k) => (k === 'agents' ? agents : undefined) }
+    const group = { id: 'g_bind_test', name: '测试组', memberIds: [], sessionId: 'session-bind-test', commanderSessions: {} }
+    const boundBefore = mod.__boundAgentsSize()
+    const out = await mod.runDeepseek(ctx, { name: '脑子', kind: 'deepseek' }, 'hi', {}, { bindGroup: group })
+    assert.equal(out.ok, true)
+    const toolNames = registered.filter((x) => x.startsWith('tool:')).map((x) => x.slice(5))
+    assert.ok(toolNames.includes('council_delegate'), '大脑必须拿到 council_delegate，实际：' + toolNames.join(','))
+    assert.ok(toolNames.includes('council_status'), '大脑必须拿到 council_status（与 MCP 侧对齐）')
+    assert.ok(registered.some((x) => x.startsWith('prompt:council:roster:')), '应注入名册 systemPrompt')
+    assert.equal(guarded.length, 1, '应注册越权守卫（大脑同样受写操作限制）')
+    assert.equal(mod.__boundAgentsSize(), boundBefore, '本轮绑定的 disposer 应在收尾时清空（不增长）')
+    return '绑定 ' + toolNames.length + ' 个工具（含 council_delegate/council_status）· 名册注入 · 守卫已挂 · 收尾清空'
+  })
+
   await check('runBrain：deepseek 大脑 + 该会话没有小组 → 明确中文错误（不再报 seam 不可用）', async () => {
     const out = await mod.runBrain({ sessionId: 'session-no-group-for-brain-test', model: 'deepseek-v4.1-flash', text: '你好' })
     assert.equal(out.ok, false, '没有小组时必须失败')
