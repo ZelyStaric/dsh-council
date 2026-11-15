@@ -31,6 +31,16 @@ const PROFILE_CANDIDATES = [
 const CODEX_BIN = process.env.COUNCIL_CODEX_BIN || 'codex'
 
 /**
+ * `/internal/tool` 的内部共享 token（进程级随机）。
+ *
+ * 为什么需要它：团队大脑（claude/codex 腿）通过 council-mcp 子进程回调 `/internal/tool`。
+ * 服务只绑一个具体地址（如 100.108.3.88），`127.0.0.1:3080` 是 loopback 反代，
+ * 反代连上游时源地址是**本机网卡 IP**，纯靠 `remoteAddress === 127.0.0.1` 判断会全部 403。
+ * token 经环境变量传给子进程，与 IP 判断并存（满足其一即可），Tailscale 网内的其它设备也伪造不了。
+ */
+const INTERNAL_TOKEN = randomUUID()
+
+/**
  * 子会话清理路由：内层路径（handler 已经剥掉 `/council/api`），
  * HTTP 实际地址 = `/council/api` + 本值 = `POST /council/api/sessions/prune`。
  * 前端 `client.js` 的 `SESSIONS_PRUNE_PATH` 必须与本值**逐字相同**；
@@ -3629,7 +3639,11 @@ function teamModelDefault() {
 /** 团队模式 MCP 配置：只挂 council 一个服务器，其它一律不给（配合 --strict-mcp-config）。 */
 function councilMcpConfig() {
   const self = fileURLToPath(new URL('./council-mcp.mjs', import.meta.url))
-  const env = { COUNCIL_API: process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api' }
+  const env = {
+    COUNCIL_API: process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api',
+    // 内部 token：/internal/tool 用它鉴权（loopback 反代会改写源 IP，见 INTERNAL_TOKEN 注释）
+    COUNCIL_INTERNAL_TOKEN: INTERNAL_TOKEN,
+  }
   if (process.env.COUNCIL_TOKEN) env.COUNCIL_TOKEN = process.env.COUNCIL_TOKEN
   return JSON.stringify({ mcpServers: { council: { command: process.execPath, args: [self], env } } })
 }
@@ -3783,6 +3797,7 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
       '-c', 'mcp_servers.council.command="' + process.execPath + '"',
       '-c', 'mcp_servers.council.args=["' + fileURLToPath(new URL('./council-mcp.mjs', import.meta.url)) + '"]',
       '-c', 'mcp_servers.council.env.COUNCIL_API="' + (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api') + '"',
+      '-c', 'mcp_servers.council.env.COUNCIL_INTERNAL_TOKEN="' + INTERNAL_TOKEN + '"',
     ]
     const codexEnv = await envFor({ kind: 'codex' }, state.config).catch(() => undefined)
     const result = await runCodex({
@@ -4603,9 +4618,21 @@ export function createHandler(ctx, config = {}) {
           }
           if (req.method === 'POST' && route === '/internal/tool') {
             // 只给本机的 council-mcp.mjs 用：按名字转发到既有 council_* 工具。
+            //
+            // 鉴权两条（满足其一即可）：
+            //  ① 共享 token（首选）：本进程启动时生成，经 COUNCIL_INTERNAL_TOKEN 传给
+            //     council-mcp 子进程；请求必须带 `x-council-token`。
+            //  ② 回环地址 127.0.0.1 / ::1（本机直连的情形）。
+            //
+            // 为什么不能只靠 IP（2026-11-15 实测踩到）：`dsh web` 只绑 100.108.3.88，
+            // `127.0.0.1:3080` 是 loopback 反代；反代连上游时源地址是本机网卡 IP
+            // （192.168.51.193），于是 remoteAddress 既不是 127.0.0.1 也不是 ::1
+            // → 大脑调 council_delegate 全被 403「只接受本机调用」，团队派活直接废掉。
             const remote = String(req.socket?.remoteAddress || '')
-            if (!(remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1')) {
-              return send(res, 403, { error: 'internal/tool 只接受本机调用' })
+            const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+            const tokenOk = Boolean(INTERNAL_TOKEN) && String(req.headers['x-council-token'] || '') === INTERNAL_TOKEN
+            if (!isLoopback && !tokenOk) {
+              return send(res, 403, { error: 'internal/tool 只接受本机调用（缺少内部 token）' })
             }
             const body = await readBody(req)
             const name = String(body.tool || '')

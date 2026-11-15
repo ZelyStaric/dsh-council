@@ -4787,6 +4787,21 @@ try {
     return `${missing.status} 未知工具 / ${result.members.length} 成员 · ${result.groups.length} 组`
   })
 
+  await check('internal/tool 鉴权：回环 IP 或内部 token 二选一（loopback 反代会改写源 IP）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    // 起因：服务只绑 100.108.3.88，127.0.0.1:3080 是 loopback 反代，反代连上游时源地址是本机网卡 IP
+    // → 纯 remoteAddress===127.0.0.1 判断会把团队大脑的工具调用全部 403 掉。
+    assert.ok(src.includes('const INTERNAL_TOKEN = randomUUID()'), '要有进程级内部 token')
+    assert.ok(src.includes("req.headers['x-council-token']"), '/internal/tool 必须校验该 header')
+    assert.ok(src.includes('if (!isLoopback && !tokenOk)'), '回环 IP 与 token 是二选一放行')
+    assert.ok(src.includes('COUNCIL_INTERNAL_TOKEN: INTERNAL_TOKEN'), 'claude 腿（councilMcpConfig）要把 token 传给子进程')
+    assert.ok(src.includes('mcp_servers.council.env.COUNCIL_INTERNAL_TOKEN'), 'codex 腿也要传 token')
+    const mcp = await readFile(path.join(ROOT, 'council-mcp.mjs'), 'utf8')
+    assert.ok(mcp.includes('COUNCIL_INTERNAL_TOKEN'), 'council-mcp 要读 token 环境变量')
+    assert.ok(mcp.includes("'x-council-token'"), 'council-mcp 转发时要带 header')
+    return 'IP 或 token 二选一 · claude/codex 双腿都传 token'
+  })
+
   await check('council-mcp.mjs：工具表 5 个 council_* 且名字与 Host registry 对齐', async () => {
     const mcp = await import(pathToFileURL(path.join(ROOT, 'council-mcp.mjs')).href)
     const names = mcp.TOOLS.map((t) => t.name).sort()

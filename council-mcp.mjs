@@ -16,6 +16,8 @@
 
 const COUNCIL_API = (process.env.COUNCIL_API || 'http://127.0.0.1:3080/council/api').replace(/\/+$/, '')
 const COUNCIL_TOKEN = process.env.COUNCIL_TOKEN || ''
+/** 内部 token：插件用 IP 判断不可靠（loopback 反代会改写源地址），改用共享令牌鉴权。 */
+const INTERNAL_TOKEN = process.env.COUNCIL_INTERNAL_TOKEN || ''
 const SERVER_NAME = 'council'
 const SERVER_VERSION = '0.3.0'
 
@@ -130,7 +132,10 @@ async function forward(tool, args, sessionId) {
   try {
     res = await fetch(apiUrl('/internal/tool'), {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: Object.assign(
+        { 'content-type': 'application/json' },
+        INTERNAL_TOKEN ? { 'x-council-token': INTERNAL_TOKEN } : {},
+      ),
       body: JSON.stringify(payload),
     })
   } catch (error) {
