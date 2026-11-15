@@ -3571,9 +3571,12 @@ const TEAM_MESSAGE_LIMIT = 200
 function resolveBrain(model) {
   const name = String(model || '').trim() || DEFAULT_TEAM_MODEL
   const lower = name.toLowerCase()
+  // 出图模型不能当大脑：gpt-image-* 会被下面的 gpt 前缀误判成 codex 腿
+  if (lower.startsWith('gpt-image')) return { kind: 'invalid', model: name }
   if (lower.startsWith('claude')) return { kind: 'claude-cli', model: name }
   if (lower.startsWith('gpt') || /^o\d/.test(lower)) return { kind: 'codex', model: name }
   if (lower.startsWith('deepseek')) return { kind: 'dsh-seam', model: name }
+  if (lower.startsWith('gemini')) return { kind: 'gemini-cli', model: name }
   // 认不出来的名字按 claude 处理：默认大脑就是 claude-*，宁可报「没装 claude CLI」也不要静默挑错腿
   return { kind: 'claude-cli', model: name }
 }
@@ -3705,6 +3708,20 @@ async function runBrain({ sessionId, model, text, onDelta, signal, cwd, scopeUni
   const brainOpen = (state.config || {}).brainPermissions === 'open'
   const prompt = String(text ?? '')
   const workdir = cwd || process.env.COUNCIL_TEAM_CWD || process.cwd()
+  // 出图模型不能当大脑：明确报错，不要落进下面的 claude 分支
+  if (brain.kind === 'invalid') {
+    return {
+      ok: false, text: '', convId: null, kind: brain.kind,
+      error: '「' + brain.model + '」是出图模型，不能当指挥大脑。请选 claude-* / gpt-* / deepseek-* / gemini-* 的对话模型。',
+    }
+  }
+  // gemini 腿（v0.4 P3 接线）：CLI 已装好但还没接入 runBrain
+  if (brain.kind === 'gemini-cli') {
+    return {
+      ok: false, text: '', convId: null, kind: brain.kind,
+      error: 'Gemini 腿还没接线（CLI 已装 v0.68.0）。先用 claude-* / gpt-* / deepseek-* 当大脑。',
+    }
+  }
   if (!prompt.trim()) return { ok: false, text: '', convId: null, error: 'text 不能为空', kind: brain.kind }
   const delta = (chunk) => {
     if (typeof onDelta !== 'function' || !chunk) return

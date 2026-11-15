@@ -4682,7 +4682,28 @@ try {
     assert.equal(codex.kind, 'codex')
     assert.equal(seam.kind, 'dsh-seam')
     assert.equal(mod.resolveBrain('Claude-Opus-5-5').kind, 'claude-cli', '大小写不敏感')
-    return `claude-fable-5-2→${claude.kind} / gpt-6.1-sol→${codex.kind} / deepseek-flash→${seam.kind}`
+    // v0.4：gemini 系有独立腿；出图模型不能当大脑（否则 gpt-image 会被 gpt 前缀误判成 codex）
+    assert.equal(mod.resolveBrain('gemini-3.8-flash').kind, 'gemini-cli')
+    assert.equal(mod.resolveBrain('gpt-image-2.6-flare').kind, 'invalid', 'gpt-image 必须判 invalid')
+    assert.equal(mod.resolveBrain('gpt-image-2.6-sunburst').kind, 'invalid')
+    assert.equal(mod.resolveBrain('o3-mini').kind, 'codex', 'o<数字> 仍是 codex')
+    return `claude→${claude.kind} / gpt→${codex.kind} / deepseek→${seam.kind} / gemini→gemini-cli / gpt-image→invalid`
+  })
+
+  await check('runBrain：出图模型当大脑 → 明确中文错误（不落进 claude 腿）', async () => {
+    const out = await mod.runBrain({ sessionId: 'session-brain-invalid-test', model: 'gpt-image-2.6-flare', text: '你好' })
+    assert.equal(out.ok, false)
+    assert.equal(out.kind, 'invalid')
+    assert.match(String(out.error), /出图模型/, '要指出是出图模型，实际：' + out.error)
+    return out.error.slice(0, 36) + '…'
+  })
+
+  await check('runBrain：gemini 腿未接线时给出明确原因（不假装成功）', async () => {
+    const out = await mod.runBrain({ sessionId: 'session-brain-gemini-test', model: 'gemini-3.8-flash', text: '你好' })
+    assert.equal(out.ok, false)
+    assert.equal(out.kind, 'gemini-cli')
+    assert.match(String(out.error), /Gemini 腿还没接线/)
+    return out.error.slice(0, 36) + '…'
   })
 
   await check('DEFAULT_TEAM_MODEL / TEAM_MESSAGE_LIMIT / TEAM_BRAIN_DISALLOWED 常量', () => {

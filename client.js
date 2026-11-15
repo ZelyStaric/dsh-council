@@ -1406,11 +1406,24 @@ window.__ModuleLoader__.load({
         else window.localStorage.removeItem(MODE_PENDING_KEY)
       } catch { /* 隐私模式禁用 storage，忽略 */ }
     }
+    /** hero 态预选的大脑模型：建组时自动应用（用户要求「未发消息时就能选指挥模型」） */
+    const BRAIN_PENDING_KEY = 'council.pendingBrain'
+    const readPendingBrain = () => {
+      try { return window.localStorage.getItem(BRAIN_PENDING_KEY) || '' } catch { return '' }
+    }
+    const writePendingBrain = (value) => {
+      try {
+        if (value) window.localStorage.setItem(BRAIN_PENDING_KEY, value)
+        else window.localStorage.removeItem(BRAIN_PENDING_KEY)
+      } catch { /* ignore */ }
+    }
     /** hero 会自动应用预选的会话（只尝试一次，避免 effect 反复触发） */
     const pendingApplied = new Set()
     /** 能当「指挥大脑」的模型（前缀约定，与 Host 的 resolveBrain 对齐） */
     const isBrainModel = (id) => {
       const s = String(id || '')
+      // 出图模型不能当大脑（gpt-image-* 会被 gpt 前缀误判）
+      if (s.startsWith('gpt-image')) return false
       return s.startsWith('claude') || s.startsWith('gpt-') || /^o\d/.test(s)
         || s.startsWith('deepseek') || s.startsWith('gemini')
     }
@@ -1435,6 +1448,8 @@ window.__ModuleLoader__.load({
       const [providers, setProviders] = useState(null)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
+      // hero 态预选的大脑模型（建组时自动应用）
+      const [pendingBrain, setPendingBrain] = useState(readPendingBrain())
 
       useEffect(() => {
         let alive = true
@@ -1473,6 +1488,12 @@ window.__ModuleLoader__.load({
             const next = created.state.groups[created.state.groups.length - 1]
             await call('/groups/bind', { id: next.id, sessionId })
             await provisionDefaultRoster(next.id)
+            // hero 态选过大脑模型 → 建组后立刻应用
+            const wishBrain = readPendingBrain()
+            if (wishBrain) {
+              await call('/team/model', { sessionId, model: wishBrain }).catch(() => {})
+              writePendingBrain('')
+            }
             const data = await call('/state')
             setState(data.state)
             writePendingMode('')
@@ -1509,11 +1530,25 @@ window.__ModuleLoader__.load({
           const next = created.state.groups[created.state.groups.length - 1]
           await call('/groups/bind', { id: next.id, sessionId })
           await provisionDefaultRoster(next.id)
+          // hero 态选过大脑 → 建组后应用
+          const wishBrain = readPendingBrain()
+          if (wishBrain) {
+            await call('/team/model', { sessionId, model: wishBrain }).catch(() => {})
+            writePendingBrain('')
+          }
           const data = await call('/state')
           setState(data.state)
           writePendingMode('')
           notifyCouncilChange()
         } catch (e) { setError(String(e.message || e)) } finally { setBusy(false) }
+      }
+
+      /** hero 态选大脑：只记预选，建组时应用 */
+      const pickPendingBrain = (model) => {
+        if (!model) return
+        writePendingBrain(model)
+        setPendingBrain(model)
+        setError(null)
       }
 
       const pickBrain = async (model) => {
@@ -1558,13 +1593,15 @@ window.__ModuleLoader__.load({
             onClick: busy || bound ? undefined : switchToGroup,
           }, '小组'),
         ),
-        bound
+        bound || pendingGroup
           ? h('select', {
-            value: brainModel,
-            title: '指挥大脑用哪个模型（本会话持久化）',
+            value: bound ? brainModel : pendingBrain,
+            title: bound
+              ? '指挥大脑用哪个模型（本会话持久化）'
+              : '先选好指挥大脑：发出第一条消息后自动应用',
             style: selectStyle,
             onClick: (e) => e.stopPropagation(),
-            onChange: (e) => pickBrain(e.target.value),
+            onChange: (e) => (bound ? pickBrain(e.target.value) : pickPendingBrain(e.target.value)),
           }, options.length ? options : [h('option', { key: '__none', value: '' }, '（无可用模型）')])
           : null,
         bound ? h('span', {
