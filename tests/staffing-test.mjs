@@ -4155,6 +4155,16 @@ try {
   })
 
   /* ── 团队模式：大脑持久化 + codex 只读沙箱 ─────────────────────────── */
+  await check('团队消息落盘：写到 storages/council-team/，重启可恢复（不碰会话日志）', async () => {
+    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
+    assert.ok(src.includes("const TEAM_DIR = path.join(DSH_HOME, 'storages', 'council-team')"), '要有独立落盘目录')
+    assert.ok(src.includes('function scheduleTeamSave('), '要有节流落盘函数')
+    assert.ok(src.includes("renameSync(file + '.tmp', file)"), '原子写（.tmp + rename）')
+    assert.ok(/teamPushMessage[\s\S]{0,600}scheduleTeamSave\(entry, entry\.sessionId\)/.test(src), '每次 push 都要触发落盘')
+    assert.ok(/function teamSessionState[\s\S]{0,1200}readFileSync\(teamStateFile\(key\)/.test(src), '首次创建要从磁盘恢复')
+    return '独立目录 · 节流+原子写 · push 触发 · 启动恢复'
+  })
+
   await check('团队模式：persistTeamMessage 恒返回 false（不写会话日志，防止写坏历史）', async () => {
     // 2026-11-16 教训：曾经用 session.append('plugin:council/team') 写自定义事件，
     // 但 DSH 要求实验性插件事件带 ignorable 标记；不带标记会让**整个会话历史加载失败**。

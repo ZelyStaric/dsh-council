@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
@@ -19,6 +19,8 @@ const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const STATE_FILE = path.join(DSH_HOME, 'storages', 'council.json')
 const WORKSPACE_FILE = path.join(DSH_HOME, 'storages', 'workspace.json')
 const IMAGE_DIR = path.join(DSH_HOME, 'storages', 'council-images')
+/** 团队群聊消息的落盘目录（**不写 DSH 会话日志**，见 persistTeamMessage 的注释） */
+const TEAM_DIR = path.join(DSH_HOME, 'storages', 'council-team')
 /** 归档真源是 workspace.json 的 global.archivedSessionIds；10 秒缓存避免高频 IO。 */
 const ARCHIVED_CACHE_MS = 10_000
 const normalizeSessionId = (value) => String(value || '').replace(/^session-/, '')
@@ -3676,12 +3678,59 @@ const teamSessions = new Map()
 /** 正在跑的团队 turn：runId → { sessionId, unit, listeners:Set, stopped } */
 const teamRuns = new Map()
 
+/** 某个会话的团队消息文件路径（一个会话一个 json）。 */
+function teamStateFile(sessionId) {
+  return path.join(TEAM_DIR, (normalizeSessionId(sessionId) || 'default') + '.json')
+}
+
+/**
+ * 团队会话状态。**首次创建时从磁盘恢复**（`storages/council-team/<sessionId>.json`）。
+ *
+ * 为什么存这里而不是 DSH 会话日志：会话日志要求自定义事件带 `ignorable` 标记，
+ * 而正确的 `appendPluginRecord` 在插件侧 import 不到；写错会把**整个会话历史**搞挂
+ * （见 persistTeamMessage 的注释）。存插件自己的文件既安全又能在重启后恢复。
+ */
 function teamSessionState(sessionId) {
   const key = normalizeSessionId(sessionId) || String(sessionId || '')
   if (!teamSessions.has(key)) {
-    teamSessions.set(key, { model: '', brainKind: '', convId: undefined, messages: [], turns: 0, persisted: false })
+    const entry = { sessionId: key, model: '', brainKind: '', convId: undefined, messages: [], turns: 0, persisted: true }
+    try {
+      const saved = JSON.parse(readFileSync(teamStateFile(key), 'utf8'))
+      if (Array.isArray(saved.messages)) entry.messages = saved.messages.slice(-TEAM_MESSAGE_LIMIT)
+      if (typeof saved.model === 'string') entry.model = saved.model
+      if (typeof saved.convId === 'string') entry.convId = saved.convId
+      if (typeof saved.turns === 'number') entry.turns = saved.turns
+    } catch { /* 没有历史文件：全新会话 */ }
+    teamSessions.set(key, entry)
   }
   return teamSessions.get(key)
+}
+
+/** 团队消息落盘（节流 600ms + 原子写，不阻塞消息流）。 */
+const teamSaveTimers = new Map()
+function scheduleTeamSave(entry, sessionId) {
+  if (!sessionId) return
+  const key = normalizeSessionId(sessionId)
+  if (teamSaveTimers.has(key)) return
+  const timer = setTimeout(() => {
+    teamSaveTimers.delete(key)
+    try {
+      const body = JSON.stringify({
+        sessionId: key,
+        model: entry.model || '',
+        convId: entry.convId || null,
+        turns: entry.turns || 0,
+        updatedAt: Date.now(),
+        messages: entry.messages,
+      }, null, 0)
+      mkdirSync(TEAM_DIR, { recursive: true })
+      const file = teamStateFile(key)
+      writeFileSync(file + '.tmp', body, 'utf8')
+      renameSync(file + '.tmp', file)
+    } catch { /* 落盘失败不影响对话 */ }
+  }, 600)
+  timer.unref?.()
+  teamSaveTimers.set(key, timer)
 }
 
 /** 往团队会话里追加一条消息（超过上限丢最早的）。 */
@@ -3689,6 +3738,8 @@ function teamPushMessage(entry, role, text, meta) {
   // meta 可选：成员回执带 name/kind/model/image/acceptance/reviewOk…（团队页群聊气泡用）
   entry.messages.push(Object.assign({ role, text: String(text ?? ''), at: Date.now() }, meta || {}))
   if (entry.messages.length > TEAM_MESSAGE_LIMIT) entry.messages.splice(0, entry.messages.length - TEAM_MESSAGE_LIMIT)
+  // v0.4.23：落盘到 storages/council-team/（不写 DSH 会话日志），重启后能恢复
+  scheduleTeamSave(entry, entry.sessionId)
 }
 
 /**
