@@ -2,6 +2,22 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] — 2026-11-15
+
+### 修复：回执把审校判定渲染成「未判定」
+- **现象**：后台派活完成后，完成通知里写着「审校：未判定」，但审校其实明明给了结论
+  （成员照样 `passed`）。大脑据此以为审校没干活。
+- **根因**：`delegateReceiptText()`（后台完成通知用的那个渲染器）把**整个 `review` 对象**
+  丢给了 `verdict()`：`verdict(m.review)`。而 `review` 是 `{self, commander, attempts}`，
+  自己**没有 `ok` 字段** → `v.ok` 既非 true 也非 false → 渲染成「未判定」。
+  工具正常回执里那处是对的（`verdict(m.review.self)`），两个渲染器口径不一致。
+- **修法**：`delegateReceiptText` 改为读 `m.review.self` / `m.review.commander`，
+  并对齐「审校：」/「自审：」前缀与 `prelim` 标记。现在后台通知与正常回执同一口径。
+
+### 测试
+- 新增 1 条 → **189 checks**：`delegateReceiptText` 在 `review.self.ok=true` 时渲染「通过」（不得出现
+  「未判定」）、`ok:false` 时渲染「不通过」并带出理由。
+
 ## [0.3.5] — 2026-11-15
 
 ### 修复：deepseek 大脑腿拿不到 `council_*` 派活工具

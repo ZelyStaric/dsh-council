@@ -736,7 +736,14 @@ function delegateReceiptText(value) {
     const link = m.image ? '\n[image] ' + m.image : ''
     const error = m.error ? '\n失败：' + m.error : ''
     const text = String(m.text || '').trim()
-    const reviews = [m.review ? '审校：' + verdict(m.review) : '', m.commanderVerdict ? '指挥审核：' + verdict(m.commanderVerdict) : ''].filter(Boolean).join(' · ')
+    // ⚠️ 这里必须取 `m.review.self` / `m.review.commander`，不能把整个 review 对象丢给 verdict()：
+    // review 是 `{self, commander, attempts}`，它自己没有 `ok` 字段，会被渲染成「未判定」。
+    // 2026-11-15 实测踩到：后台派活完成通知走的就是这个函数，于是大脑看到
+    // 「审校：未判定」——而审校其实明明有结论（真正的判定在 review.self 里）。
+    const reviews = m.review
+      ? (m.review.prelim ? '审校：' : '自审：') + verdict(m.review.self)
+        + (m.review.commander ? ' · 指挥审核：' + verdict(m.review.commander) : '')
+      : (m.commanderVerdict ? '指挥审核：' + verdict(m.commanderVerdict) : '')
     const acceptance = m.acceptance ? '\n验收：' + acceptanceStatusOfMember(m) : ''
     return '## ' + m.name + '（' + m.kind + (m.provider ? ' / ' + m.provider : '') + (m.model ? ' / ' + m.model : '') + '）\n' + (text || error || '（无产出）') + link + (reviews ? '\n' + reviews : '') + acceptance
   }).join('\n\n')

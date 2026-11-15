@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4275,6 +4275,36 @@ try {
     const out = await mod.runDeepseek(ctx, { name: '脑子', kind: 'deepseek' }, 'hi', {})
     assert.equal(out.text, '结论：派给代码成员', '必须回溯到最近一条非空文本，实际：' + JSON.stringify(out.text))
     return '回溯取最后一条非空文本'
+  })
+
+  await check('后台派活完成通知：审校判定必须渲染成通过/不通过，绝不能是「未判定」', () => {
+    // 真实事故（2026-11-15）：后台 job 完成通知走 delegateReceiptText，
+    // 而它把整个 review 对象（{self, commander, attempts}）丢给 verdict()，
+    // review 自己没有 ok 字段 → 渲染成「审校：未判定」，大脑据此以为审校没给结论。
+    const response = {
+      members: [{
+        name: '代码', kind: 'deepseek', text: '81', ok: true, acceptance: 'passed',
+        review: {
+          self: { ok: true, reason: '只输出数字 81，符合要求', by: '代码' },
+          commander: { ok: true, reason: '答案正确', by: '指挥' },
+          attempts: 1,
+        },
+      }],
+      acceptanceStatus: 'passed',
+    }
+    const receipt = mod.delegateReceiptText(response)
+    assert.ok(receipt.includes('81'), '回执应含产出')
+    assert.ok(!receipt.includes('未判定'), '不得出现「未判定」（review 有明确 ok），实际：' + receipt)
+    assert.ok(/通过/.test(receipt), '应渲染出「通过」，实际：' + receipt)
+    assert.ok(receipt.includes('答案正确'), '指挥审核理由应带上')
+
+    // 不通过也要如实渲染（ok:false → 不通过）
+    const rejected = mod.delegateReceiptText({
+      members: [{ name: '代码', kind: 'deepseek', text: 'x', ok: true, review: { self: { ok: false, reason: '缺验收标准' } } }],
+    })
+    assert.ok(rejected.includes('不通过'), 'ok:false 必须渲染成「不通过」，实际：' + rejected)
+    assert.ok(rejected.includes('缺验收标准'), '理由要带出')
+    return '通过/不通过都正确渲染，无「未判定」'
   })
 
   await check('runDeepseek：bindGroup 显式补绑（新建会话不在任何组，agent/created 不会自动绑）', async () => {
