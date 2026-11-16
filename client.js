@@ -1727,6 +1727,19 @@ window.__ModuleLoader__.load({
       const [expandedSet, setExpandedSet] = useState({})
       // 是否贴在时间线底部（决定要不要显示「跳到最新」）
       const [atBottom, setAtBottom] = useState(true)
+      // 用**原生** addEventListener 监听滚动：DSH 的 hooks 桩不转发 onScroll 之类的合成事件
+      // （2026-11-16 实测：onScroll 从不触发 → 按钮永不出现）。
+      useEffect(() => {
+        const node = scrollerRef.current
+        if (!node || typeof node.addEventListener !== 'function') return undefined
+        const onScroll = () => {
+          const near = node.scrollHeight - node.scrollTop - node.clientHeight < 80
+          setAtBottom(near)
+        }
+        node.addEventListener('scroll', onScroll, { passive: true })
+        onScroll()
+        return () => node.removeEventListener('scroll', onScroll)
+      }, [sessionId])
 
       const refreshTeam = () => {
         if (!sessionId) return
@@ -1945,13 +1958,6 @@ window.__ModuleLoader__.load({
       h('div', {
         ref: (node) => { scrollerRef.current = node },
         'data-council-scroller': '1',
-        // 是否贴底：不贴底才显示「跳到最新」按钮（2026-11-16 用户要求加）
-        onScroll: (event) => {
-          const node = event.currentTarget
-          if (!node) return
-          const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80
-          if (nearBottom !== atBottom) setAtBottom(nearBottom)
-        },
         // ⚠️ 必须给一个真实的高度上限：DSH 的 view 容器不是完整的 flex 链，
         // 只写 flex:1 会让这个列表被内容撑开（实测 scrollHeight===clientHeight=3738，
         // 根本没有内部滚动条 → 「跳到最新」无处可跳）。
