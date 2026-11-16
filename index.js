@@ -7066,6 +7066,31 @@ function makeDelegateTool(ctx, config, group) {
           const cmdr = memberWithRole(live, '指挥')
           if (cmdr) response.planner = { name: cmdr.name, kind: cmdr.kind, ...(cmdr.model ? { model: cmdr.model } : {}) }
         }
+        // ── 拆解回执：**立刻**推进团队时间线（在成员开跑之前）──
+        // 之前放在收尾处，导致成员回执先出、拆解最后才出，顺序是反的。
+        try {
+          const preSid = normalizeSessionId(sessionIdOf(exec) || '')
+          if (preSid && groupForSession(state, preSid) && assignments.length) {
+            const preEntry = teamSessionState(preSid)
+            const plannerName = (response.planner && response.planner.name) || '指挥'
+            const plannerModel = [response.planner && response.planner.kind, response.planner && response.planner.model].filter(Boolean).join(' / ')
+            const lines = ['**' + plannerName + '拆解了 ' + assignments.length + ' 个任务**' + (plannerModel ? '（' + plannerModel + '）' : '') + '：']
+            assignments.forEach((a, i) => {
+              const who = String((a && a.member) || '成员')
+              const task = String((a && a.task) || '').replace(/\s+/g, ' ').trim()
+              const short = task.length > 160 ? task.slice(0, 160) + '…' : task
+              const mcp = Array.isArray(a && a.mcp) && a.mcp.length ? '（MCP：' + a.mcp.join('、') + '）' : ''
+              lines.push((i + 1) + '. **' + who + '**' + mcp + '：' + short)
+            })
+            teamPushMessage(preEntry, 'assistant', lines.join('\n'), {
+              name: plannerName,
+              kind: (response.planner && response.planner.kind) || null,
+              model: (response.planner && response.planner.model) || null,
+              plan: true,
+            })
+            response.__planPushed = true   // 收尾处据此跳过，避免重复推
+          }
+        } catch { /* 推送失败不影响派活 */ }
         if (bypassPlanner && directAssignments.length > 1) response.bypassPlanner = true
         // 直派模式：回执明确标出来（前端与用户都能看出「这次没走指挥/审核」）
         if (directMode) response.direct = true
@@ -7316,7 +7341,8 @@ function makeDelegateTool(ctx, config, group) {
             try {
               const plan = response.plan
               const planned = Array.isArray(plan && plan.assignments) ? plan.assignments : []
-              if (planned.length) {
+              // 拆解回执已在拆完时推过（见 plannedBy 那段），这里只在「没推过」时补
+              if (planned.length && !response.__planPushed) {
                 const plannerName = (response.planner && response.planner.name) || '指挥'
                 const plannerModel = [response.planner && response.planner.kind, response.planner && response.planner.model]
                   .filter(Boolean).join(' / ')
