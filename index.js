@@ -2956,8 +2956,14 @@ function roleOf(member) {
 
 function memberPrompt(member, task) {
   const role = roleOf(member)
+  // 职位提示词只是**角色参考**，不是实现约束：
+  // 早先把它当成硬性 system prompt，导致「3D 建模」职位里写了 blender，
+  // 成员就只会用 blender，哪怕任务其实更适合别的工具（2026-11-16 用户反馈）。
   const head = role
-    ? `[你的职位] ${role.name}\n[职位职责与风格]\n${role.prompt || '（未填写）'}\n\n`
+    ? `[你的职位] ${role.name}\n`
+      + `[职位职责（仅供参考，不是实现约束）]\n${role.prompt || '（未填写）'}\n`
+      + '[注意] 上面的职责描述只说明你"负责什么"，**不限定你"怎么做"**。\n'
+      + '具体实现方式、工具与库，以【任务】里的指示为准；任务没指定时，你可以自选最合适的工具，并在产出里说明为何选它。\n\n'
     : ''
   return `${head}[任务]\n${task}`
 }
@@ -3343,8 +3349,13 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     catalogText(),
     `补员/换模型时按「模型定位速查」选；一个任务只用一个主力模型；${MODEL_GUIDE_TIEBREAK}。`,
     '',
+    '',
+    '**给成员的任务必须写清"具体怎么做"**：用什么工具/库/命令、产出什么文件或格式、怎么算完成。',
+    '职位提示词只说明"他负责什么"，不限定"怎么做"——不要只把职位职责丢给成员，',
+    '也不要因为职位描述里提到某个工具就只准用那个工具（如果任务更适合别的方案，就让成员用它）。',
+    '',
     '只输出一个 JSON 对象，不要其它文字：',
-    '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务，含背景/目标/验收标准"}]}',
+    '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务：背景 + 目标 + **具体实现方式/工具** + 产出格式 + 验收标准"}]}',
     '',
     '[用户要求]',
     request,

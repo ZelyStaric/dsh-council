@@ -1728,6 +1728,8 @@ window.__ModuleLoader__.load({
       // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
       // 2026-11-16 实测：状态改了但按钮不出现）。直接拿 DOM 引用改 display。
       const jumpBtnRef = useRef(null)
+      // 首次进入团队 tab 是否已经滚到底
+      const didInitScrollRef = useRef(false)
       useEffect(() => {
         const node = scrollerRef.current
         if (!node || typeof node.addEventListener !== 'function') return undefined
@@ -1775,10 +1777,17 @@ window.__ModuleLoader__.load({
       // 最后一条是用户消息且已过 3 秒还没回复 → 明确显示"正在处理"，别让人干等。
       const lastMsg = messages.length ? messages[messages.length - 1] : null
 
-      // 新消息到达 → 贴着底部
+      // 新消息到达 → 贴着底部；**首次进入 / 切回团队 tab 时直接跳到结尾**
+      // （2026-11-16 用户反馈：从别的 tab 切过来总是停在会话开头，每次都得点「最新」）
       useEffect(() => {
         const node = scrollerRef.current
         if (!node) return
+        if (!didInitScrollRef.current) {
+          didInitScrollRef.current = true
+          // 首次：不等动画，直接到底（内容刚挂载，smooth 反而会看到一段滚动过程）
+          node.scrollTop = node.scrollHeight
+          return
+        }
         const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 120
         if (nearBottom && typeof node.scrollTo === 'function') {
           try { node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' }) } catch { node.scrollTop = node.scrollHeight }
@@ -2034,10 +2043,8 @@ window.__ModuleLoader__.load({
       }, '↓ 最新'),
       /* 不再有独立输入框：小组模式下**直接用原生对话框**（对话页底部那个），
        * 主会话只负责把用户原话转给指挥。这里只留一句说明 + 停止按钮。 */
-      h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto', flexWrap: 'wrap' } },
-        h('span', { style: Object.assign({}, styles.muted, { fontSize: 12, flex: 1 }) },
-          '小组模式直接用底部对话框说话——它会转给指挥拆解；成员回执会出现在这里。'),
-        running ? h(Button, { onClick: stop }, '停止') : null))
+      running ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto' } },
+        h(Button, { onClick: stop }, '停止')) : null)
     }
 
     /* ── 按模式显示 tab（v0.4.17）──────────────────────────────────────
@@ -2130,10 +2137,10 @@ window.__ModuleLoader__.load({
     function registerAll(ctx) {
 
         ctx.slots.inject('conversation.view', () => ctx.slots.register({
-          name: 'conversation.view', id: 'council', order: 30, label: '小组',
+          name: 'conversation.view', id: 'council', order: 6, label: '小组',
         }, CouncilView))
         ctx.slots.inject('conversation.view', () => ctx.slots.register({
-          name: 'conversation.view', id: 'council-chat', order: 25, label: '团队',
+          name: 'conversation.view', id: 'council-chat', order: 5, label: '团队',
         }, CouncilChatView))
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions', id: 'council-mode', order: 40,
