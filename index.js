@@ -1289,6 +1289,10 @@ function jsonLines(text) {
 async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, member, config, scopeUnit = '', extraArgs = null }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
+  // noTools（审核位 / 只派活的指挥）：**只读沙箱**——能读文件了解项目，但写不了、跑不了改文件的命令。
+  // 2026-11-17 查出来的：这个函数原先**完全忽略 noTools**，于是 codex 当指挥时拥有全部工具，
+  // 等于绕过了「只派活」的约束。codex 用 -s 指定沙箱策略（read-only/workspace-write/danger-full-access）。
+  if (noTools) args.push('--sandbox', 'read-only')
   // 团队大脑：只读沙箱 + 只挂 council MCP（必须在 prompt/resume 之前）
   if (Array.isArray(extraArgs) && extraArgs.length) args.push(...extraArgs)
   // 按成员限定 MCP（2026-11-16）：把白名单外的 server 逐个 enabled=false
