@@ -1725,20 +1725,24 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = useState(null)
       // 长回执的展开状态（key → true 表示已展开）
       const [expandedSet, setExpandedSet] = useState({})
-      // 是否贴在时间线底部（决定要不要显示「跳到最新」）
-      const [atBottom, setAtBottom] = useState(true)
-      // 用**原生** addEventListener 监听滚动：DSH 的 hooks 桩不转发 onScroll 之类的合成事件
-      // （2026-11-16 实测：onScroll 从不触发 → 按钮永不出现）。
+      // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
+      // 2026-11-16 实测：状态改了但按钮不出现）。直接拿 DOM 引用改 display。
+      const jumpBtnRef = useRef(null)
       useEffect(() => {
         const node = scrollerRef.current
         if (!node || typeof node.addEventListener !== 'function') return undefined
-        const onScroll = () => {
+        const sync = () => {
+          const btn = jumpBtnRef.current
+          if (!btn) return
           const near = node.scrollHeight - node.scrollTop - node.clientHeight < 80
-          setAtBottom(near)
+          btn.style.display = near ? 'none' : 'inline-flex'
         }
-        node.addEventListener('scroll', onScroll, { passive: true })
-        onScroll()
-        return () => node.removeEventListener('scroll', onScroll)
+        node.addEventListener('scroll', sync, { passive: true })
+        const timer = setTimeout(sync, 300)
+        return () => {
+          node.removeEventListener('scroll', sync)
+          clearTimeout(timer)
+        }
       }, [sessionId])
 
       const refreshTeam = () => {
@@ -2007,27 +2011,27 @@ window.__ModuleLoader__.load({
               ? '用底部对话框说话，指挥会拆解后派给成员。'
               : '点右上角胶囊切到「小组」即可开始。'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
-      // 「跳到最新」：只在没贴底时出现；点击**平滑滚动**（不是瞬移）
-      !atBottom && (messages.length || streamText)
-        ? h('div', {
-          key: 'jump-latest',
-          title: '跳到最新消息',
-          onClick: () => {
-            const node = scrollerRef.current
-            if (!node) return
-            try { node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' }) } catch { node.scrollTop = node.scrollHeight }
-            setAtBottom(true)
-          },
-          style: {
-            position: 'absolute', right: 18, bottom: 64, zIndex: 5,
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '5px 12px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
-            background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-1)',
-            boxShadow: '0 2px 10px rgba(0,0,0,.28)',
-            transition: 'opacity .15s ease, transform .15s ease',
-            opacity: 0.94,
-          },
-        }, '↓ 最新') : null,
+      // 「跳到最新」：常驻 DOM，靠上面的原生滚动监听切 display；点击**平滑滚动**（不是瞬移）
+      h('div', {
+        key: 'jump-latest',
+        ref: (node) => { jumpBtnRef.current = node },
+        title: '跳到最新消息',
+        onClick: () => {
+          const node = scrollerRef.current
+          if (!node) return
+          try { node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' }) } catch { node.scrollTop = node.scrollHeight }
+          if (jumpBtnRef.current) jumpBtnRef.current.style.display = 'none'
+        },
+        style: {
+          position: 'absolute', right: 18, bottom: 64, zIndex: 5,
+          display: 'none', alignItems: 'center', gap: 4,
+          padding: '5px 12px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
+          background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-1)',
+          boxShadow: '0 2px 10px rgba(0,0,0,.28)',
+          transition: 'opacity .15s ease, transform .15s ease',
+          opacity: 0.94,
+        },
+      }, '↓ 最新'),
       /* 不再有独立输入框：小组模式下**直接用原生对话框**（对话页底部那个），
        * 主会话只负责把用户原话转给指挥。这里只留一句说明 + 停止按钮。 */
       h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto', flexWrap: 'wrap' } },
