@@ -4805,6 +4805,11 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/balance') {
             return send(res, 200, await deepseekBalance(ctx, config))
           }
+          if (req.method === 'GET' && route === '/mcp/list') {
+            // 只读：各框架当前配置的 MCP server 清单（成员卡的选择器用）
+            const force = url.searchParams.get('force') === '1'
+            return send(res, 200, { servers: listMcpServers(force) })
+          }
           if (req.method === 'GET' && route === '/providers') {
             const refresh = /(?:^|&)refresh=1(?:&|$)/.test(String(req.url || '').split('?')[1] || '')
             return send(res, 200, await listProviders(ctx, config, { refresh }))
@@ -5376,6 +5381,83 @@ function noteSelfWorkPermit(group, agent) {
  * 造一个绑定到某小组会话的守卫。只有 `execution.agent.id === 该组 sessionId` 时生效，
  * 其他 agent 一律放行；返回字符串 = 拒绝，undefined = 放行。
  */
+/**
+ * 读取各框架当前配置的 MCP server 清单（**只读**，用于成员卡上的选择器）。
+ *
+ * 来源各不相同（2026-11-16 实测）：
+ *   · codex  → `codex mcp list --json`（结构化，最可靠）
+ *   · gemini → `gemini mcp list`（文本；无 server 时输出 No MCP servers configured.）
+ *   · claude → ~/.claude.json 的 mcpServers（项目级 .mcp.json 不在此列）
+ *   · deepseek（DSH 子会话）→ 继承主会话 profile，**无法按成员隔离**，这里固定为空
+ *
+ * 结果带 30 秒缓存：成员卡每次渲染都会问，不必每次都起子进程。
+ */
+const MCP_LIST_TTL = 30_000
+let mcpListCache = { at: 0, value: null }
+
+/** 跑一条只读命令，返回 stdout（失败返回空串）。同步即可：有缓存兜着。 */
+function runText(cmd, args, timeoutMs = 8000) {
+  try {
+    const res = spawnSync(cmd, args, { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+    return res && res.status === 0 ? String(res.stdout || '') : ''
+  } catch {
+    return ''
+  }
+}
+
+function listMcpServers(force) {
+  if (!force && mcpListCache.value && Date.now() - mcpListCache.at < MCP_LIST_TTL) return mcpListCache.value
+  const out = { codex: [], gemini: [], claude: [], deepseek: [] }
+
+  // codex：JSON 输出
+  try {
+    const text = runText('codex', ['mcp', 'list', '--json'])
+    const arr = JSON.parse(text || '[]')
+    out.codex = (Array.isArray(arr) ? arr : []).map((m) => ({
+      name: String(m.name || ''),
+      command: String(m.command || ''),
+      args: Array.isArray(m.args) ? m.args.map(String) : [],
+      enabled: m.enabled !== false,
+    })).filter((m) => m && m.name)
+  } catch { /* 没装 / 解析失败 → 空 */ }
+
+  // gemini：文本输出
+  try {
+    const text = runText('gemini', ['mcp', 'list'])
+    if (text && !/No MCP servers configured/i.test(text)) {
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        if (/^(Name|─|-{3,}|No )/i.test(trimmed)) continue
+        const name = trimmed.split(/\s{2,}|\t/)[0]
+        if (!name || !/^[\w.@/-]+$/.test(name)) continue
+        out.gemini.push({ name, command: '', args: [], enabled: true })
+      }
+    }
+  } catch { /* ignore */ }
+
+  // claude：~/.claude.json 的 mcpServers
+  try {
+    const file = path.join(process.env.HOME || '', '.claude.json')
+    if (existsSync(file)) {
+      const cfg = JSON.parse(readFileSync(file, 'utf8'))
+      const servers = (cfg && cfg.mcpServers) || {}
+      for (const name of Object.keys(servers)) {
+        const spec = servers[name] || {}
+        out.claude.push({
+          name,
+          command: String(spec.command || ''),
+          args: Array.isArray(spec.args) ? spec.args.map(String) : [],
+          enabled: true,
+        })
+      }
+    }
+  } catch { /* 没有该文件 → 空 */ }
+
+  mcpListCache = { at: Date.now(), value: out }
+  return out
+}
+
 function makeSelfWorkGuard(group, config) {
   const groupId = group.id
   return (execution) => {
