@@ -2112,6 +2112,33 @@ window.__ModuleLoader__.load({
           const headText = round.head ? String(round.head.text || '').replace(/\s+/g, ' ').trim() : ''
           const title = headText ? (headText.length > 34 ? headText.slice(0, 34) + '…' : headText) : '（无标题）'
           const memberCount = round.items.filter((it) => it.m.role === 'member').length
+          // ── 交付物与状态（2026-11-16 用户要求：折叠摘要里就能看出做了什么、成没成）
+          const lastMember = round.items.filter((it) => it.m.role === 'member').pop()
+          const lastText = lastMember ? String(lastMember.m.text || '') : ''
+          let roundThumb = ''
+          if (lastMember && lastMember.m.image) roundThumb = String(lastMember.m.image)
+          if (!roundThumb) {
+            // 回执里的 ![alt](/abs/path.png) 或 [label](/abs/path.png)
+            const mImg = /!?\[[^\]]*\]\(([^)\s]+\.(?:png|jpe?g|webp|gif|bmp|svg))\)/i.exec(lastText)
+            if (mImg) roundThumb = fileUrl(mImg[1])
+          }
+          let roundFile = ''
+          if (!roundThumb) {
+            const mFile = /\[[^\]]*\]\(([^)\s]+\.(?:glb|gltf|obj|stl|fbx|mp3|wav|ogg|flac|mp4|webm|pdf|py|js|ts|json|md|csv|zip))\b/i.exec(lastText)
+            if (mFile) roundFile = String(mFile[1]).split('/').pop()
+          }
+          let roundStatus = null
+          if (lastMember) {
+            const acc = String(lastMember.m.acceptance || '')
+            const selfOk = lastMember.m.reviewOk
+            const cmdOk = lastMember.m.commanderOk
+            if (acc === 'passed' || (selfOk === true && cmdOk === true)) roundStatus = { ok: true, text: '完成' }
+            else if (acc === 'rejected' || selfOk === false || cmdOk === false) roundStatus = { ok: false, text: '未通过' }
+            else if (acc === 'rework-failed') roundStatus = { ok: false, text: '返工失败' }
+            else if (acc === 'unverified') roundStatus = { ok: false, text: '未判定' }
+            else if (lastMember.m.error) roundStatus = { ok: false, text: '失败' }
+            else roundStatus = { ok: true, text: '完成' }
+          }
           const meta = round.items.length + ' 条' + (memberCount ? ' · ' + memberCount + ' 个成员' : '')
           // 最后一轮默认展开（你正在看的这轮），历史轮折叠
           const isLast = ridx === rounds.length - 1
@@ -2123,11 +2150,36 @@ window.__ModuleLoader__.load({
           h('summary', {
             style: {
               cursor: 'pointer', userSelect: 'none', fontSize: 12,
-              color: 'var(--dsw-alias-label-secondary)', display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap',
+              color: 'var(--dsw-alias-label-secondary)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
             },
           },
+          // 交付物缩略图（有图时）
+          roundThumb
+            ? h('img', {
+              src: roundThumb,
+              alt: '交付物',
+              title: '点击查看大图',
+              onClick: (e) => { e.preventDefault(); try { window.open(roundThumb, '_blank') } catch { /* ignore */ } },
+              style: { width: 34, height: 34, objectFit: 'cover', borderRadius: 5, border: '1px solid var(--dsw-alias-border-l1)', flexShrink: 0, cursor: 'zoom-in' },
+            })
+            : null,
           h('span', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, title),
-          h('span', { style: { opacity: 0.65 } }, meta)),
+          // 状态徽章
+          roundStatus
+            ? h('span', {
+              style: {
+                fontSize: 10, padding: '1px 6px', borderRadius: 999, flexShrink: 0,
+                border: '1px solid var(--dsw-alias-border-l1)',
+                color: roundStatus.ok ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-state-error-primary)',
+                opacity: 0.9,
+              },
+            }, roundStatus.text)
+            : null,
+          // 交付文件（非图片产出的路径）
+          roundFile
+            ? h('span', { style: { opacity: 0.75, fontFamily: 'monospace', fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, roundFile)
+            : null,
+          h('span', { style: { opacity: 0.6 } }, meta)),
           h('div', null, round.items.map((it) => bubble(it.m, 'm' + it.i))))
         })
       }
