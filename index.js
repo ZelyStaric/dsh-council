@@ -4882,6 +4882,10 @@ export function createHandler(ctx, config = {}) {
                     'content-range': 'bytes ' + start + '-' + end + '/' + total,
                     'accept-ranges': 'bytes',
                     'cache-control': 'private, max-age=60',
+                    // 2026-11-17 修 BUG-1：DSH 的 webserver 外面套了 gzip 中间件，
+                    // 它会把响应再压一遍 → 与手动设的 content-length 冲突 → 连接被中断（HTTP 000）。
+                    // 这里显式声明不压缩，交给下面的 stream.pipe 原样输出。
+                    'content-encoding': 'identity',
                   })
                   const stream = createReadStream(abs, { start, end })
                   stream.on('error', () => { try { res.end() } catch { /* ignore */ } })
@@ -4894,6 +4898,8 @@ export function createHandler(ctx, config = {}) {
               'content-length': String(total),
               'accept-ranges': 'bytes',
               'cache-control': 'private, max-age=60',
+              // 同上：禁用外层 gzip，否则 content-length 与实际字节数不符 → 连接中断
+              'content-encoding': 'identity',
             })
             // 图片/音频直接流；其它（glb/zip）当附件下载
             const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
