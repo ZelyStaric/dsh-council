@@ -125,17 +125,8 @@ for (const [name, state] of FIXTURES) {
     }
   }
 }
-// 「清理 7 天前归档」两段式按钮：真点一次（React 桩 + 假 fetch），验证第一下 dryRun、第二下才真删，
-// 且前后端路由逐字相同（客户端请求 /council/api/groups/prune-archived）。
-// 同时断言上一版的「清理子会话」按钮已从 UI 移除（路由可手动调，但页面没有入口）。
-try {
-  const detail = await clickArchivedPruneTwoStage(payload.state)
-  console.log('ok   click/archived-prune-two-stage: ' + detail)
-} catch (error) {
-  failed++
-  console.log('FAIL click/archived-prune-two-stage: ' + (error && error.message))
-  console.log(((error && error.stack) || '').split('\n').slice(0, 6).join('\n'))
-}
+// 2026-11-16：「清理 7 天前归档 / 清理子智能体」按钮已从小组页移除（用户要求精简），
+// 对应用例随之删除；后端路由仍在（可手动调）。
 
 // 进度条四态（无真成员时）：有指挥占位阶段 → 显示阶段；等超过 90s → 「等待成员…（Ns）」；
 // 刚开工 → 「准备中…」；无成员且超过 5 分钟 → 追加「（长任务，成员仅在结束时回报）」。

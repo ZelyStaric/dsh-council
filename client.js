@@ -696,37 +696,7 @@ window.__ModuleLoader__.load({
         h('strong', null, '小组编排'),
         h('span', { style: styles.chip }, group.name),
         // 只清理「归档超过 N 天」的小组；会话目录一律不碰（「清理子会话」按钮已从 UI 移除）。
-        h('button', {
-          disabled: busy === 'archived',
-          onClick: pruneArchivedGroups,
-          style: busy === 'archived'
-            ? Object.assign({}, styles.linkButton, { cursor: 'default', opacity: 0.4 })
-            : styles.linkButton,
-          title: archivedPrune
-            ? '再点一次确认删除（共 ' + (archivedPrune.removed || []).length + ' 个组）'
-            : '先预览：只清理已归档且归档超过 ' + ARCHIVED_KEEP_DAYS + ' 天的小组（没有归档时间的组会保留）',
-        }, !archivedPrune
-          ? '清理 ' + ARCHIVED_KEEP_DAYS + ' 天前归档'
-          : ((archivedPrune.removed || []).length
-            ? '确认清理 ' + archivedPrune.removed.length + ' 个组'
-            : '重新检查归档组')),
-        archivedPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, archivedPruneNote) : null,
-        // 子智能体目录清理：只删「已结束 + 没在跑 + 不属于任何成员会话」的子会话目录。
-        h('button', {
-          disabled: busy === 'children',
-          onClick: pruneChildAgents,
-          style: busy === 'children'
-            ? Object.assign({}, styles.linkButton, { cursor: 'default', opacity: 0.4 })
-            : styles.linkButton,
-          title: childrenPrune
-            ? '再点一次确认删除（共 ' + (childrenPrune.removed || []).length + ' 个）'
-            : '先预览：只清理本会话名下已结束、没在跑、也不属于任何成员的子智能体目录',
-        }, !childrenPrune
-          ? '清理子智能体'
-          : ((childrenPrune.removed || []).length
-            ? '确认清理 ' + childrenPrune.removed.length + ' 个'
-            : '重新检查子智能体')),
-        childrenPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, childrenPruneNote) : null,
+        // 「清理 7 天前归档」「清理子智能体」已移除（2026-11-16 用户要求精简小组页）
         h('span', { style: { flex: 1 } }))
 
       const rolesPanel = h('div', { style: styles.roles },
