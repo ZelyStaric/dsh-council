@@ -4837,9 +4837,18 @@ export function createHandler(ctx, config = {}) {
             let abs = ''
             try { abs = path.resolve(raw) } catch { return send(res, 400, { error: 'path 非法' }) }
             const home = path.resolve(process.env.HOME || '/home/nanami')
-            // 只允许 HOME 下面（防目录穿越 / 偷读系统文件）
-            if (abs !== home && !abs.startsWith(home + path.sep)) {
-              return send(res, 403, { error: '只允许读取 HOME 目录下的文件' })
+            // 允许的白名单根（2026-11-17 放宽）：
+            //  · HOME —— 项目/产出一般在这；
+            //  · /tmp —— 很多 CLI（claude/codex）把临时产出写这里，用户点开图片会 403；
+            //  · 进程工作目录 —— 以防 DSH 从别处起。
+            // 仍然逐个 startsWith 检查，防目录穿越（'..' 已被 path.resolve 消解）。
+            const allowedRoots = [home, '/tmp', path.resolve(process.cwd())]
+              .filter(Boolean)
+              .map((root) => { try { return path.resolve(root) } catch { return '' } })
+              .filter(Boolean)
+            const inAllowed = allowedRoots.some((root) => abs === root || abs.startsWith(root + path.sep))
+            if (!inAllowed) {
+              return send(res, 403, { error: '只允许读取 HOME / /tmp 下的文件（当前：' + abs + '）' })
             }
             if (!existsSync(abs)) return send(res, 404, { error: '文件不存在' })
             let stat = null
@@ -6983,9 +6992,10 @@ function makeDelegateTool(ctx, config, group) {
         try {
           const dpSid = normalizeSessionId(sessionIdOf(exec) || '')
           try { appendFileSync('/tmp/council-plan.log', new Date().toISOString() + ' dp sid=' + dpSid + ' group=' + Boolean(groupForSession(state, dpSid)) + ' assignments=' + assignments.length + ' pushed=' + Boolean(response.__planPushed) + '\n') } catch {}
-          if (dpSid && groupForSession(state, dpSid) && assignments.length && !response.__planPushed) {
+          if (dpSid && groupForSession(state, dpSid) && (assignments.length || directAssignments.length) && !response.__planPushed) {
             const dpEntry = teamSessionState(dpSid)
-            const names = assignments.map((a) => String((a && a.member) || '成员'))
+            const names = (assignments.length ? assignments : directAssignments)
+              .map((a) => String((a && a.member) || (a && a.name) || '成员'))
             // 2026-11-16 用户要求：直派要显式打「直派」标签，别跟「指挥拆解」混在一起
             const head = directMode ? '**直派**（跳过指挥与审核）→ ' : '**直派**（未经指挥拆解）→ '
             teamPushMessage(dpEntry, 'assistant', head + '**' + names.join('、') + '**', {
@@ -7265,12 +7275,9 @@ function makeDelegateTool(ctx, config, group) {
                   model: (response.planner && response.planner.model) || null,
                   plan: true,
                 })
-              } else if ((response.members || []).length) {
-                // 没走指挥（主会话直派 / bypassPlanner）：也要留一条，否则时间线里看不出"这批活是谁派的"
-                const names = (response.members || []).map((m) => String(m.name || '成员'))
-                teamPushMessage(entry, 'assistant',
-                  '直接派给 **' + names.join('、') + '**（未经指挥拆解）', { plan: true })
               }
+              // 直派说明已在**开跑前**推过（见 plannedBy 那段）。这里不再补——
+              // 收尾时补会让「直派」出现在成员回执之后，时间线整个错乱（2026-11-17 用户截图指出）。
             } catch { /* 拆解回执推送失败不影响派活 */ }
             // 成员回执已在各自完成时推送（边做边出），这里不再重复。
             for (const m of []) {
