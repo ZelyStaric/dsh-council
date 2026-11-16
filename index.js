@@ -2300,7 +2300,13 @@ async function autoResumeInterruptedTurns() {
         if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
         const agent = agents.get(sid) || agents.get('session-' + sid)
         const inbox = agent && agent.inbox
-        resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function'))
+        let diag = ''
+        try {
+          const proto = inbox ? Object.getPrototypeOf(inbox) : null
+          diag = ' inboxKeys=' + (inbox ? Object.keys(inbox).join('|') : '') + ' protoMethods=' + (proto ? Object.getOwnPropertyNames(proto).join('|') : '')
+          if (agent) diag += ' agentKeys=' + Object.keys(agent).join('|')
+        } catch (e) { diag = ' diagErr=' + String(e && e.message) }
+        resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function') + diag)
         if (!inbox || typeof inbox.followup !== 'function') continue
         inbox.followup({
           content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
