@@ -2188,6 +2188,42 @@ function deepseekMemberModel(config, member, provider) {
  *  · 只在 config.autoResume !== false 时启用（默认开）
  *  · 每个会话只续一次（重启多次也不会连环触发：续上之后日志里就有新的 turn 了）
  */
+/** 只读扫描：哪些绑定会话有「未闭合的 turn」（turn/start 之后没有 turn/end）。 */
+function scanInterruptedTurns() {
+  const out = []
+  try {
+    const cutoff = Date.now() - 6 * 3600 * 1000
+    const bound = (state.groups || []).filter((g) => g.sessionId).map((g) => ({ gid: g.id, sid: normalizeSessionId(g.sessionId) }))
+    for (const item of bound) {
+      try {
+        let dir = ''
+        for (const name of readdirSync(SESSIONS_DIR)) {
+          const candidate = path.join(SESSIONS_DIR, name, 'session-' + item.sid)
+          if (existsSync(candidate)) { dir = candidate; break }
+        }
+        if (!dir) { out.push({ ...item, found: false }); continue }
+        const file = path.join(dir, 'session.v4.jsonl.zstd')
+        if (!existsSync(file)) { out.push({ ...item, found: false }); continue }
+        const mtime = statSync(file).mtimeMs
+        if (mtime < cutoff) { out.push({ ...item, found: true, old: true }); continue }
+        const res = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
+        if (!res || res.status !== 0) { out.push({ ...item, found: true, decompressFailed: true }); continue }
+        const lines = String(res.stdout || '').split('\n').filter(Boolean)
+        let lastStart = -1, lastEnd = -1
+        for (let i = lines.length - 1; i >= 0 && (lastStart < 0 || lastEnd < 0); i -= 1) {
+          let ev = null
+          try { ev = JSON.parse(lines[i]) } catch { continue }
+          if (!ev || !ev.type) continue
+          if (ev.type === 'turn/start' && lastStart < 0) lastStart = i
+          if (ev.type === 'turn/end' && lastEnd < 0) lastEnd = i
+        }
+        out.push({ ...item, found: true, interrupted: lastStart >= 0 && lastEnd <= lastStart, lastStart, lastEnd, total: lines.length })
+      } catch (e) { out.push({ ...item, error: String(e && e.message) }) }
+    }
+  } catch { /* ignore */ }
+  return out
+}
+
 async function autoResumeInterruptedTurns() {
   try {
     if (state.config && state.config.autoResume === false) return 0
@@ -4906,6 +4942,10 @@ export function createHandler(ctx, config = {}) {
           }
           if (req.method === 'GET' && route === '/balance') {
             return send(res, 200, await deepseekBalance(ctx, config))
+          }
+          if (req.method === 'GET' && route === '/resume/scan') {
+            // 只读诊断：哪些绑定会话有未闭合的 turn（重启后会自动续上）
+            return send(res, 200, { sessions: scanInterruptedTurns() })
           }
           if (req.method === 'GET' && route === '/mcp/list') {
             // 只读：各框架当前配置的 MCP server 清单（成员卡的选择器用）
