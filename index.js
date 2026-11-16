@@ -2193,7 +2193,18 @@ function scanInterruptedTurns() {
   const out = []
   try {
     const cutoff = Date.now() - 6 * 3600 * 1000
-    const bound = (state.groups || []).filter((g) => g.sessionId).map((g) => ({ gid: g.id, sid: normalizeSessionId(g.sessionId) }))
+    // 与自动续上同口径：最近 6 小时内活跃的**所有**会话
+    const bound = []
+    for (const ws of readdirSync(SESSIONS_DIR)) {
+      const wsDir = path.join(SESSIONS_DIR, ws)
+      let names = []
+      try { names = readdirSync(wsDir) } catch { continue }
+      for (const name of names) {
+        if (!name.startsWith('session-')) continue
+        const f = path.join(wsDir, name, 'session.v4.jsonl.zstd')
+        try { if (existsSync(f) && statSync(f).mtimeMs >= cutoff) bound.push({ gid: 'session-' + name.replace(/^session-/, '').slice(0, 8), sid: name.replace(/^session-/, '') }) } catch { /* skip */ }
+      }
+    }
     for (const item of bound) {
       try {
         let dir = ''
