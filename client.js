@@ -2386,7 +2386,7 @@ window.__ModuleLoader__.load({
     function ensureTabSelected() {
       if (ensureSelectedTimer) return
       let tries = 0
-      ensureSelectedTimer = setInterval(() => {
+      const tick = () => {
         tries += 1
         try {
           const list = document.querySelector('[data-conversation-tabs]')
@@ -2398,8 +2398,10 @@ window.__ModuleLoader__.load({
           if (!picked) { try { visible[0].click() } catch { /* ignore */ } }
           else if (ensureSelectedTimer) { clearInterval(ensureSelectedTimer); ensureSelectedTimer = null }
         } catch { /* ignore */ }
-        if (tries >= 10 && ensureSelectedTimer) { clearInterval(ensureSelectedTimer); ensureSelectedTimer = null }
-      }, 200)
+        if (tries >= 14 && ensureSelectedTimer) { clearInterval(ensureSelectedTimer); ensureSelectedTimer = null }
+      }
+      tick()                                    // 先立刻补一次（0ms 窗口）
+      ensureSelectedTimer = setInterval(tick, 120)
       try { ensureSelectedTimer.unref && ensureSelectedTimer.unref() } catch { /* ignore */ }
     }
 
