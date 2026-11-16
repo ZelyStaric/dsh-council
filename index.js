@@ -1437,7 +1437,9 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
     ? ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
     : ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions']
   if (model) args.push('--model', claudeCliModel(model))
-  if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
+  // noTools（审核位 / 只派活的指挥）：禁掉**写**类与外壳命令，但保留只读三件套 Read/Grep/Glob，
+  // 这样指挥能读文件了解项目，又不会自己动手改东西（2026-11-17 用户要求）。
+  if (noTools) args.push('--disallowedTools', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   // 默认不带 MCP：member 的 MCP 越多，启动越慢（实测两个 Blender MCP 会让首轮卡几分钟）
   // 成员指定了 mcpServers 白名单时，用内联 JSON 只挂这些（2026-11-16）。
   // 注意：这里用的是**内联** --mcp-config，说明这套 SDK bundle 支持该参数（已实测）。
@@ -3443,7 +3445,17 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   //   ② 页面开了复用才把子会话写回，避免留下指向已释放子会话的死 convId；
   //   ③ 保留下来时按 work 登记（清扫器只在「指挥不指向它」时回收）。
   const reuseChildren = Boolean((state.config && state.config.reuseAgents) || (config && config.reuseAgents))
-  const commanderOpts = { convId: commander.convId, __preset: 'minimal', __noTools: true, __residentKind: 'work' }
+  // 指挥的 MCP 跟随「大脑权限」（2026-11-17 用户口径）：
+  //   只派活（closed）→ 零 MCP：它不需要 blender/浏览器这类外部能力，只靠只读工具了解项目；
+  //   可动手（open）  → 不限制（undefined = 用该框架的全局配置）。
+  const brainOpen = String((state.config && state.config.brainPermissions) || 'closed') === 'open'
+  const commanderOpts = {
+    convId: commander.convId,
+    __preset: 'minimal',
+    __noTools: true,
+    __residentKind: 'work',
+    mcpServers: brainOpen ? undefined : [],
+  }
   const planned = await runKind(ctx, Object.assign({}, commander, commanderOpts), prompt + cdigest, config, group, undefined, parent, undefined, callId)
   if (planned && planned.convId && reuseChildren) { commander.convId = planned.convId; save().catch(() => {}) }
   const plan = parsePlan(planned.text)
