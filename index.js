@@ -1666,7 +1666,8 @@ function chatMessagesFromLog(sessionId) {
       const blocks = isUser ? (data.content || []) : ((data.message && data.message.content) || [])
       if (isUser && data.source && data.source.kind && data.source.kind !== 'user') continue
       const text2 = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
-      if (!text2) continue
+      // 插件自己注入的「后台派活完成」通知也会落成 user/message，别把它当成用户说的话
+      if (!text2 || text2.startsWith('[后台派活完成]')) continue
       msgs.push({ role: isUser ? 'user' : 'assistant', text: text2, at: Number(ev.time) || 0 })
     }
     chatLogCache.set(id, { stamp, msgs })
@@ -1709,7 +1710,7 @@ function sessionChatMessages(sessionId) {
       //   source.kind === 'time-context' / 'system' 之类一律跳过；没有 source 视为用户输入
       if (isUser && data.source && data.source.kind && data.source.kind !== 'user') continue
       const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
-      if (!text) continue
+      if (!text || text.startsWith('[后台派活完成]')) continue
       out.push({ role: isUser ? 'user' : 'assistant', text, at: Number(ev.time) || 0 })
     }
     if (out.length) return out
