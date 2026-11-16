@@ -2278,6 +2278,13 @@ async function autoResumeInterruptedTurns() {
     let resumed = 0
     for (const cand of candidates) {
       const sid = cand.sid
+      // 2026-11-16 用户要求：**只对单人会话生效**。
+      // 绑定了小组的会话不自动续——小组模式下自动注入消息会跟派活/审核流程打架
+      // （可能出现「刚重启又自动派了一次活」这种怪事）。
+      if (groupForSession(state, sid) || groupForSession(state, 'session-' + sid)) {
+        resumeLog('skip: 小组会话不自动续 sid=' + sid)
+        continue
+      }
       try {
         const dir = cand.dir
         const file = path.join(dir, 'session.v4.jsonl.zstd')
