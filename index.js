@@ -7139,8 +7139,13 @@ function makeDelegateTool(ctx, config, group) {
           if (dpSid && groupForSession(state, dpSid) && assignments.length && !response.__planPushed) {
             const dpEntry = teamSessionState(dpSid)
             const names = assignments.map((a) => String((a && a.member) || '成员'))
-            const label = directMode ? '直派（不经审核）' : '直接派给'
-            teamPushMessage(dpEntry, 'assistant', label + ' **' + names.join('、') + '**' + (directMode ? '' : '（未经指挥拆解）'), { plan: true })
+            // 2026-11-16 用户要求：直派要显式打「直派」标签，别跟「指挥拆解」混在一起
+            const head = directMode ? '**直派**（跳过指挥与审核）→ ' : '**直派**（未经指挥拆解）→ '
+            teamPushMessage(dpEntry, 'assistant', head + '**' + names.join('、') + '**', {
+              plan: true,
+              direct: true,
+              bypassReview: directMode === true,
+            })
             response.__planPushed = true
           }
         } catch { /* 推送失败不影响派活 */ }

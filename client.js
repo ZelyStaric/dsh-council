@@ -2009,9 +2009,11 @@ window.__ModuleLoader__.load({
         const isMember = m.role === 'member'
         const kind = isMember ? (m.kind || 'deepseek') : brainKind
         const who = isUser ? '你' : (isMember ? (m.name || '成员') : '指挥')
+        // 派单那一行：直派 / 指挥拆解 用不同标签（2026-11-16 用户要求区分）
+        const planTag = m.plan ? (m.direct ? '直派' : '指挥拆解') : null
         const sub = isMember
           ? [m.name || '成员', m.kind, m.model].filter(Boolean).join(' · ')
-          : (isUser ? '你' : '指挥 · ' + (model || (team && team.model) || ''))
+          : (isUser ? '你' : (planTag ? planTag + ' · ' + (m.name || '指挥') : '指挥 · ' + (model || (team && team.model) || '')))
         const verdictLine = isMember && (m.reviewOk !== null || m.commanderOk !== null)
           ? [
             m.reviewOk === true ? '审校：通过' : m.reviewOk === false ? '审校：不通过' : null,
