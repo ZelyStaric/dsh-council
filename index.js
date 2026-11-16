@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
@@ -2244,7 +2244,13 @@ function scanInterruptedTurns() {
   return out
 }
 
+/** 自动续上的调试日志（写文件，因为 console 在 systemd 下不一定进 journal）。 */
+function resumeLog(msg) {
+  try { appendFileSync('/tmp/council-resume.log', new Date().toISOString() + ' ' + msg + '\n') } catch { /* ignore */ }
+}
+
 async function autoResumeInterruptedTurns() {
+  resumeLog('=== boot scan start ===')
   try {
     if (state.config && state.config.autoResume === false) return 0
     const agents = ctx0 && typeof ctx0.get === 'function' ? ctx0.get('agents') : undefined
@@ -2294,12 +2300,14 @@ async function autoResumeInterruptedTurns() {
         if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
         const agent = agents.get(sid) || agents.get('session-' + sid)
         const inbox = agent && agent.inbox
+        resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function'))
         if (!inbox || typeof inbox.followup !== 'function') continue
         inbox.followup({
           content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
           source: { kind: 'user' },
         })
         resumed += 1
+        resumeLog('resumed ' + sid)
         console.error('[council] 自动续上被中断的会话:', sid)
       } catch { /* 单个会话失败不影响其它 */ }
     }
