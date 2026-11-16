@@ -1730,6 +1730,22 @@ window.__ModuleLoader__.load({
       const jumpBtnRef = useRef(null)
       // 首次进入团队 tab 是否已经滚到底
       const didInitScrollRef = useRef(false)
+      // 切到团队 tab 时组件不会重新挂载，effect 的依赖也不会变 —— 用轮询探测
+      // 「scroller 现在可见了、还停在顶部」这个状态，然后一次性滚到底（300ms × 12 次）。
+      useEffect(() => {
+        let tries = 0
+        const timer = setInterval(() => {
+          tries += 1
+          const node = scrollerRef.current
+          if (node && node.clientHeight > 0 && node.scrollHeight > node.clientHeight + 20) {
+            if (node.scrollTop < 10) node.scrollTop = node.scrollHeight
+            clearInterval(timer)
+            return
+          }
+          if (tries > 12) clearInterval(timer)
+        }, 300)
+        return () => clearInterval(timer)
+      }, [sessionId])
       useEffect(() => {
         const node = scrollerRef.current
         if (!node || typeof node.addEventListener !== 'function') return undefined
