@@ -3450,7 +3450,7 @@ function acceptanceBlockedLine(rounds) {
  * **终态（完成 / 失败（原因）/ 已停止 / 静默超时）由 callMemberImpl 的每条 return 路径写**，
  * 这里补的是「审核 / 子会话直接抛错」那条路径——否则进度条会永远停在中途阶段。
  */
-async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
+async function callMember(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink, options) {
   if (callId && member && member.id) memberStopController(callId, member.id)
   // 登记「正在跑」的成员：插话时找不到 steerTargets 也能按 convId 直接续聊它。
   // convId 只有子会话建好后才知道，从 childSink.add 回填（包一层，不挡原调用）。
@@ -3470,7 +3470,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
     }
   }
   try {
-    return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink)
+    return await callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink, options)
   } catch (error) {
     finishMemberStage(callId, member, onStage, '失败（内部错误：' + (shortStageText(error?.message) || '未知错误') + '）')
     throw error
@@ -3480,7 +3480,7 @@ async function callMember(ctx, member, task, config, group, styleOverride, paren
   }
 }
 
-async function callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink) {
+async function callMemberImpl(ctx, member, task, config, group, styleOverride, parent, brief, onStage, onWork, callId, childSink, options) {
   const role = roleOf(member)
   // 回执要写「实际用的 provider + model」：deepseek 成员按小组默认解析（relay），
   // 成员自己显式配的 provider/model 优先；旧模型名由 deepseekMemberModel 映射。
@@ -3542,8 +3542,11 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   }
   const review = { self: null, commander: null, attempts: 1 }
   const verdictOf = (v) => (v ? (v.ok === true ? 'passed' : v.ok === false ? 'rejected' : 'unverified') : null)
-  const requirePrelim = group.requirePrelim ?? true
-  const requireCommander = group.requireCommander ?? true
+  // 直派（2026-11-16 用户要求）：`direct:true` 表示「只让这个成员干活，不审」。
+  // 关掉审校/指挥终审，产出直接回给用户；回执里会标「直派（未审核）」。
+  const direct = Boolean(options && options.direct)
+  const requirePrelim = direct ? false : (group.requirePrelim ?? true)
+  const requireCommander = direct ? false : (group.requireCommander ?? true)
   const maxRework = group.maxRework ?? 1
   const hasPrelimReviewer = Boolean(memberWithRole(group, '审校'))
   const hasCommanderReviewer = Boolean(memberWithRole(group, '指挥'))
@@ -5152,6 +5155,8 @@ function mandateText(group) {
     '· 把**用户原话**放进 request（一字不改，不要改写、不要润色、不要自己补充需求）；',
     '· 不要用 assignments —— 拆解是「指挥」成员的职责，不是你的。',
     '你的工具面**只有 council_***（其余工具已被硬性禁用，调用会被拒绝并计入越权记录）。',
+    '**直派**：用户说「直接让某成员做 X」「不用审」「跳过审核/指挥」时，用 council_delegate 并带 direct:true ——',
+    '  这会跳过指挥拆解与全部审核，只要那个成员的产出。用户没这么说时，一律走正常流程（request 交给指挥）。',
     '也就是说：你不能读写文件、不能跑命令、不能写代码。想完成任务，只能派活。',
     '可以自己回答的只有两类：① 用户明确说"你自己做 / 你直接改 / 放行"（这一轮会临时放行）；',
     '② 用户在问小组本身（成员有谁、为什么失败、怎么用），这类问题直接用文字答，不必调工具。',
@@ -6544,6 +6549,7 @@ function makeDelegateTool(ctx, config, group) {
             },
           },
           bypassPlanner: { type: 'boolean', description: '默认 false。只有确需绕过指挥拆解、由主对话直派多个任务时才设 true，并在回执正文说明理由（回执会标记为绕过）。' },
+          direct: { type: 'boolean', description: '直派模式：跳过指挥拆解与全部审核（审校/指挥终审），只要这个成员的产出。用户说「让某个成员直接做 X」「不用审」时用它。' },
         },
       },
       output: {
@@ -6568,6 +6574,7 @@ function makeDelegateTool(ctx, config, group) {
             },
             plan: { type: 'object', additionalProperties: true },
             plannedBy: { type: 'string', enum: ['commander', 'parent'], description: '本次拆解由谁做的：commander=指挥成员拆解；parent=主对话直接派活（单成员单任务）。' },
+            direct: { type: 'boolean', description: 'true = 直派模式（跳过指挥拆解与全部审核）。' },
             planner: {
               type: 'object',
               description: 'plannedBy=commander 时，实际拆解的指挥成员（名字 / 框架 / 模型）。',
@@ -6696,7 +6703,11 @@ function makeDelegateTool(ctx, config, group) {
         // 拆解职责归指挥：多成员/多任务直派在派活前就拒绝（返回错误结果，不抛异常），
         // 连成员都不建，避免「先建了临时成员再回滚」的副作用。
         const directAssignments = Array.isArray(args && args.assignments) ? args.assignments : []
-        const bypassPlanner = Boolean(args && args.bypassPlanner === true)
+        // 直派（2026-11-16 用户要求）：`direct:true` = 「只让这个成员干活」——
+        // 既不让指挥拆解（隐含 bypassPlanner），也不跑审校/指挥终审，产出直接回给用户。
+        // 典型用法：用户对**持久成员**说「让代码把 X 改了」，不需要一整套验收流程。
+        const directMode = Boolean(args && args.direct === true)
+        const bypassPlanner = directMode || Boolean(args && args.bypassPlanner === true)
         if (!bypassPlanner && directAssignments.length > 1) {
           return toolResult({
             error: PLANNER_REQUIRED_ERROR,
@@ -6758,6 +6769,8 @@ function makeDelegateTool(ctx, config, group) {
           if (cmdr) response.planner = { name: cmdr.name, kind: cmdr.kind, ...(cmdr.model ? { model: cmdr.model } : {}) }
         }
         if (bypassPlanner && directAssignments.length > 1) response.bypassPlanner = true
+        // 直派模式：回执明确标出来（前端与用户都能看出「这次没走指挥/审核」）
+        if (directMode) response.direct = true
         // assignments 里直接写职位名、但本组还没人持有该职位 → 按职位默认自动补员
         const missingRoles = assignments
           .filter((a) => typeof a.member === 'string'
@@ -6851,7 +6864,7 @@ function makeDelegateTool(ctx, config, group) {
                 ? ' / ' + [work.provider, work.model].filter(Boolean).join(' / ')
                 : ''
               append('## ' + member.name + '（' + member.kind + route + '）\n' + body + (work.image ? '\n[image] ' + work.image : ''))
-            }, callId, childSessions)
+            }, callId, childSessions, { direct: directMode })
           const result = await Promise.race([memberPromise, abortPromise])
           if (result && result.acceptance === 'cancelled') console.error('[council] member cancelled at ' + Date.now() + ' member=' + member.name)
           const reviewChunks = []
