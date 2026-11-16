@@ -5099,8 +5099,10 @@ export function createHandler(ctx, config = {}) {
               persisted: Boolean(entry && entry.persisted),
               // 时间线 = 主会话的「你 / 助手」消息 + 本组记录的「成员回执」（2026-11-16 合并）
               messages: (() => {
+                // 2026-11-16 修：不能只取 member —— 指挥的「拆解回执」和「直派说明」都是
+                // role=assistant + plan:true，之前被这里过滤掉，导致前端永远看不到拆解。
                 const members = (entry ? entry.messages : [])
-                  .filter((m) => m && m.role === 'member')
+                  .filter((m) => m && (m.role === 'member' || (m.role === 'assistant' && m.plan)))
                   .map((m) => Object.assign({}, m))
                 // 直接读日志（chatMessagesFromLog 已按 mtime+size 缓存）：不依赖 agent 是否被加载。
                 const chat = sessionChatMessages(sessionId).length ? sessionChatMessages(sessionId) : chatMessagesFromLog(sessionId)
