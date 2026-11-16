@@ -5027,14 +5027,16 @@ function healProgress(now = Date.now(), config) {
 /** Human/roster text injected into a bound chat session's system prompt. */
 function mandateText(group) {
   return [
-    '【小组模式约束】',
-    '本会话已开启「小组模式」。凡是用户提出的任务类请求（写代码、改文件、跑命令、出图、做音乐、建模、调研等），必须用 council_delegate 工具派给成员完成。',
-    '你自己不得编写实现代码、不得直接修改文件或执行构建命令来完成任务（只能读取、检查、验收）。',
-    '例外只有三种：① 用户明确说"你自己做"或"你直接改"；② 只是回答关于小组本身的问题（怎么用、成员有谁、为什么失败）；③ 需要检查文件/日志/状态来验收或排障（只读操作）。',
-    '若你发现自己在写代码或跑构建命令，立即停下，改用 council_delegate 派给成员。',
-    '拆解职责属于「指挥」成员：超过 1 个成员、或需要多步拆分的任务，必须用 request 交给指挥拆；assignments 直派只用于单成员单任务的简单转派。主对话只负责验收、汇报与插话。',
+    '【小组模式约束：你只是传话器】',
+    '本会话处于小组模式。你的**唯一职责**是把用户的话原样转给指挥，**不要自己回答、不要自己拆解、不要自己动手**。',
+    '收到用户消息后，立即调用 council_delegate：',
+    '· 把**用户原话**放进 request（一字不改，不要改写、不要润色、不要自己补充需求）；',
+    '· 不要用 assignments —— 拆解是「指挥」成员的职责，不是你的。',
+    '你的工具面**只有 council_***（其余工具已被硬性禁用，调用会被拒绝并计入越权记录）。',
+    '也就是说：你不能读写文件、不能跑命令、不能写代码。想完成任务，只能派活。',
+    '可以自己回答的只有两类：① 用户明确说"你自己做 / 你直接改 / 放行"（这一轮会临时放行）；',
+    '② 用户在问小组本身（成员有谁、为什么失败、怎么用），这类问题直接用文字答，不必调工具。',
     '『验收未通过』≠ 交付：若 council_delegate 回执标了未通过验收，禁止把它当成果汇报给用户；要么继续派返工（最多 maxRework 次），要么明确告诉用户哪里没过。',
-    '违反这条 = 任务失败。',
   ].join('\n')
 }
 
@@ -5057,7 +5059,7 @@ const WRITE_TOOLS = new Set([
 const SELF_WORK_ESCAPE = /你自己做|你直接改|你亲自动手|放行/
 
 /** 拒绝理由：与 mandateText 的措辞一致，并给出两条逃生路径。 */
-const SELF_WORK_DENY_REASON = '小组模式：不要自己执行写操作。用 council_delegate 派给成员；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。'
+const SELF_WORK_DENY_REASON = '小组模式：父会话只能派活。用 council_delegate 把任务交给成员/指挥；确需亲自动手请用户说“你自己做”，或把 config.strictDelegate 设为 false。'
 
 /**
  * 拆解职责归指挥：多成员/多任务只走 request 让指挥拆解，assignments 直派限单成员单任务。
@@ -5223,29 +5225,19 @@ function makeSelfWorkGuard(group, config) {
     if (normalizeSessionId(execution.agent.id) !== normalizeSessionId(live.sessionId)) return undefined
     if (!strictDelegateEnabled(config)) return undefined
     const name = String(execution.name || '')
-    // 以下三类只计入审计、不拦截（否则连只读排障都做不了）：
-    //   bash → selfRan.bash；read_image → selfRan.readImage；grep/glob/read/read_file → selfRan.read
-    if (name === 'bash') {
-      const audit = selfWorkAuditFor(groupId)
-      audit.bash += 1
-      audit.lastAt = Date.now()
-      return undefined
-    }
-    if (name === 'read_image') {
-      const audit = selfWorkAuditFor(groupId)
-      audit.readImage += 1
-      audit.lastAt = Date.now()
-      return undefined
-    }
-    if (READ_TOOLS.has(name)) {
-      const audit = selfWorkAuditFor(groupId)
-      audit.read += 1
-      audit.lastAt = Date.now()
-      return undefined
-    }
-    if (!WRITE_TOOLS.has(name)) return undefined
-    // 用户本轮已明确放行 → 不拦
+
+    // 用户本轮已明确放行（说了「你自己做」等）→ 全放行
     if (noteSelfWorkPermit(live, execution.agent).allowed) return undefined
+
+    // ── v0.5 白名单（2026-11-16 用户要求）────────────────────────────
+    // 小组模式下父会话**只能派活**：除 council_* 之外的一切工具都拒绝。
+    // 之前是「黑名单」：只拦 8 个写工具、bash/read 全放行 —— 等于在门口贴了张纸，
+    // 用 `cat > file` 就能绕过去。现在改成白名单：手上没有能干活的工具，
+    // 越权在结构上不可能，而不是"提示词请求它别越权"。
+    if (name.startsWith('council_')) return undefined
+
+    // 白名单下没有"放行但审计"这回事：任何非 council_* 调用都算一次越权尝试，
+    // 统一计入 blocked（selfRan 因此恒为 0，「越权审计」那节自然不再出现）。
     const audit = selfWorkAuditFor(groupId)
     audit.blocked += 1
     audit.tools[name] = (audit.tools[name] || 0) + 1
