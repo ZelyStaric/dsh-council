@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
@@ -4946,6 +4946,69 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/resume/scan') {
             // 只读诊断：哪些绑定会话有未闭合的 turn（重启后会自动续上）
             return send(res, 200, { sessions: scanInterruptedTurns() })
+          }
+          if (req.method === 'GET' && route === '/file') {
+            // 只读地把成员产出的本地文件发给前端（图片预览 / 音频播放 / 文件下载）。
+            const raw = String(url.searchParams.get('path') || '')
+            if (!raw) return send(res, 400, { error: 'file 需要 path 参数' })
+            let abs = ''
+            try { abs = path.resolve(raw) } catch { return send(res, 400, { error: 'path 非法' }) }
+            const home = path.resolve(process.env.HOME || '/home/nanami')
+            // 只允许 HOME 下面（防目录穿越 / 偷读系统文件）
+            if (abs !== home && !abs.startsWith(home + path.sep)) {
+              return send(res, 403, { error: '只允许读取 HOME 目录下的文件' })
+            }
+            if (!existsSync(abs)) return send(res, 404, { error: '文件不存在' })
+            let stat = null
+            try { stat = statSync(abs) } catch { return send(res, 500, { error: '读不到文件状态' }) }
+            if (!stat.isFile()) return send(res, 400, { error: '不是文件' })
+            const ext = path.extname(abs).toLowerCase()
+            const MIME = {
+              '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+              '.gif': 'image/gif', '.svg': 'image/svg+xml', '.bmp': 'image/bmp',
+              '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4',
+              '.flac': 'audio/flac', '.aac': 'audio/aac',
+              '.mp4': 'video/mp4', '.webm': 'video/webm',
+              '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
+              '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+              '.json': 'application/json; charset=utf-8', '.py': 'text/plain; charset=utf-8',
+              '.js': 'text/plain; charset=utf-8', '.ts': 'text/plain; charset=utf-8',
+            }
+            const type = MIME[ext] || 'application/octet-stream'
+            const total = stat.size
+            // 音频/视频要支持 Range，否则浏览器不能拖动进度条
+            const range = req.headers.range
+            if (range) {
+              const m = /^bytes=(\d*)-(\d*)$/.exec(String(range))
+              if (m) {
+                const start = m[1] ? parseInt(m[1], 10) : 0
+                const end = m[2] ? parseInt(m[2], 10) : total - 1
+                if (start >= 0 && end >= start && start < total) {
+                  res.writeHead(206, {
+                    'content-type': type,
+                    'content-length': String(end - start + 1),
+                    'content-range': 'bytes ' + start + '-' + end + '/' + total,
+                    'accept-ranges': 'bytes',
+                    'cache-control': 'private, max-age=60',
+                  })
+                  const stream = createReadStream(abs, { start, end })
+                  stream.on('error', () => { try { res.end() } catch { /* ignore */ } })
+                  return stream.pipe(res)
+                }
+              }
+            }
+            res.writeHead(200, {
+              'content-type': type,
+              'content-length': String(total),
+              'accept-ranges': 'bytes',
+              'cache-control': 'private, max-age=60',
+            })
+            // 图片/音频直接流；其它（glb/zip）当附件下载
+            const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
+            if (!inline) res.setHeader('content-disposition', 'attachment; filename="' + path.basename(abs).replace(/"/g, '') + '"')
+            const stream = createReadStream(abs)
+            stream.on('error', () => { try { res.end() } catch { /* ignore */ } })
+            return stream.pipe(res)
           }
           if (req.method === 'GET' && route === '/mcp/list') {
             // 只读：各框架当前配置的 MCP server 清单（成员卡的选择器用）

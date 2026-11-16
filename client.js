@@ -1697,6 +1697,42 @@ window.__ModuleLoader__.load({
       }, entry.stoppedAt ? '取消中…' : '停止'))
     }
 
+    /** 本地绝对路径 → 插件文件端点 URL（只读、限制在 HOME 下）。 */
+    function fileUrl(abs) {
+      return '/council/api/file?path=' + encodeURIComponent(String(abs || ''))
+    }
+
+    /** 这个路径是什么媒体类型（用于决定 <img> / <audio> / 链接）。 */
+    function mediaKindOf(abs) {
+      const p = String(abs || '').toLowerCase()
+      if (/\.(png|jpe?g|webp|gif|svg|bmp)$/.test(p)) return 'image'
+      if (/\.(mp3|wav|ogg|m4a|flac|aac)$/.test(p)) return 'audio'
+      if (/\.(mp4|webm)$/.test(p)) return 'video'
+      return 'file'
+    }
+
+    /**
+     * 把一段回执文本切成「纯文本 / 媒体」片段，媒体片段渲染成可看图、可播放的元素。
+     * 处理的 markdown 形态：![alt](path) 和 [label](path)；path 必须是绝对本地路径。
+     */
+    function renderReceiptParts(text) {
+      const out = []
+      const re = /!?\[([^\]]*)\]\((\/[^)\s]+)\)/g
+      let last = 0
+      let m
+      let i = 0
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) out.push({ kind: 'text', text: text.slice(last, m.index) })
+        const label = m[1] || ''
+        const abs = m[2]
+        const media = mediaKindOf(abs)
+        out.push({ kind: media, label, path: abs, key: 'md' + (i += 1) })
+        last = m.index + m[0].length
+      }
+      if (last < text.length) out.push({ kind: 'text', text: text.slice(last) })
+      return out.length ? out : [{ kind: 'text', text }]
+    }
+
     /**
      * 把成员/审校的**机器回执**变成人话（2026-11-16 用户要求：不要显示 {"passed":true,...}）。
      *
@@ -2003,12 +2039,50 @@ window.__ModuleLoader__.load({
             const textStyle = { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
             // 长回执：前面给 260 字预览，后面用原生 <details> 展开全文。
             // 之前用 useState 控制折叠，DSH 的 hooks 桩不可靠 → 点了没反应（2026-11-16 用户反馈）。
-            if (!long) return h('div', { style: textStyle }, full)
+            const parts = renderReceiptParts(full)
+            const renderParts = (list, prefix) => list.map((p, idx) => {
+              if (p.kind === 'text') return h('span', { key: prefix + 't' + idx, style: textStyle }, p.text)
+              const url = fileUrl(p.path)
+              if (p.kind === 'image') {
+                return h('img', {
+                  key: prefix + 'i' + idx,
+                  src: url,
+                  alt: p.label || '产出图片',
+                  title: '点击查看大图：' + p.path,
+                  onClick: () => { try { window.open(url, '_blank') } catch { /* ignore */ } },
+                  style: { display: 'block', maxWidth: 360, maxHeight: 240, marginTop: 6, borderRadius: 8, cursor: 'zoom-in', border: '1px solid var(--dsw-alias-border-l1)' },
+                })
+              }
+              if (p.kind === 'audio') {
+                return h('audio', {
+                  key: prefix + 'a' + idx,
+                  controls: true,
+                  src: url,
+                  style: { display: 'block', width: '100%', marginTop: 6 },
+                })
+              }
+              if (p.kind === 'video') {
+                return h('video', {
+                  key: prefix + 'v' + idx,
+                  controls: true,
+                  src: url,
+                  style: { display: 'block', maxWidth: 420, marginTop: 6, borderRadius: 8 },
+                })
+              }
+              return h('a', {
+                key: prefix + 'f' + idx,
+                href: url,
+                target: '_blank',
+                rel: 'noreferrer',
+                style: Object.assign({}, styles.linkButton, { fontSize: 12 }),
+              }, (p.label || p.path.split('/').pop()) + ' ↗')
+            })
+            if (!long) return h('div', null, renderParts(parts, 'a'))
             return h('div', null,
               h('div', { style: textStyle }, full.slice(0, 260) + '…'),
               h('details', { style: { marginTop: 4 } },
                 h('summary', { style: Object.assign({}, styles.linkButton, { fontSize: 11, cursor: 'pointer', opacity: 0.75 }) }, '展开全部'),
-                h('div', { style: Object.assign({}, textStyle, { marginTop: 6, opacity: 0.95 }) }, full)))
+                h('div', { style: Object.assign({}, textStyle, { marginTop: 6, opacity: 0.95 }) }, renderParts(parts, 'b'))))
           })(),
           m.image ? h('img', {
             src: m.image, alt: 'member output',
