@@ -1783,6 +1783,40 @@ window.__ModuleLoader__.load({
     }
 
 
+    /**
+     * 已知「绑定了小组」的会话 id 集合（2026-11-16）。
+     *
+     * 用途：单人会话切过来时，**团队视图要直接不渲染**——只藏 tab 不够，
+     * 因为 DSH 会先把内容画出来（用户看到「折叠列表展开又消失」的那 1 秒就是这个）。
+     * `null` 表示还没加载过 state（未知），此时不拦截，避免刚开始把小组会话也挡掉。
+     */
+    var groupSessionSet = null   // var：声明在组件之后，let 会 TDZ（2026-11-16 第四次踩）
+
+    /** 从 /state 的返回里刷新集合。 */
+    function refreshGroupSessionSet(stateLike) {
+      try {
+        const groups = (stateLike && stateLike.groups) || []
+        const next = new Set()
+        for (const g of groups) {
+          if (g && g.sessionId && !g.archived) next.add(String(g.sessionId))
+        }
+        groupSessionSet = next
+      } catch { /* ignore */ }
+    }
+
+    /** 这个会话有没有小组？unknown 返回 null（表示还不知道）。 */
+    function sessionHasGroup(sessionId) {
+      if (!groupSessionSet) return null
+      if (!sessionId) return null
+      const sid = String(sessionId)
+      if (groupSessionSet.has(sid)) return true
+      const bare = sid.replace(/^session-/, '')
+      if (groupSessionSet.has(bare)) return true
+      // 反向：集合里存的是带前缀的，传入的是裸 id
+      if (groupSessionSet.has('session-' + bare)) return true
+      return false
+    }
+
     /* ── 团队群聊（v0.4 P2）：微信式时间线 ─────────────────────────────
      * 用户 / 指挥 / 成员回执混在一条时间线里：用户靠右，其余靠左带头像。
      * 数据来自 `/team/state.messages`：
@@ -1793,6 +1827,10 @@ window.__ModuleLoader__.load({
      */
     function CouncilChatView(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      // 单人会话（明确知道没绑小组）→ **不渲染团队内容**。
+      // 只藏 tab 不够：DSH 会先画内容，用户能看到 1 秒的「折叠列表」再消失。
+      const hasGroup = sessionHasGroup(sessionId)
+      if (hasGroup === false) return null
       const [team, setTeam] = useState(null)
       const [providers, setProviders] = useState(null)
       const [model, setModel] = useState('')
@@ -1847,7 +1885,14 @@ window.__ModuleLoader__.load({
       const refreshTeam = () => {
         if (!sessionId) return
         call('/team/state?sessionId=' + encodeURIComponent(sessionId))
-          .then((d) => { setTeam(d); if (d && d.model) setModel(d.model) })
+          .then((d) => {
+            setTeam(d)
+            if (d && d.model) setModel(d.model)
+            // 能拉到 → 这个会话确实有小组，补进集合
+            if (groupSessionSet && !groupSessionSet.has(String(sessionId))) {
+              groupSessionSet.add(String(sessionId))
+            }
+          })
           .catch(() => { /* 未绑定小组时 400，忽略 */ })
       }
 
