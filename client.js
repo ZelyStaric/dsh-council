@@ -1472,6 +1472,9 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        // 插件一启动就预取「哪些会话有小组」：团队视图的「单人会话不渲染」判断依赖它。
+        // 否则首次进入某个单人会话时集合还是 null（未知），会先渲染一次团队内容。
+        try { call('/state').then((d) => refreshGroupSessionSet(d && d.state)).catch(() => {}) } catch { /* ignore */ }
         try {
           registerAll(ctx)
         } catch (error) {
