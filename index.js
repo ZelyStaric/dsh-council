@@ -3085,7 +3085,7 @@ function looksLikeGreeting(text) {
 }
 
 /** 审核重试用语：明确要求只回 JSON（全新会话里没有历史上下文，必须自带指令）。 */
-const REVIEW_JSON_NOTE = '\n\n注意：只输出 JSON，不要任何解释或前后缀。'
+const REVIEW_JSON_NOTE = '\n\n【输出格式·必须遵守】\n- 你的整条回复必须**只有一个 JSON 对象**，不要代码块围栏、不要前后缀、不要解释。\n- 允许的字段仅限任务里列出的那几个；不要添加 note/summary 之类的额外字段。\n- 如果你做了核验，把核验结论压进 reason（80 字内），不要把核验过程写出来。'
 /** 审核输出无法解析时的兜底理由（不再产出「未判定」）。 */
 const REVIEW_UNPARSED_REASON = '审核输出无法解析（已重试）'
 
@@ -3134,7 +3134,20 @@ function appendPromptText(prompt, extra) {
 
 async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, label) {
   const clean = () => Object.assign({}, member, { convId: undefined, __noResume: true })
-  let result = await runKind(ctx, clean(), prompt, config, group, styleOverride, parent, timeoutMs, callId)
+  // ── 硬超时（2026-11-16 修）──
+  // 实测审校卡了 346 秒：它 120 秒的预算只是往下传，seam 那条路没有真正设 timer，
+  // 于是「子会话已结束但解析失败 → 重试 → 挂住」会无限等。这里在**外层**兜一道，
+  // 到点直接当作「未判定」，保证审核链一定往前走。
+  const hardLimit = (Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000) + 45_000
+  const withHardLimit = (promise) => {
+    let timer = null
+    const guard = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, text: '', error: '审核超时（' + Math.round(hardLimit / 1000) + 's，已放弃）' }), hardLimit)
+      try { timer.unref && timer.unref() } catch { /* ignore */ }
+    })
+    return Promise.race([promise, guard]).finally(() => { if (timer) clearTimeout(timer) })
+  }
+  let result = await withHardLimit(runKind(ctx, clean(), prompt, config, group, styleOverride, parent, timeoutMs, callId))
   let raw = String(result && result.text || '')
   let parsed = verdictOf(raw)
   let retried = false
@@ -3143,7 +3156,7 @@ async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, 
     const why = looksLikeGreeting(raw) ? '疑似问候/空炮（旧会话不答题）' : '输出无法解析'
     retried = true
     console.error('[council] ' + label + ' ' + why + '，换新会话（无 resume）重试 · 首次原文=' + reviewRawSnippet(raw))
-    result = await runKind(ctx, clean(), appendPromptText(prompt, REVIEW_JSON_NOTE), config, group, styleOverride, parent, timeoutMs, callId)
+    result = await withHardLimit(runKind(ctx, clean(), appendPromptText(prompt, REVIEW_JSON_NOTE), config, group, styleOverride, parent, timeoutMs, callId))
     raw = String(result && result.text || '')
     parsed = verdictOf(raw)
     console.error('[council] ' + label + ' 重试' + (parsed ? '成功' : '仍失败') + ' · 重试原文=' + reviewRawSnippet(raw))

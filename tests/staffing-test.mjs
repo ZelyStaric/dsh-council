@@ -3508,7 +3508,8 @@ try {
         assert.equal(call.convId, undefined, '审核调用不得带 convId（不续接历史）')
         assert.equal(call.noResume, true, '审核调用必须带 __noResume（runClaude 不追加 --resume）')
       }
-      assert.ok(calls[1].prompt.includes('只输出 JSON'), '重试 prompt 必须明确要求只输出 JSON')
+      // 2026-11-16：提示词改成「输出格式·必须遵守」块，断言按新措辞检查
+      assert.ok(calls[1].prompt.includes('只有一个 JSON 对象') || calls[1].prompt.includes('只输出 JSON'), '重试 prompt 必须明确要求只输出 JSON')
       return '问候 → 1 次重试 → 按第二次 JSON 判（' + verdict.reason + '）'
     } finally {
       mod.__setRunKind(undefined)
