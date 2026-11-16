@@ -1609,6 +1609,36 @@ async function runImage(member, prompt, config, options = {}) {
 }
 
 /** Read a session's committed events through whichever reader this build exposes. */
+/**
+ * 读主会话里「用户 / 助手」的文本消息（团队页要把它和成员回执合并成一条时间线）。
+ *
+ * 2026-11-16 起小组模式**只用原生对话框**：用户的话进主会话 → 主会话（白名单里只能调
+ * council_delegate）转给指挥 → 成员回执进 teamSessions。所以团队页要同时展示两边：
+ * 主会话的 user/assistant（对话）+ teamSessions 的 member（回执）。
+ */
+function sessionChatMessages(sessionId) {
+  try {
+    const agents = ctx0 && typeof ctx0.get === 'function' ? ctx0.get('agents') : undefined
+    if (!agents || typeof agents.get !== 'function' || !sessionId) return []
+    const id = String(sessionId)
+    let agent = agents.get(id)
+    if (!agent && !id.startsWith('session-')) agent = agents.get('session-' + id)
+    const session = agent && agent.session
+    if (!session) return []
+    const out = []
+    for (const ev of sessionEvents(session)) {
+      if (!ev || (ev.type !== 'user/message' && ev.type !== 'assistant/message')) continue
+      const blocks = (ev.data && ev.data.message && ev.data.message.content) || []
+      const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
+      if (!text) continue
+      out.push({ role: ev.type === 'user/message' ? 'user' : 'assistant', text, at: Number(ev.time) || 0 })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 function sessionEvents(session) {
   try {
     if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
@@ -4787,8 +4817,14 @@ export function createHandler(ctx, config = {}) {
               runIds: running.map((slot) => slot.runId),
               // 会话日志写入成功过 → true；否则只是插件内存态（重启即失效）
               persisted: Boolean(entry && entry.persisted),
-              // 全字段带出：成员回执要 name/kind/model/image/acceptance/reviewOk… 才能渲染成群聊气泡
-              messages: (entry ? entry.messages : []).map((m) => Object.assign({}, m)),
+              // 时间线 = 主会话的「你 / 助手」消息 + 本组记录的「成员回执」（2026-11-16 合并）
+              messages: (() => {
+                const members = (entry ? entry.messages : [])
+                  .filter((m) => m && m.role === 'member')
+                  .map((m) => Object.assign({}, m))
+                const chat = sessionChatMessages(sessionId)
+                return chat.concat(members).sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0))
+              })(),
             })
           }
           // v0.4：选择本会话的「指挥大脑」模型（持久化到组上，重启不丢）
