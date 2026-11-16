@@ -4579,6 +4579,8 @@ export function createHandler(ctx, config = {}) {
               if (body.maxRework !== undefined) group.maxRework = Math.max(0, Math.floor(body.maxRework))
               if (body.requirePrelim !== undefined) group.requirePrelim = Boolean(body.requirePrelim)
               if (body.requireCommander !== undefined) group.requireCommander = Boolean(body.requireCommander)
+              // 审核链的两级开关（2026-11-16）：成员自审 / 初审快筛
+              if (body.selfReview !== undefined) group.selfReview = Boolean(body.selfReview)
               if (body.autoPrune !== undefined) group.autoPrune = Boolean(body.autoPrune)
               if (body.standard !== undefined) group.standard = String(body.standard)
               if (body.commanderPrompt !== undefined) group.commanderPrompt = String(body.commanderPrompt)

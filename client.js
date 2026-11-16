@@ -586,6 +586,11 @@ window.__ModuleLoader__.load({
        */
       function teamOptionsPanel() {
         const cur = apiConfig || {}
+        // 审核链的两级开关存在**组**上（每个小组可以不一样）
+        const saveGroupFlag = (patch) => {
+          if (!group || !group.id) return
+          mutate('/groups/policy', Object.assign({ id: group.id }, patch)).then(refresh)
+        }
         const saveTeam = (patch) => {
           setBusy('teamopt')
           call('/config', patch)
@@ -626,6 +631,13 @@ window.__ModuleLoader__.load({
           row('严格审核',
             '任一审核方不通过即强制不通过；关掉则冲突时以指挥为准',
             check(cur.strictReview !== false, (v) => saveTeam({ strictReview: v }))),
+          // 2026-11-16 用户要求：审核链的两级开关放在这里（串行链：自审 → 初审 → 指挥终审）
+          row('成员自审',
+            '成员交付前先自查一遍产出与要求是否一致（可选，多花一次调用）',
+            check(group && group.selfReview === true, (v) => saveGroupFlag({ selfReview: v }))),
+          row('初审',
+            '先用便宜模型快筛：偏差太大直接打回重做，不再浪费指挥审核',
+            check(!(group && group.requirePrelim === false), (v) => saveGroupFlag({ requirePrelim: v }))),
           row('大脑权限',
             mode === 'open'
               ? '开放：大脑可以自己动手（跑命令 / 改文件）'
@@ -1713,6 +1725,8 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = useState(null)
       // 长回执的展开状态（key → true 表示已展开）
       const [expandedSet, setExpandedSet] = useState({})
+      // 是否贴在时间线底部（决定要不要显示「跳到最新」）
+      const [atBottom, setAtBottom] = useState(true)
 
       const refreshTeam = () => {
         if (!sessionId) return
@@ -1931,6 +1945,13 @@ window.__ModuleLoader__.load({
       h('div', {
         ref: (node) => { scrollerRef.current = node },
         'data-council-scroller': '1',
+        // 是否贴底：不贴底才显示「跳到最新」按钮（2026-11-16 用户要求加）
+        onScroll: (event) => {
+          const node = event.currentTarget
+          if (!node) return
+          const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80
+          if (nearBottom !== atBottom) setAtBottom(nearBottom)
+        },
         style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', paddingRight: 4 },
       },
       messages.length || streamText
@@ -1977,6 +1998,27 @@ window.__ModuleLoader__.load({
               ? '用底部对话框说话，指挥会拆解后派给成员。'
               : '点右上角胶囊切到「小组」即可开始。'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
+      // 「跳到最新」：只在没贴底时出现；点击**平滑滚动**（不是瞬移）
+      !atBottom && (messages.length || streamText)
+        ? h('div', {
+          key: 'jump-latest',
+          title: '跳到最新消息',
+          onClick: () => {
+            const node = scrollerRef.current
+            if (!node) return
+            try { node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' }) } catch { node.scrollTop = node.scrollHeight }
+            setAtBottom(true)
+          },
+          style: {
+            position: 'absolute', right: 18, bottom: 64, zIndex: 5,
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '5px 12px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
+            background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-1)',
+            boxShadow: '0 2px 10px rgba(0,0,0,.28)',
+            transition: 'opacity .15s ease, transform .15s ease',
+            opacity: 0.94,
+          },
+        }, '↓ 最新') : null,
       /* 不再有独立输入框：小组模式下**直接用原生对话框**（对话页底部那个），
        * 主会话只负责把用户原话转给指挥。这里只留一句说明 + 停止按钮。 */
       h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto', flexWrap: 'wrap' } },
