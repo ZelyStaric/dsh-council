@@ -2265,10 +2265,8 @@ window.__ModuleLoader__.load({
       },
       /* 工具栏 */
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: '0 0 auto' } },
-        h('strong', null, '团队'),
-        h('span', { style: styles.muted, fontSize: 12 }, messages.length + ' 条消息'),
-        h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
-          '指挥模型在「小组」页的成员卡上改'),
+        // 2026-11-17 用户要求：删掉「团队 / N 条消息 / 指挥模型在小组页改」这两行，
+        // 只保留运行时的「停止」按钮（没有就在右侧留白）
         h('span', { style: { flex: 1 } }),
         running ? h(Button, { onClick: stop }, '停止') : null),
       /* 时间线 */
