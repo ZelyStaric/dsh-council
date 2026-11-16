@@ -730,19 +730,19 @@ window.__ModuleLoader__.load({
         // 「清理 7 天前归档」「清理子智能体」已移除（2026-11-16 用户要求精简小组页）
         h('span', { style: { flex: 1 } }))
 
-      // 职位侧栏的 DOM 引用 + 折叠开关（纯 DOM，不依赖 React state）
-      const rolesPanelRef = { current: null }
+      // 职位侧栏的折叠开关：**不用 ref / state**（DSH 里两者都不可靠），
+      // 靠 data 属性在 DOM 里找节点直接改 display（2026-11-16）。
       const toggleRoles = () => {
-        const node = rolesPanelRef.current
+        const node = document.querySelector('[data-council-roles]')
         if (!node) return
         const hidden = node.style.display === 'none'
         node.style.display = hidden ? '' : 'none'
-        if (rolesToggleRef.current) rolesToggleRef.current.textContent = hidden ? '◀' : '▶'
+        const handle = document.querySelector('[data-council-roles-handle]')
+        if (handle) handle.textContent = hidden ? '◀' : '▶'
       }
-      const rolesToggleRef = { current: null }
 
       const rolesPanel = h('div', {
-        ref: (node) => { rolesPanelRef.current = node },
+        'data-council-roles': '1',
         style: styles.roles,
       },
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 4 }) }, '职位（把成员拖到职位上完成分配）'),
@@ -813,7 +813,7 @@ window.__ModuleLoader__.load({
               borderRight: '1px solid var(--dsw-alias-border-l1)',
               color: 'var(--dsw-alias-label-secondary)', fontSize: 10,
             },
-          }, h('span', { ref: (node) => { rolesToggleRef.current = node } }, '◀')),
+          }, h('span', { 'data-council-roles-handle': '1' }, '◀')),
           rolesPanel, board, teamOptionsPanel()))
     }
 
