@@ -1952,7 +1952,10 @@ window.__ModuleLoader__.load({
           const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80
           if (nearBottom !== atBottom) setAtBottom(nearBottom)
         },
-        style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', paddingRight: 4 },
+        // ⚠️ 必须给一个真实的高度上限：DSH 的 view 容器不是完整的 flex 链，
+        // 只写 flex:1 会让这个列表被内容撑开（实测 scrollHeight===clientHeight=3738，
+        // 根本没有内部滚动条 → 「跳到最新」无处可跳）。
+        style: { flex: '1 1 auto', minHeight: 0, maxHeight: 'calc(100vh - 230px)', overflowY: 'auto', display: 'flex', flexDirection: 'column', paddingRight: 4 },
       },
       messages.length || streamText
         ? messages.map((m, i) => bubble(m, 'm' + i)).concat(
