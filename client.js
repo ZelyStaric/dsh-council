@@ -510,7 +510,10 @@ window.__ModuleLoader__.load({
           return 'codex'
         }
         // image 成员同样用真实 provider：选了 relay-image 就是它，没选才是 sentinel
-        const providerValue = member.provider || (member.kind === 'image' ? '__image__' : '')
+        // deepseek 成员没有 provider 时兜底到默认（存量成员可能是早先建的，provider 为空）
+        const providerValue = member.provider
+          || (member.kind === 'image' ? '__image__' : '')
+          || (member.kind === 'deepseek' ? ((providers || [])[0] ? ((providers || [])[0].id) : 'deepseek-official') : '')
         const providerSelect = h('select', {
           style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
@@ -530,7 +533,8 @@ window.__ModuleLoader__.load({
             mutate('/members', { id: member.id, provider: value, kind: kind, model: next })
           },
         }, [
-          h('option', { key: '__none__', value: '' }, '（未选择提供商）'),
+          // CLI 成员（claude/codex/gemini/image）本来就没有 provider，别写成「未选择」让人以为没配完
+          h('option', { key: '__none__', value: '' }, member && member.kind && member.kind !== 'deepseek' ? '（CLI，无需提供商）' : '（未选择提供商）'),
           h('option', { key: '__image__', value: '__image__' }, 'image（出图）'),
         ].concat((providers || []).map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id))))
         const roleOptions = [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
@@ -567,13 +571,7 @@ window.__ModuleLoader__.load({
           // 职位名在上一行的下拉里已经有了，这里不再重复「职位：指挥」；会话 id 对用户无意义，去掉
           h('span', null, role ? '' : '未分配职位'),
           // v0.4 P3：长久成员继承上下文（可压缩）；临时成员每轮由指挥重发上下文
-          h('span', {
-            style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
-            title: member.persistent === false
-              ? '临时成员：每轮新会话，上下文由指挥重新发'
-              : '长久成员：同一会话内继承上下文；点击切为临时',
-            onClick: () => act('/members', { id: member.id, persistent: member.persistent === false }),
-          }, member.persistent === false ? '临时' : '长久')))
+          null))
       }
 
       /* ── v0.4 团队选项：三个开关（需要指挥审核 / 严格审核 / 大脑权限）──────
@@ -694,7 +692,6 @@ window.__ModuleLoader__.load({
 
       const header = h('div', { style: styles.bar },
         h('strong', null, '小组编排'),
-        h('span', { style: styles.chip }, group.name),
         // 只清理「归档超过 N 天」的小组；会话目录一律不碰（「清理子会话」按钮已从 UI 移除）。
         // 「清理 7 天前归档」「清理子智能体」已移除（2026-11-16 用户要求精简小组页）
         h('span', { style: { flex: 1 } }))
@@ -900,16 +897,7 @@ window.__ModuleLoader__.load({
             }, [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
               roles.map((r) => h('option', { key: r.id, value: r.id }, r.name)))),
             h(Button, { onClick: () => act('/members/delete', { id: member.id }) }, '删')),
-          h('div', { style: Object.assign({}, styles.muted, { marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }) },
-            h('span', null, '职位：' + roleName(member)),
-            // v0.4 P3：长久成员继承上下文；临时成员每轮由指挥重发上下文
-            h('span', {
-              style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
-              title: member.persistent === false
-                ? '临时成员：每轮都是新会话，上下文由指挥在任务里重新发'
-                : '长久成员：同一会话内继承上一轮上下文（可压缩）；点击切为临时',
-              onClick: () => act('/members', { id: member.id, persistent: member.persistent === false }),
-            }, member.persistent === false ? '临时' : '长久')))
+          null)
       })
 
       const roleRows = roles.map((role) => h('div', {
