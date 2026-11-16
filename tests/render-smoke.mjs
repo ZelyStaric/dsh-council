@@ -388,6 +388,11 @@ function renderOne(id, state, seedOverride) {
     const code = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
     vm.runInNewContext(code, { window, require, console, fetch: async () => ({ ok: true, json: async () => ({}) }) })
     const mod = captured.factory(require)
+    // 假 fetch 拿不到 /state：显式把本次要渲染的会话标成「有小组」，否则团队视图会返回空白占位
+    if (typeof mod.__setGroupSessions === 'function') {
+      const probe = (state.groups || []).filter((g) => g.sessionId && !g.archived).map((g) => g.sessionId)
+      mod.__setGroupSessions(probe.length ? probe : (((state.groups || [])[0] || {}).sessionId ? [(state.groups || [])[0].sessionId] : []))
+    }
     mod.apply({
 
       slots: {

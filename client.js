@@ -1471,6 +1471,8 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots'],
+      // 测试钩子：渲染冒烟用假 fetch，拿不到真实 /state，用它手动设定「哪些会话有小组」。
+      __setGroupSessions: (ids) => { groupSessionSet = new Set((ids || []).map(String)) },
       apply(ctx) {
         // 插件一启动就预取「哪些会话有小组」：团队视图的「单人会话不渲染」判断依赖它。
         // 否则首次进入某个单人会话时集合还是 null（未知），会先渲染一次团队内容。
@@ -1809,7 +1811,10 @@ window.__ModuleLoader__.load({
     /** 从 /state 的返回里刷新集合。 */
     function refreshGroupSessionSet(stateLike) {
       try {
-        const groups = (stateLike && stateLike.groups) || []
+        // 无效输入（拿不到 state）时**保持 null（未知）**，不要误设成空集——
+        // 空集意味着「所有会话都没小组」，会把小组会话也挡掉（测试桩踩过）。
+        if (!stateLike || !Array.isArray(stateLike.groups)) return
+        const groups = stateLike.groups
         const next = new Set()
         for (const g of groups) {
           if (g && g.sessionId && !g.archived) next.add(String(g.sessionId))
@@ -1844,7 +1849,12 @@ window.__ModuleLoader__.load({
       // 单人会话（明确知道没绑小组）→ **不渲染团队内容**。
       // 只藏 tab 不够：DSH 会先画内容，用户能看到 1 秒的「折叠列表」再消失。
       const hasGroup = sessionHasGroup(sessionId)
+      // 明确没有小组 → 完全不渲染（连提示都不要，这是单人会话，切过来不该看到小组界面）
       if (hasGroup === false) return null
+      // 还不知道（刚启动/刚切会话，groupSessionSet 未就绪）→ 渲染一个**空白占位**：
+      // 不能返回空态卡片，否则单人会话切过去会闪出「点右上角胶囊切到小组」这种误导提示；
+      // 也不能渲染正常内容，否则小组会话的首帧会和单人会话的 tab 对不上。
+      if (hasGroup === null) return h('div', { style: { height: '100%' } })
       const [team, setTeam] = useState(null)
       const [providers, setProviders] = useState(null)
       const [model, setModel] = useState('')
