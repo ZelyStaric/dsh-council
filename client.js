@@ -246,7 +246,11 @@ window.__ModuleLoader__.load({
       const [guideEditing, setGuideEditing] = useState(false)
       const [guideDraft, setGuideDraft] = useState('')
 
-      const applyData = useCallback((data) => { if (data && data.state) setState(data.state) }, [])
+      const applyData = useCallback((data) => {
+        if (data && data.state) setState(data.state)
+        // 同步「哪些会话有小组」给团队视图用（模块级，切换会话时能立刻判断要不要渲染）
+        refreshGroupSessionSet(data && data.state)
+      }, [])
 
       useEffect(() => {
         call('/state').then(applyData).catch((e) => setError(String(e.message || e)))
