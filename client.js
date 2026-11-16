@@ -580,7 +580,7 @@ window.__ModuleLoader__.load({
             h('input', {
               style: Object.assign({}, styles.input, { flex: 1, fontSize: 11 }),
               defaultValue: Array.isArray(member.mcpServers) ? member.mcpServers.join(', ') : '',
-              placeholder: '留空 = 用该框架全部 MCP；填名字用逗号分隔可限定',
+              placeholder: '留空 = 由指挥按任务决定；填名字可强制指定（逗号分隔）',
               title: '给这个成员限定加载哪些 MCP server（只影响 claude/codex/gemini 三条腿）',
               onBlur: (event) => {
                 const raw = String(event.target.value || '').trim()

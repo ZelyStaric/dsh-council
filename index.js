@@ -5673,6 +5673,35 @@ function staffTarget(role, kind, model) {
  * 可用模型清单。systemPrompt 的 section.text 必须是同步字符串，所以这里只读
  * modelCatalog() 的 10 分钟缓存（bindAgent 时预热），没有缓存就用框架默认模型兜底。
  */
+/**
+ * 给指挥看的「MCP 清单」（2026-11-16）。
+ *
+ * 用户的真实痛点：**用户不知道每个框架里装了什么 MCP**，让他在成员卡上手写名字不现实。
+ * 所以改成指挥按任务判断：某个成员干这活需不需要 blender / 浏览器 / 别的 server，
+ * 在 assignments 里直接写 mcp: ["blender"]。
+ *
+ * 注意：只有 claude / codex / gemini 三条腿能按成员隔离；deepseek 继承主会话 profile，列了也没用。
+ */
+function mcpCatalogText() {
+  let servers = { codex: [], gemini: [], claude: [] }
+  try { servers = listMcpServers() || servers } catch { /* 读不到就只给说明 */ }
+  const show = (kind) => {
+    const list = (servers[kind] || []).filter((m) => m.enabled !== false).map((m) => m.name)
+    return '- ' + kind + ': ' + (list.length ? list.join('、') : '（无）')
+  }
+  const any = ['codex', 'gemini', 'claude'].some((k) => (servers[k] || []).length)
+  return [
+    '当前可用的 MCP server（按框架分组）：',
+    show('codex'), show('gemini'), show('claude'),
+    any
+      ? 'assignments[].mcp 可指定这个成员要挂哪些 MCP（数组，写名字）。**按任务需要决定**：'
+        + '比如 3D 建模/出图类任务给 \'blender\'，网页操作给浏览器类 server；'
+        + '纯写代码/改文件的任务**不要挂任何 MCP**（启动更慢、更容易分心）。留空 = 该成员默认配置。'
+      : '（当前没有检测到可用的 MCP server；不需要在 assignments 里写 mcp。）',
+    '注意：MCP 只能按成员隔离 claude / codex / gemini 三条腿；deepseek 成员继承主会话，写了不生效。',
+  ].join('\n')
+}
+
 function catalogText() {
   const value = (catalog && catalog.value) || {}
   return [
@@ -5683,6 +5712,8 @@ function catalogText() {
     }),
     'assignments[].member 可写职位名；缺人时按职位默认自动补员。需要补员或调整模型时在 staffing 中声明 {role, kind?, model?}。',
     '需要长期保留的成员：在 staffing 里写 `persistent:true`（默认用完即回收）。',
+    '',
+    mcpCatalogText(),
     '',
     modelGuideText(),
   ].join('\n')
@@ -6718,6 +6749,11 @@ function makeDelegateTool(ctx, config, group) {
               additionalProperties: false,
               properties: {
                 member: { type: 'string', description: '成员名字、id 或职位名' },
+                mcp: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: '这个成员要挂哪些 MCP server（写名字，见「当前可用的 MCP server」）。按任务需要给：3D/出图给 blender，网页操作给浏览器类；纯代码任务留空。只对 claude/codex/gemini 生效。',
+                },
                 task: { type: 'string', description: '给这个成员的任务' },
                 style: { type: 'string', description: '可选：覆盖本组默认的统一风格（用于这次任务的画面风格）' },
                 reference: { type: 'string', description: '可选：参考图路径（仅 image 成员）；给了就按这张图重绘' },
@@ -7030,7 +7066,11 @@ function makeDelegateTool(ctx, config, group) {
           if (item && item.reference && member.kind === 'image') member.__reference = String(item.reference)
           // MCP 路径（团队 turn）没有活 agent：传 undefined，成员走自建会话（runDeepseek）
           const memberParent = exec && exec.__mcp ? undefined : (exec && exec.agent)
-          const memberPromise = callMember(ctx, member, String(item.task || ''), config, live, item.style, memberParent, brief,
+          // 指挥在 assignment 里指定了 MCP 白名单 → 只对这一次执行生效（不改成员自身配置）
+          const effectiveMember = (Array.isArray(item.mcp) && item.mcp.filter(Boolean).length)
+            ? Object.assign({}, member, { mcpServers: item.mcp.filter(Boolean).map(String) })
+            : member
+          const memberPromise = callMember(ctx, effectiveMember, String(item.task || ''), config, live, item.style, memberParent, brief,
             (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage, task: shortTask }),
             (work) => {
               progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
