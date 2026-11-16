@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { zstdDecompressSync } from 'node:zlib'
 import net from 'node:net'
@@ -1609,6 +1609,64 @@ async function runImage(member, prompt, config, options = {}) {
 }
 
 /** Read a session's committed events through whichever reader this build exposes. */
+/** 会话日志里 user/assistant 文本消息的缓存：sessionId → { stamp, msgs }（按 mtime+size 失效）。 */
+const chatLogCache = new Map()
+
+/**
+ * **从会话日志文件**读 user/assistant 文本消息（不依赖 agent 是否活着）。
+ *
+ * 为什么需要它：DSH 的 agent 是惰性的——重启后只有被打开过的会话才加载。
+ * 用 `agents.get()` 读不到时，团队页就看不到「你说了什么」。日志文件是落盘的，
+ * 读它更可靠（代价是一次解压，用 mtime+size 缓存）。
+ */
+function chatMessagesFromLog(sessionId) {
+  const id = normalizeSessionId(sessionId)
+  if (!id) return []
+  try {
+    const dirs = readdirSync(SESSIONS_DIR)
+    let dir = ''
+    for (const name of dirs) {
+      const candidate = path.join(SESSIONS_DIR, name, 'session-' + id)
+      if (existsSync(candidate)) { dir = candidate; break }
+    }
+    if (!dir) return []
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    if (!existsSync(file)) return []
+    const stat = statSync(file)
+    const stamp = String(stat.mtimeMs) + ':' + String(stat.size)
+    const hit = chatLogCache.get(id)
+    if (hit && hit.stamp === stamp) return hit.msgs
+
+    const buffer = readFileSync(file)
+    const scanned = scanZstdFrames(buffer)
+    let text = ''
+    for (const frame of scanned.frames || []) {
+      try { text += zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8') } catch { /* 跳过坏帧 */ }
+    }
+    const msgs = []
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let ev = null
+      try { ev = JSON.parse(trimmed) } catch { continue }
+      if (!ev) continue
+      const isUser = ev.type === 'user/message'
+      const isAssistant = ev.type === 'assistant/message'
+      if (!isUser && !isAssistant) continue
+      const data = ev.data || {}
+      const blocks = isUser ? (data.content || []) : ((data.message && data.message.content) || [])
+      if (isUser && data.source && data.source.kind && data.source.kind !== 'user') continue
+      const text2 = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
+      if (!text2) continue
+      msgs.push({ role: isUser ? 'user' : 'assistant', text: text2, at: Number(ev.time) || 0 })
+    }
+    chatLogCache.set(id, { stamp, msgs })
+    return msgs
+  } catch {
+    return []
+  }
+}
+
 /**
  * 读主会话里「用户 / 助手」的文本消息（团队页要把它和成员回执合并成一条时间线）。
  *
@@ -1627,15 +1685,29 @@ function sessionChatMessages(sessionId) {
     if (!session) return []
     const out = []
     for (const ev of sessionEvents(session)) {
-      if (!ev || (ev.type !== 'user/message' && ev.type !== 'assistant/message')) continue
-      const blocks = (ev.data && ev.data.message && ev.data.message.content) || []
+      if (!ev) continue
+      const isUser = ev.type === 'user/message'
+      const isAssistant = ev.type === 'assistant/message'
+      if (!isUser && !isAssistant) continue
+      // ⚠️ 两种事件的正文位置**不同**（2026-11-16 实测）：
+      //   assistant/message → ev.data.message.content
+      //   user/message      → ev.data.content      ← 用错位置会导致「看不到用户说的话」
+      const data = ev.data || {}
+      const blocks = isUser
+        ? (data.content || [])
+        : ((data.message && data.message.content) || [])
+      // user/message 里混着系统注入（时间上下文等），只保留真实用户输入：
+      //   source.kind === 'time-context' / 'system' 之类一律跳过；没有 source 视为用户输入
+      if (isUser && data.source && data.source.kind && data.source.kind !== 'user') continue
       const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
       if (!text) continue
-      out.push({ role: ev.type === 'user/message' ? 'user' : 'assistant', text, at: Number(ev.time) || 0 })
+      out.push({ role: isUser ? 'user' : 'assistant', text, at: Number(ev.time) || 0 })
     }
-    return out
+    if (out.length) return out
+    // agents.get 拿不到（会话未被加载）→ 回退到读日志文件
+    return chatMessagesFromLog(sessionId)
   } catch {
-    return []
+    return chatMessagesFromLog(sessionId)
   }
 }
 
