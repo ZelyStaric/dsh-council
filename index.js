@@ -7111,6 +7111,7 @@ function makeDelegateTool(ctx, config, group) {
         // 之前放在收尾处，导致成员回执先出、拆解最后才出，顺序是反的。
         try {
           const preSid = normalizeSessionId(sessionIdOf(exec) || '')
+          try { appendFileSync('/tmp/council-plan.log', new Date().toISOString() + ' pre plannedBy=' + response.plannedBy + ' sid=' + preSid + ' group=' + Boolean(groupForSession(state, preSid)) + ' assignments=' + assignments.length + '\n') } catch {}
           if (preSid && groupForSession(state, preSid) && assignments.length) {
             const preEntry = teamSessionState(preSid)
             const plannerName = (response.planner && response.planner.name) || '指挥'
@@ -7136,6 +7137,7 @@ function makeDelegateTool(ctx, config, group) {
         // 团队页只有「进行中」，看不出这批活是谁派的（2026-11-16 用户反复反馈）。
         try {
           const dpSid = normalizeSessionId(sessionIdOf(exec) || '')
+          try { appendFileSync('/tmp/council-plan.log', new Date().toISOString() + ' dp sid=' + dpSid + ' group=' + Boolean(groupForSession(state, dpSid)) + ' assignments=' + assignments.length + ' pushed=' + Boolean(response.__planPushed) + '\n') } catch {}
           if (dpSid && groupForSession(state, dpSid) && assignments.length && !response.__planPushed) {
             const dpEntry = teamSessionState(dpSid)
             const names = assignments.map((a) => String((a && a.member) || '成员'))
