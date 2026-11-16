@@ -720,6 +720,34 @@ try {
     return `resolved → ${result.members[0].error || 'ok'}`
   })
 
+  await check('council_delegate：direct 模式跳过指挥拆解与审核（回执标 direct）', async () => {
+    // 2026-11-16 用户要求：对持久成员单独派话时，不经过审核/指挥那一套。
+    const tool = registered.council_delegate
+    const result = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }], direct: true },
+      { callId: 'c-direct', agent: { id: 'agent-test' } },
+    )
+    assert.equal(result.direct, true, '回执必须标 direct')
+    assert.equal(result.plannedBy, 'parent', '直派不走指挥拆解')
+    assert.equal(result.planner, undefined, '不该有 planner')
+    // 测试环境没有 DSH seam，成员执行会失败，但我们能断言「审核没有被触发」：
+    const rendered = tool.output.render({}, result)[0].text
+    assert.ok(!/## 审校/.test(rendered), '直派不该出现审校段')
+    assert.ok(!/## 指挥终审/.test(rendered), '直派不该出现指挥终审段')
+    return 'direct=true · 无 planner · 无审校段'
+  })
+
+  await check('council_delegate：非 direct 走正常流程（plannedBy=parent 单成员直派）', async () => {
+    const tool = registered.council_delegate
+    const result = await tool.execute(
+      { assignments: [{ member: '代码', task: '只回复 ok' }] },
+      { callId: 'c-normal', agent: { id: 'agent-test' } },
+    )
+    assert.equal(result.direct, undefined, '没传 direct 就不该有 direct 标记')
+    assert.equal(result.plannedBy, 'parent')
+    return '无 direct 标记'
+  })
+
   await check('council_delegate：staffing 自动补员 + 回执末尾 ## 补员', async () => {
     const tool = registered.council_delegate
     const result = await tool.execute(
