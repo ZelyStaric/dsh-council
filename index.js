@@ -3453,9 +3453,17 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   //   只派活（closed）→ 零 MCP：它不需要 blender/浏览器这类外部能力，只靠只读工具了解项目；
   //   可动手（open）  → 不限制（undefined = 用该框架的全局配置）。
   const brainOpen = String((state.config && state.config.brainPermissions) || 'closed') === 'open'
+  // deepseek 指挥要用我们自己声明的 preset（2026-11-17）：
+  //  · 内置 minimal 是 read:false + 带可写 bash —— 读不了项目、又能写，两头都不对；
+  //  · council-readonly 给 read/readImage、不给 write/edit、不给 bash；
+  //  · 可动手时退回 standard（全能力）。
+  // **只影响指挥**：普通 deepseek 成员仍走 standard（member.__preset 默认 undefined）。
+  const commanderPreset = commander.kind === 'deepseek'
+    ? (brainOpen ? 'standard' : 'council-readonly')
+    : 'minimal'
   const commanderOpts = {
     convId: commander.convId,
-    __preset: 'minimal',
+    __preset: commanderPreset,
     __noTools: true,
     __residentKind: 'work',
     mcpServers: brainOpen ? undefined : [],
