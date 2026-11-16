@@ -2300,6 +2300,8 @@ async function autoResumeInterruptedTurns() {
         if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
         const agent = agents.get(sid) || agents.get('session-' + sid)
         const inbox = agent && agent.inbox
+        // 真实可用的 inbox 方法里没有 followup（类型声明有、运行时没有），
+        // 只有 append(target, message)；target ∈ 'next-turn' | 'next-step'。
         let diag = ''
         try {
           const proto = inbox ? Object.getPrototypeOf(inbox) : null
@@ -2307,11 +2309,17 @@ async function autoResumeInterruptedTurns() {
           if (agent) diag += ' agentKeys=' + Object.keys(agent).join('|')
         } catch (e) { diag = ' diagErr=' + String(e && e.message) }
         resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function') + diag)
-        if (!inbox || typeof inbox.followup !== 'function') continue
-        inbox.followup({
-          content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
-          source: { kind: 'user' },
-        })
+        if (!inbox || typeof inbox.append !== 'function') { resumeLog('skip: inbox.append 不存在 sid=' + sid); continue }
+        try {
+          inbox.append('next-turn', {
+            content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
+            source: { kind: 'user' },
+          })
+          resumeLog('append ok sid=' + sid)
+        } catch (e) {
+          resumeLog('append failed sid=' + sid + ' err=' + String(e && e.message))
+          continue
+        }
         resumed += 1
         resumeLog('resumed ' + sid)
         console.error('[council] 自动续上被中断的会话:', sid)
