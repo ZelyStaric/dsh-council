@@ -735,31 +735,7 @@ window.__ModuleLoader__.load({
             ? '确认清理 ' + childrenPrune.removed.length + ' 个'
             : '重新检查子智能体')),
         childrenPruneNote ? h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) }, childrenPruneNote) : null,
-        h('span', { style: styles.muted }, group.workspacePath || ''),
-        h('span', { style: { flex: 1 } }),
-        h('span', { style: styles.chip }, balanceLabel),
-        h(Button, {
-          onClick: () => mutate('/groups/bind', { id: group.id, sessionId: null }).then(refresh),
-        }, '切回单人模式'),
-        h(Button, { onClick: refresh }, '刷新'),
-        h(Button, {
-          disabled: busy === 'prune',
-          onClick: pruneOrphans,
-          title: prunePreview ? '再点一次确认删除（共 ' + (prunePreview.removed || []).length + ' 个）' : '先预览：列出不属于任何组的孤立成员',
-        }, !prunePreview
-          ? '清理孤立成员'
-          : ((prunePreview.removed || []).length
-            ? '确认清理 ' + prunePreview.removed.length + ' 个'
-            : '重新检查孤立成员')),
-        pruneNote ? h('span', { style: styles.muted }, pruneNote) : null,
-        h(Button, {
-          onClick: () => {
-            if (typeof window === 'undefined' || !window.confirm) return
-            if (window.confirm('删除小组「' + group.name + '」？（成员本身不会删，只是从小组移除）')) {
-              mutate('/groups/delete', { id: group.id }).then(refresh)
-            }
-          },
-        }, '删除小组'))
+        h('span', { style: { flex: 1 } }))
 
       const rolesPanel = h('div', { style: styles.roles },
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 4 }) }, '职位（把成员拖到职位上完成分配）'),
@@ -786,80 +762,22 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
           h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 添加成员')),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
-          h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '验收策略'),
-          h('div', { style: { display: 'flex', gap: 12, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
-            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-              h('span', { style: styles.muted }, '返工次数'),
-              h('select', {
-                id: 'policy-maxRework',
-                style: Object.assign({}, styles.input, { width: 80 }),
-                defaultValue: String(group.maxRework ?? 1),
-              }, ['0', '1', '2'].map((v) => h('option', { key: v, value: v }, v)))),
-            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-              h('input', {
-                type: 'checkbox',
-                id: 'policy-requirePrelim',
-                defaultChecked: group.requirePrelim ?? true,
-              }),
-              h('span', { style: styles.muted }, '需要初审')),
-            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-              h('input', {
-                type: 'checkbox',
-                id: 'policy-requireCommander',
-                defaultChecked: group.requireCommander ?? true,
-              }),
-              h('span', { style: styles.muted }, '需要指挥审核')),
-            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-              h('input', {
-                type: 'checkbox',
-                id: 'policy-background',
-                defaultChecked: Boolean(apiConfig && apiConfig.backgroundDelegations),
-                onChange: (event) => {
-                  mutate('/config', { backgroundDelegations: event.target.checked })
-                    .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
-                },
-              }),
-              h('span', { style: styles.muted }, '后台派活（跑着也能插话）')),
-            h('label', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
-              h('input', {
-                type: 'checkbox',
-                id: 'policy-failOnRejected',
-                defaultChecked: Boolean(apiConfig && apiConfig.failOnRejectedAcceptance),
-                onChange: (event) => {
-                  mutate('/config', { failOnRejectedAcceptance: event.target.checked })
-                    .then(() => call('/config').then((data) => setApiConfig(data.config)).catch(() => {}))
-                },
-              }),
-              h('span', { style: styles.muted }, '验收未通过就不返回（工具报错）')),
-            h(Button, {
-              onClick: () => {
-                const maxRework = parseInt(document.getElementById('policy-maxRework').value, 10)
-                const requirePrelim = document.getElementById('policy-requirePrelim').checked
-                const requireCommander = document.getElementById('policy-requireCommander').checked
-                const standard = document.getElementById('policy-standard').value
-                const commanderPrompt = document.getElementById('policy-commanderPrompt').value
-                mutate('/groups/policy', {
-                  id: group.id,
-                  maxRework,
-                  requirePrelim,
-                  requireCommander,
-                  standard,
-                  commanderPrompt,
-                })
-              },
-            }, '保存策略')),
+          h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '验收标准（追加到每个任务）'),
           h('textarea', {
             id: 'policy-standard',
-            style: Object.assign({}, styles.input, { marginTop: 8, minHeight: 46, resize: 'vertical' }),
+            style: Object.assign({}, styles.input, { minHeight: 46, resize: 'vertical' }),
             defaultValue: group.standard || '',
-            placeholder: '验收标准（追加到每个任务）',
+            placeholder: '例如：必须给出可复现的验证步骤；改动要说明风险',
           }),
-          h('textarea', {
-            id: 'policy-commanderPrompt',
-            style: Object.assign({}, styles.input, { marginTop: 8, minHeight: 46, resize: 'vertical' }),
-            defaultValue: group.commanderPrompt || '',
-            placeholder: '指挥提示词（覆盖「指挥」职位提示词）',
-          })),
+          h('div', { style: { marginTop: 6 } },
+            h(Button, {
+              onClick: () => {
+                mutate('/groups/policy', {
+                  id: group.id,
+                  standard: document.getElementById('policy-standard').value,
+                })
+              },
+            }, '保存'))),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '总画师风格（注入所有出图任务；留空则不校验）'),
           h('textarea', {
@@ -1537,11 +1455,8 @@ window.__ModuleLoader__.load({
         // 2026-11-16 用户要求：**天角不再有「选指挥模型」的下拉**。
         // 指挥 = 小组里那个「指挥」成员，它的模型在「小组」页成员卡上改；
         // 原生对话框右下角的模型选择器决定的是主会话（传话器）用哪个模型。
-        bound ? h('span', {
-          style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
-          title: '编辑本组名册',
-          onClick: () => openRosterPanel(sessionId),
-        }, '名册') : null,
+        // 2026-11-16 用户：「名册现在几乎没有实际意义了」——成员/职位都在「小组」页编辑，
+        // 这里不再放重复入口。
         error ? h('span', {
           style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', maxWidth: 260 },
           title: error,
@@ -1828,11 +1743,20 @@ window.__ModuleLoader__.load({
         refreshTeam()
         call('/providers').then((d) => setProviders((d && d.providers) || [])).catch(() => setProviders(null))
         let alive = true
-        const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 3000)
+        // 1 秒轮询：用户发完消息要立刻在团队页看到（2026-11-16 用户反馈 3 秒太慢）。
+        // 服务端读日志有 mtime+size 缓存，文件没变时不会重复解压，1 秒一轮开销可接受。
+        const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
         return () => { alive = false; clearInterval(timer) }
       }, [sessionId])
 
       const messages = (team && team.messages) || []
+      // 反馈（2026-11-16 用户反馈「发完 30 秒没动静，以为卡住」）：
+      // 最后一条是用户消息且已过 3 秒还没回复 → 明确显示"正在处理"，别让人干等。
+      const lastMsg = messages.length ? messages[messages.length - 1] : null
+      const waitingForCommander = Boolean(
+        lastMsg && lastMsg.role === 'user' && !running && !streamText
+        && Date.now() - (Number(lastMsg.at) || 0) > 3000,
+      )
 
       // 新消息到达 → 贴着底部
       useEffect(() => {
@@ -1989,21 +1913,22 @@ window.__ModuleLoader__.load({
             h('div', { style: Object.assign({}, styles.bubble, { flex: 1, minWidth: 0, opacity: 0.92 }) },
               h('div', { style: styles.who }, '指挥 · 生成中'),
               h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, streamText)))]
-            : [])
+            : (waitingForCommander ? [h('div', {
+              key: 'waiting',
+              style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, opacity: 0.75 },
+            },
+            h(Avatar, { kind: brainKind, name: '指挥' }),
+            h('div', { style: Object.assign({}, styles.bubble, { fontSize: 12 }) }, '指挥正在处理…（已收到你的消息）'))] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
           // 在单人模式下仍然存在；这里用引导卡片替代"消失"，避免用户进来看到空白。
           h('div', { style: { fontSize: 14, fontWeight: 600 } },
-            team ? '这个小组还没有对话' : '这个会话还没有绑定小组'),
+            team ? '还没有对话' : '这个会话没有绑定小组'),
           h('div', { style: styles.muted },
             team
-              ? '直接对下面的输入框说话——指挥会拆解、选人、派活，成员的回执会回到这里。'
-              : '点页面右上角的胶囊切到「小组」，就会为这个会话建一个小组：你说的每句话都会交给指挥，它拆解后派给成员干活。'),
-          h('div', { style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.8 }) },
-            team
-              ? '（团队成员回执来自内存，重启 dsh-web 后历史会清空；「对话」页里的会话记录不受影响。）'
-              : '（单人模式下这个页签可忽略：消息直接由本会话回答，不经过指挥。）'))),
+              ? '用底部对话框说话，指挥会拆解后派给成员。'
+              : '点右上角胶囊切到「小组」即可开始。'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
       /* 不再有独立输入框：小组模式下**直接用原生对话框**（对话页底部那个），
        * 主会话只负责把用户原话转给指挥。这里只留一句说明 + 停止按钮。 */
