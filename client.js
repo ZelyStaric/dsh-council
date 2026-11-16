@@ -1642,6 +1642,46 @@ window.__ModuleLoader__.load({
       }, entry.stoppedAt ? '取消中…' : '停止'))
     }
 
+    /**
+     * 把成员/审校的**机器回执**变成人话（2026-11-16 用户要求：不要显示 {"passed":true,...}）。
+     *
+     * 成员常按提示词在结尾吐一个 JSON：{"passed":true,"reason":"...","issues":[]}。
+     * 原样显示既丑又占地方，这里解析成「✓ 通过 · 原因」；解析失败就标注「（结构化回执已隐藏）」。
+     * 没有 JSON 的文本原样返回。
+     */
+    function humanizeReceipt(text) {
+      let out = String(text || '')
+      // ① fenced code block
+      out = out.replace(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/g, (match, body) => {
+        const human = judgeToHuman(body)
+        return human == null ? '（结构化回执已隐藏）' : human
+      })
+      // ② 裸 JSON（整行就是一个对象，且带 passed/ok/verdict 之类字段）
+      out = out.replace(/^\s*(\{[\s\S]*\})\s*$/gm, (match, body) => {
+        if (!/"(passed|ok|verdict|approved)"\s*:/.test(body)) return match
+        const human = judgeToHuman(body)
+        return human == null ? '（结构化回执已隐藏）' : human
+      })
+      return out.replace(/\n{3,}/g, '\n\n').trim()
+    }
+
+    /** 解析一条审校 JSON → 人话；不是审校对象或解析失败返回 null。 */
+    function judgeToHuman(body) {
+      try {
+        const obj = JSON.parse(body)
+        const verdict = obj.passed !== undefined ? obj.passed : (obj.ok !== undefined ? obj.ok : obj.approved)
+        if (verdict === undefined) return null
+        const reason = String(obj.reason || obj.note || '').replace(/\s+/g, ' ').trim()
+        const issues = Array.isArray(obj.issues) ? obj.issues.filter(Boolean) : []
+        let line = verdict ? '✓ 通过' : '✗ 不通过'
+        if (reason) line += ' · ' + reason
+        if (issues.length) line += '\n问题：' + issues.slice(0, 3).join('；')
+        return line
+      } catch {
+        return null
+      }
+    }
+
     /** 成员芯片上的「正在做什么」：取服务端下发的 task（已压成一行、60 字内），只显示前 24 字。 */
     function taskSuffix(member) {
       const task = member && typeof member.task === 'string' ? member.task.trim() : ''
@@ -1855,16 +1895,18 @@ window.__ModuleLoader__.load({
         h('div', { style: Object.assign({}, styles.bubble, isUser ? styles.mine : {}, { flex: 1, minWidth: 0 }) },
           h('div', { style: styles.who }, sub + ' · ' + new Date(m.at || Date.now()).toLocaleTimeString()),
           (() => {
-            const full = String(m.text || '')
+            const raw = String(m.text || '')
+            const full = humanizeReceipt(raw)
             const long = full.length > 260 && !isUser
-            const collapsed = long && expandedSet[key] !== true
-            const shown = collapsed ? full.slice(0, 260) + '…' : full
+            const textStyle = { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+            // 长回执：前面给 260 字预览，后面用原生 <details> 展开全文。
+            // 之前用 useState 控制折叠，DSH 的 hooks 桩不可靠 → 点了没反应（2026-11-16 用户反馈）。
+            if (!long) return h('div', { style: textStyle }, full)
             return h('div', null,
-              h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, shown),
-              long ? h('span', {
-                style: Object.assign({}, styles.linkButton, { fontSize: 11, cursor: 'pointer', opacity: 0.75, marginTop: 2 }),
-                onClick: () => setExpandedSet(Object.assign({}, expandedSet, { [key]: !collapsed })),
-              }, collapsed ? '展开全部（' + full.length + ' 字）' : '收起') : null)
+              h('div', { style: textStyle }, full.slice(0, 260) + '…'),
+              h('details', { style: { marginTop: 4 } },
+                h('summary', { style: Object.assign({}, styles.linkButton, { fontSize: 11, cursor: 'pointer', opacity: 0.75 }) }, '展开全部'),
+                h('div', { style: Object.assign({}, textStyle, { marginTop: 6, opacity: 0.95 }) }, full)))
           })(),
           m.image ? h('img', {
             src: m.image, alt: 'member output',
