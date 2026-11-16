@@ -156,7 +156,7 @@ window.__ModuleLoader__.load({
       root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-base)', fontSize: 13 },
       bar: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '10px 14px', borderBottom: '1px solid var(--dsw-alias-border-l1)' },
       body: { display: 'flex', flex: 1, minHeight: 0 },
-      roles: { width: 320, flexShrink: 0, overflow: 'auto', padding: 12, borderRight: '1px solid var(--dsw-alias-border-l1)' },
+      roles: { width: 280, flexShrink: 0, overflow: 'auto', padding: 12, borderRight: '1px solid var(--dsw-alias-border-l1)' },
       board: { flex: 1, overflow: 'auto', padding: 12, minWidth: 0 },
       card: { border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 8, padding: 10, marginBottom: 8 },
       input: { width: '100%', boxSizing: 'border-box', fontSize: 13, padding: '6px 8px', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 6 },
@@ -730,7 +730,21 @@ window.__ModuleLoader__.load({
         // 「清理 7 天前归档」「清理子智能体」已移除（2026-11-16 用户要求精简小组页）
         h('span', { style: { flex: 1 } }))
 
-      const rolesPanel = h('div', { style: styles.roles },
+      // 职位侧栏的 DOM 引用 + 折叠开关（纯 DOM，不依赖 React state）
+      const rolesPanelRef = { current: null }
+      const toggleRoles = () => {
+        const node = rolesPanelRef.current
+        if (!node) return
+        const hidden = node.style.display === 'none'
+        node.style.display = hidden ? '' : 'none'
+        if (rolesToggleRef.current) rolesToggleRef.current.textContent = hidden ? '◀' : '▶'
+      }
+      const rolesToggleRef = { current: null }
+
+      const rolesPanel = h('div', {
+        ref: (node) => { rolesPanelRef.current = node },
+        style: styles.roles,
+      },
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 4 }) }, '职位（把成员拖到职位上完成分配）'),
         // 整段说明只在**这里**出现一次（之前每个职位卡都重复一遍，2026-11-16 用户指出）
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 8, fontSize: 11, opacity: 0.85, lineHeight: 1.5 }) },
@@ -753,7 +767,7 @@ window.__ModuleLoader__.load({
           '成员（拖到左侧职位即可分配；聊天在「对话」页底部的群聊框里）'),
         members.map(memberCard),
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 添加成员')),
+          h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'claude', groupId: group.id }) }, '+ 添加成员')),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '总画师风格（注入所有出图任务；留空则不校验）'),
           h('textarea', {
@@ -788,7 +802,19 @@ window.__ModuleLoader__.load({
         header,
         error ? h('div', { style: Object.assign({}, styles.err, { padding: '6px 14px' }) }, error) : null,
         // 布局（2026-11-16 用户要求）：左=职位预设（含提示词），中=成员，右=团队选项/验收策略
-        h('div', { style: styles.body }, rolesPanel, board, teamOptionsPanel()))
+        h('div', { style: styles.body },
+          // 常驻的折叠把手：收起后仍能点开
+          h('div', {
+            title: '展开 / 收起职位栏',
+            onClick: toggleRoles,
+            style: {
+              width: 18, flexShrink: 0, cursor: 'pointer', userSelect: 'none',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              borderRight: '1px solid var(--dsw-alias-border-l1)',
+              color: 'var(--dsw-alias-label-secondary)', fontSize: 10,
+            },
+          }, h('span', { ref: (node) => { rolesToggleRef.current = node } }, '◀')),
+          rolesPanel, board, teamOptionsPanel()))
     }
 
 
