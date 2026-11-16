@@ -2092,6 +2092,46 @@ window.__ModuleLoader__.load({
           reasons ? h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85 } }, reasons) : null))
       }
 
+      /**
+       * 按「轮」分组渲染（2026-11-16 用户要求）：
+       * 一轮 = 你的一句话 + 指挥拆解 + 若干成员回执 + 指挥汇总，往往很长。
+       * 折叠后只露一行摘要（你的话前 30 字 + 几条消息），点开才看细节。
+       * 用原生 <details>，不依赖 React state。
+       */
+      const renderRounds = (list) => {
+        const rounds = []
+        let cur = null
+        list.forEach((m, i) => {
+          if (m.role === 'user' || !cur) {
+            cur = { key: 'round' + i, head: m.role === 'user' ? m : null, items: [] }
+            rounds.push(cur)
+          }
+          cur.items.push({ m, i })
+        })
+        return rounds.map((round, ridx) => {
+          const headText = round.head ? String(round.head.text || '').replace(/\s+/g, ' ').trim() : ''
+          const title = headText ? (headText.length > 34 ? headText.slice(0, 34) + '…' : headText) : '（无标题）'
+          const memberCount = round.items.filter((it) => it.m.role === 'member').length
+          const meta = round.items.length + ' 条' + (memberCount ? ' · ' + memberCount + ' 个成员' : '')
+          // 最后一轮默认展开（你正在看的这轮），历史轮折叠
+          const isLast = ridx === rounds.length - 1
+          return h('details', {
+            key: round.key,
+            open: isLast,
+            style: { marginTop: 10, borderTop: ridx === 0 ? 'none' : '1px solid var(--dsw-alias-border-l1)', paddingTop: ridx === 0 ? 0 : 8 },
+          },
+          h('summary', {
+            style: {
+              cursor: 'pointer', userSelect: 'none', fontSize: 12,
+              color: 'var(--dsw-alias-label-secondary)', display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap',
+            },
+          },
+          h('span', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, title),
+          h('span', { style: { opacity: 0.65 } }, meta)),
+          h('div', null, round.items.map((it) => bubble(it.m, 'm' + it.i))))
+        })
+      }
+
       return h('div', {
         style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: 12, gap: 8, overflow: 'hidden' },
       },
@@ -2113,7 +2153,7 @@ window.__ModuleLoader__.load({
         style: { flex: '1 1 auto', minHeight: 0, maxHeight: 'calc(100vh - 230px)', overflowY: 'auto', display: 'flex', flexDirection: 'column', paddingRight: 4 },
       },
       messages.length || streamText
-        ? messages.map((m, i) => bubble(m, 'm' + i)).concat(
+        ? renderRounds(messages).concat(
           streamText
             ? [h('div', {
               key: 'streaming',
