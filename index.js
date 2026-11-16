@@ -2174,6 +2174,71 @@ function deepseekMemberModel(config, member, provider) {
  * 2026-11-16 用户决定：职位只是「提示词模板」，框架由成员选的模型自动推断
  * （inferKindFromModel）。职位钉死框架会导致「同一个职位没法同时有 deepseek 和 codex 成员」。
  */
+/**
+ * 重启后自动续上被中断的 turn（2026-11-16 用户要求）。
+ *
+ * 背景：DSH 的 agent turn 活在进程里，重启必然打断。日志里表现为
+ * 有 `turn/start` 却没有配对的 `turn/end` —— 这种会话停在那里，用户得手打「继续」。
+ *
+ * 做法：启动后延迟几秒（等 agents 懒加载就绪），对**绑定了小组的会话**扫最近日志，
+ * 发现被中断的就用 `agent.inbox.followup({content:[{type:'text',text:'继续'}]})` 补一条。
+ *
+ * 保守起见：
+ *  · 只处理最近 6 小时内有过活动的会话（避免把几天前的老会话翻出来重跑）
+ *  · 只在 config.autoResume !== false 时启用（默认开）
+ *  · 每个会话只续一次（重启多次也不会连环触发：续上之后日志里就有新的 turn 了）
+ */
+async function autoResumeInterruptedTurns() {
+  try {
+    if (state.config && state.config.autoResume === false) return 0
+    const agents = ctx0 && typeof ctx0.get === 'function' ? ctx0.get('agents') : undefined
+    if (!agents || typeof agents.get !== 'function') return 0
+    const cutoff = Date.now() - 6 * 3600 * 1000
+    const bound = (state.groups || []).filter((g) => g.sessionId).map((g) => normalizeSessionId(g.sessionId))
+    let resumed = 0
+    for (const sid of bound) {
+      try {
+        // 找会话日志目录
+        let dir = ''
+        for (const name of readdirSync(SESSIONS_DIR)) {
+          const candidate = path.join(SESSIONS_DIR, name, 'session-' + sid)
+          if (existsSync(candidate)) { dir = candidate; break }
+        }
+        if (!dir) continue
+        const file = path.join(dir, 'session.v4.jsonl.zstd')
+        if (!existsSync(file)) continue
+        if (statSync(file).mtimeMs < cutoff) continue          // 太老的不管
+        const out = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
+        if (!out || out.status !== 0) continue
+        const lines = String(out.stdout || '').split('\n').filter(Boolean)
+        // 从后往前找：最后一次 turn/start 之后有没有 turn/end
+        let lastStart = -1
+        let lastEnd = -1
+        for (let i = lines.length - 1; i >= 0 && (lastStart < 0 || lastEnd < 0); i -= 1) {
+          let ev = null
+          try { ev = JSON.parse(lines[i]) } catch { continue }
+          if (!ev || !ev.type) continue
+          if (ev.type === 'turn/start' && lastStart < 0) lastStart = i
+          if (ev.type === 'turn/end' && lastEnd < 0) lastEnd = i
+        }
+        if (lastStart < 0 || lastEnd > lastStart) continue       // 没有未闭合的 turn
+        const agent = agents.get(sid) || agents.get('session-' + sid)
+        const inbox = agent && agent.inbox
+        if (!inbox || typeof inbox.followup !== 'function') continue
+        inbox.followup({
+          content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
+          source: { kind: 'user' },
+        })
+        resumed += 1
+        console.error('[council] 自动续上被中断的会话:', sid)
+      } catch { /* 单个会话失败不影响其它 */ }
+    }
+    return resumed
+  } catch {
+    return 0
+  }
+}
+
 async function migrateRolesDropKindModel() {
   const roles = state.roles || []
   let dropped = 0
@@ -4232,6 +4297,9 @@ export function apply(ctx, config = {}) {
     // .then(() => migrateImageModels())  // 已停用：让用户自己选模型
     .then(() => migrateRolesDropKindModel())
     .then(() => migrateDeepseekMembers())
+    // 自动续上：等 agents 懒加载就绪再动手
+    .then(() => new Promise((resolve) => setTimeout(resolve, 4000)))
+    .then(() => autoResumeInterruptedTurns())
     .catch((error) => console.error('[council] startup migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
   // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
