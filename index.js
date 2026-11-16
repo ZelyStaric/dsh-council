@@ -3029,6 +3029,21 @@ function verdictOf(text) {
   const raw = String(text || '').trim()
   if (!raw) return null
   const stripped = raw.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim()
+  // ── 新格式（2026-11-16）：正文随便写，**最后一行**给 VERDICT ──
+  //   VERDICT: PASS / VERDICT: FAIL / VERDICT: FAIL MAJOR
+  // 这样模型不用被 JSON 语法绑住，可以认真写核验过程。
+  const v = /VERDICT\s*[:：]\s*(PASS|FAIL)(?:\s+(MAJOR|MINOR))?/i.exec(stripped)
+  if (v) {
+    const ok = v[1].toUpperCase() === 'PASS'
+    const before = stripped.slice(0, v.index).trim()
+    const reason = before.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)
+    const verdictOut = { ok, reason, format: 'verdict' }
+    if (v[2]) verdictOut.severity = v[2].toLowerCase()
+    // 指挥终审还会跟一行 OWNER: MEMBER|OTHER
+    const ownerM = /OWNER\s*[:：]\s*(MEMBER|OTHER)/i.exec(stripped.slice(v.index))
+    if (ownerM) verdictOut.owner = ownerM[1].toLowerCase()
+    return verdictOut
+  }
   const pick = (obj) => (obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, 'ok')
     ? { ok: obj.ok === true, reason: String(obj.reason ?? '') }
     : null)
@@ -3277,8 +3292,10 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
       '禁止使用任何工具（bash / read / 搜索等），图片已经附在消息里。',
       ...(brief ? ['[背景]', brief, ''] : []),
       `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
-      '请逐条对照任务要求检查画面里到底有没有（这是图片产出，图片已附在消息里，不需要再用工具）。',
-    '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
+      '请逐条对照任务要求，检查画面里到底有没有（这是图片产出，**图片已经附在消息里**，直接看，不要试图用工具去读它）。',
+      '',
+      '【怎么写结论】先用几句话说明你实际看到了什么（画面里有什么、缺什么），',
+      '然后最后一行按固定格式给结论：VERDICT: PASS / VERDICT: FAIL / VERDICT: FAIL MAJOR。',
     ].join('\n')
     const parts = output.file ? await imagePromptParts(ctx, output.file, imageText) : null
     if (parts) {
@@ -3304,8 +3321,13 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
     '3. 成员说「测试通过 / 命令输出是 Y」→ 自己重跑一遍，核对真实输出。',
     '4. 成员说「改了 A」→ 去看 A 的实际状态，而不是看它怎么描述。',
     '5. 只要有一项要求没有证据支撑，就判不通过，并指出缺哪项。',
-    '6. reason 里必须说明「偏差有多大」：交错了东西/大部分要求没做 → severity=major（会被直接打回，不再惊动指挥）；只是个别细节或表述问题 → severity=minor。',
-    '输出 JSON：{"ok":true/false,"severity":"major" 或 "minor","reason":"不超过 80 字"}',
+    '',
+    '【怎么写结论】**用自然语言写你查了什么、发现了什么**（几行都行，写清楚），',
+    '然后在**最后一行**给出结论，格式固定为下面三者之一：',
+    '  VERDICT: PASS            —— 要求都满足',
+    '  VERDICT: FAIL            —— 有问题但只是细节/表述（交给指挥复核）',
+    '  VERDICT: FAIL MAJOR      —— 偏差很大（交错东西、大部分没做），直接打回重做',
+    '除了最后那一行，不要输出任何 JSON。',
     ...(brief ? ['[背景]', brief, ''] : []),
     `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
     '[产出]',
@@ -3364,15 +3386,18 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
       '核验要点：',
       '1. 把任务要求拆成条目，逐条到实际产物里找证据（读文件、跑命令、看输出）。',
       '2. 成员说"改了 A"→ 去看 A 的真实状态；说"测试通过"→ 自己跑一遍。',
-      '3. 判 ok=false 时必须在 owner 里区分责任：',
-      '   · owner="member"：成员没做完/做错/偷工减料 → 会被打回去重做。',
-      '   · owner="other"：问题不在成员（需求有歧义、环境缺依赖、外部服务不可用）→ 在 reason 里写清你打算怎么解决。',
+      '3. **判不通过时要说清责任在谁**（这决定系统要不要打回重做）：',
+      '   · 成员没做完/做错/偷工减料 → 用 OWNER: MEMBER',
+      '   · 问题不在成员（需求有歧义、环境缺依赖、外部服务不可用）→ 用 OWNER: OTHER，并写清你打算怎么解决',
       ...(brief ? ['[背景]', brief, ''] : []),
       `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
       '[产出]',
       reviewText(output),
       '',
-      '只输出一个 JSON：{"ok":true 或 false,"owner":"member" 或 "other","reason":"不超过 80 字"}',
+      '【怎么写结论】先用自然语言写你核验了什么、结论如何，然后最后两行固定格式：',
+      '  VERDICT: PASS            或    VERDICT: FAIL',
+      '  OWNER: MEMBER            或    OWNER: OTHER（不通过时才需要，PASS 时省略）',
+      '除了最后这两行，不要输出任何 JSON。',
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
     // 审核不强制保留子会话（`__reuse` 会让 keepChild 恒为 true，审核子会话就永久驻留）。
@@ -3665,6 +3690,7 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     // 指挥终审若判「问题不在成员」（owner=other：需求歧义/环境限制/依赖缺失），
     // **不返工**——原样退回去重做结果必然一样，白烧一次调用（2026-11-16 实测：
     // 成员因「验收环境禁用只读工具」被判不通过，返工 400 秒后仍是同样结果）。
+    // 新格式下 owner 来自「OWNER: MEMBER|OTHER」那行（verdictOf 已解析进 review.commander.owner）
     const commanderOwner = review.commander && review.commander.owner ? String(review.commander.owner) : ''
     const blockedByEnvironment = commanderOwner === 'other'
     while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework && !blockedByEnvironment) {
