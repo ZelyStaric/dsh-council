@@ -7119,6 +7119,13 @@ function makeDelegateTool(ctx, config, group) {
           save().catch(() => {})
         }
 
+        // 边做边出（2026-11-16 用户要求）：每个成员一完成就把回执推进团队时间线，
+        // 而不是等所有成员都跑完再一次性刷出来。这里先备好 entry。
+        const liveTeamSid = normalizeSessionId(sessionIdOf(exec) || '')
+        let liveTeamEntry = null
+        try {
+          if (liveTeamSid && groupForSession(state, liveTeamSid)) liveTeamEntry = teamSessionState(liveTeamSid)
+        } catch { liveTeamEntry = null }
         const results = await Promise.all(assignments.map(async (item) => {
           const member = resolveMember(live, item.member)
           if (!member) return { name: String(item.member), kind: 'unknown', ok: false, error: 'member not found' }
@@ -7190,6 +7197,25 @@ function makeDelegateTool(ctx, config, group) {
                 : '验收未通过'
             append('## 验收（小组）\n' + why)
           }
+          // ── 边做边出：这个成员刚跑完（含审核结论）→ 立刻推到团队时间线 ──
+          try {
+            if (liveTeamEntry) {
+              const selfV = result.review && result.review.self ? result.review.self : null
+              const cmdV = result.review && result.review.commander ? result.review.commander : null
+              teamPushMessage(liveTeamEntry, 'member', String(result.text || result.error || '（无产出）'), {
+                name: member.name,
+                kind: member.kind || 'deepseek',
+                model: result.model || member.model || null,
+                image: result.image || null,
+                acceptance: result.acceptance || result.acceptanceStatus || null,
+                reviewOk: selfV && typeof selfV.ok === 'boolean' ? selfV.ok : null,
+                reviewReason: selfV && selfV.reason ? String(selfV.reason) : null,
+                commanderOk: cmdV && typeof cmdV.ok === 'boolean' ? cmdV.ok : null,
+                commanderReason: cmdV && cmdV.reason ? String(cmdV.reason) : null,
+                streaming: false,
+              })
+            }
+          } catch { /* 推送失败不影响派活 */ }
           return {
             name: member.name,
             kind: member.kind,
@@ -7315,7 +7341,8 @@ function makeDelegateTool(ctx, config, group) {
                   '直接派给 **' + names.join('、') + '**（未经指挥拆解）', { plan: true })
               }
             } catch { /* 拆解回执推送失败不影响派活 */ }
-            for (const m of response.members || []) {
+            // 成员回执已在各自完成时推送（边做边出），这里不再重复。
+            for (const m of []) {
               const self = m.review && m.review.self ? m.review.self : null
               const commander = m.review && m.review.commander ? m.review.commander : null
               teamPushMessage(entry, 'member', String(m.text || m.error || '（无产出）'), {
