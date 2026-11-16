@@ -2475,7 +2475,7 @@ try {
     mod.__setRunKind(async (ctxArg, member, prompt) => {
       const text = String(prompt || '')
       if (text.includes('你是这个小组的审校')) return { ok: true, text: JSON.stringify(prelim) }
-      if (text.includes('现在做验收')) return { ok: true, text: JSON.stringify(commander) }
+      if ((text.includes('现在做验收') || text.includes('最终验收'))) return { ok: true, text: JSON.stringify(commander) }
       return { ok: true, text: '做完了：/tmp/out.txt（已验证）' }
     })
   }
@@ -2615,6 +2615,9 @@ try {
       assert.equal(commander.ok, true)
       assert.equal(seen.length >= 2, true, '审校 + 指挥各应发一次审核 prompt，实际 ' + seen.length)
       for (const prompt of seen) {
+        if (!prompt.includes('[TAIL-MARKER]')) {
+          console.error('[DEBUG] 缺 TAIL 的 prompt 长度=' + prompt.length + ' 头=' + prompt.slice(0, 120).replace(/\n/g, ' '))
+        }
         assert.ok(prompt.includes('[TAIL-MARKER]'), '审核 prompt 必须包含产出最后一段（说明没被截断）')
         assert.ok(prompt.includes(longText), '审核 prompt 必须包含完整产出（' + longText.length + ' 字符）')
       }

@@ -3222,12 +3222,14 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
       '禁止使用任何工具（bash / read / 搜索等），图片已经附在消息里。',
       ...(brief ? ['[背景]', brief, ''] : []),
       `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
-      '请逐条对照任务要求检查画面里到底有没有，只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
+      '请逐条对照任务要求检查画面里到底有没有（这是图片产出，图片已附在消息里，不需要再用工具）。',
+    '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
     ].join('\n')
     const parts = output.file ? await imagePromptParts(ctx, output.file, imageText) : null
     if (parts) {
       const { verdict } = await runReviewTurn(
-        ctx, Object.assign({}, reviewer, { __preset: 'minimal', __noTools: true }),
+        // 允许只读核验：read / grep / glob / bash（只读命令）。写操作由 prompt 明确禁止。
+    ctx, Object.assign({}, reviewer),
         parts, config, group, styleOverride, parent, 120_000, callId, 'prelimReview(image)',
       )
       if (verdict) { verdict.by = reviewer.name; verdict.sawImage = true; return verdict }
@@ -3236,14 +3238,23 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
     return reviewImage(ctx, group, { file: output.file, task }, config, styleOverride, callId)
   }
   const prompt = [
-    '你是这个小组的审校，做初步校验（之后还有指挥的最终审核）。',
-    '禁止使用任何工具（bash / read / glob / 搜索等），也不要浏览文件系统；只根据下面的信息判断，立即只输出 JSON。',
-    '注意：你看不到磁盘，所以不要以"缺截图/缺文件/缺附件"为由判不通过；只要产出文本里说明了产物路径与验证结果，就按已交付处理，只挑文本层面的缺失（漏项、口径矛盾、阈值不符）。',
+    '你是这个小组的审校，做**初步核验**（之后还有指挥的最终审核）。',
+    '**你有只读工具，必须实际核验，不要只信成员的自述。**',
+    '可用：read / grep / glob / bash（只读命令：ls、cat、head、wc、git status、重跑测试等）。',
+    '禁止：修改任何文件、安装依赖、执行写操作（你只核验，不修）。',
+    '',
+    '核验清单（逐项做，别跳）：',
+    '1. 把任务要求拆成条目，逐条到产出里找证据；找不到证据的条目算未完成。',
+    '2. 成员说「创建了 /path/x」→ 真的去 read 那个文件，确认存在且内容符合要求。',
+    '3. 成员说「测试通过 / 命令输出是 Y」→ 自己重跑一遍，核对真实输出。',
+    '4. 成员说「改了 A」→ 去看 A 的实际状态，而不是看它怎么描述。',
+    '5. 只要有一项要求没有证据支撑，就判不通过，并指出缺哪项。',
+    '6. reason 里必须说明「偏差有多大」：交错了东西/大部分要求没做 → severity=major（会被直接打回，不再惊动指挥）；只是个别细节或表述问题 → severity=minor。',
+    '输出 JSON：{"ok":true/false,"severity":"major" 或 "minor","reason":"不超过 80 字"}',
     ...(brief ? ['[背景]', brief, ''] : []),
     `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
     '[产出]',
     reviewText(output),
-    '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
   ].join('\n')
   // 审核位一律全新会话（不再复用 state.reviewChildren / __reviewConvId）：见 runReviewTurn。
   const { verdict } = await runReviewTurn(
@@ -3283,17 +3294,30 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
   }
   if (commanderMember) {
     const cmdRole = commanderRole(group)
+    // ── 文本产出的指挥终审 ────────────────────────────────────────────
+    // 早先这段 prompt 被写成「对这张图做最终验收」（复制图片分支留下的），
+    // 导致文本交付也在问"图"（2026-11-16 修）。
     const prompt = [
       `[你的职位] ${cmdRole.name}`,
       cmdRole.prompt ? `[职位职责与风格]\n${cmdRole.prompt}\n` : '',
-      '你是这个小组的指挥，现在做验收。',
-      '禁止使用任何工具，也不要浏览文件系统；只根据下面的信息判断，立即只输出 JSON。',
-      '注意：你看不到磁盘，不要以"缺截图/缺文件"为由驳回；只判文本层面的缺失与矛盾。',
+      '你是这个小组的指挥，现在对成员的交付做**最终验收**。',
+      '',
+      '**你有只读核验工具，必须实际核验，不要只信成员的自述。**',
+      '可用：read / grep / glob / bash（只读命令：ls、cat、head、wc、git status、重跑测试等）。',
+      '禁止：修改任何文件、安装依赖、执行写操作（你只验收，不修）。',
+      '',
+      '核验要点：',
+      '1. 把任务要求拆成条目，逐条到实际产物里找证据（读文件、跑命令、看输出）。',
+      '2. 成员说"改了 A"→ 去看 A 的真实状态；说"测试通过"→ 自己跑一遍。',
+      '3. 判 ok=false 时必须在 owner 里区分责任：',
+      '   · owner="member"：成员没做完/做错/偷工减料 → 会被打回去重做。',
+      '   · owner="other"：问题不在成员（需求有歧义、环境缺依赖、外部服务不可用）→ 在 reason 里写清你打算怎么解决。',
       ...(brief ? ['[背景]', brief, ''] : []),
       `成员 ${member.name}（${member.kind}）完成了任务：${task}`,
       '[产出]',
       reviewText(output),
-      '只输出一个 JSON：{"ok":true 或 false,"reason":"不超过 60 字"}',
+      '',
+      '只输出一个 JSON：{"ok":true 或 false,"owner":"member" 或 "other","reason":"不超过 80 字"}',
     ].join('\n')
     // Never resume the commander member's own thread: reviews are side-channel.
     // 审核不强制保留子会话（`__reuse` 会让 keepChild 恒为 true，审核子会话就永久驻留）。
@@ -3304,7 +3328,7 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     verdict.by = commanderMember.name
     return verdict
   }
-  return null
+
 }
 
 /** Ask the acceptance-commander member to decompose the user's request. */
@@ -3573,7 +3597,7 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
 
   if (result.ok) {
     // v0.4 P3：审校与指挥**并行**（Wall clock = max 而不是 sum）
-    await runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
+    await runReviewChain(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
     acceptance = acceptanceOf()
 
     // 被否 / 未判定 一律返工，次数由 maxRework 控制（0 = 不返工，仅标记）
@@ -3601,7 +3625,7 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
       }
       result = second
       review.reworkError = undefined
-      await runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
+      await runReviewChain(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
       acceptance = acceptanceOf()
       reworkFailed = false
       reworkError = undefined
@@ -6384,32 +6408,61 @@ function rosterText(group) {
 /** Register the delegate tool and roster prompt on one live chat session. */
 /** council_member 的实现：抽成模块级函数，既能给 agent 工具用，也能给 /internal/tool 转发用。 */
 /**
- * 初审（审校）+ 终审（指挥）**并行**跑（v0.4 P3，用户明确要求两者同时发生）。
+ * 审核链（**串行**，2026-11-16 用户给出完整闭环后重写）。
  *
- * 之前是串行：审校跑完才跑指挥，单个成员的总审核耗时是两者之和；
- * 现在 Promise.all 并发，墙钟时间取两者的最大值。
+ * 用户定义的闭环：
+ *   成员产出 →（成员自审，可选）→ 回执 →（初审，可选）→ 指挥终审 → 交付/打回
  *
- * 注意：两段审核都没开 resume（各有自己的全新会话），所以并发不会互相踩上下文。
+ * 三条硬规则：
+ *  1. **不存在并行**：自审 → 初审 → 指挥终审，逐级向上。上一级没过，下一级根本不该跑。
+ *  2. **初审是便宜模型的快筛**：成员交付与实际要求偏差太大时**直接打回重做**，
+ *     不再浪费指挥的一次审核（`short-circuited` 标记会写进回执）。
+ *  3. **指挥终审是最后一道**：它判不过就要区分责任——
+ *     问题在成员 → 指挥派回去重做；问题不在成员（需求歧义/环境/依赖）→ 指挥自己排查解决。
+ *
+ * @returns {{ shortCircuited: boolean }} shortCircuited=true 表示初审已打回，没跑指挥终审。
  */
-async function runReviewsInParallel(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage) {
-  const jobs = []
+async function runReviewChain(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage) {
+  // ── 1) 成员自审（兜底）────────────────────────────────────────────
+  // 只要本组**开了审核**（初审或终审任一），就总是跑一次：审校成员缺席时它是唯一的结论来源，
+  // 砍掉它会让「配了审核但没人审」的组从 rejected 退化成 none（原有语义靠它兜底）。
+  // 两个审核都关的组不跑（否则凭空多一次审核）。
+  // group.selfReview === true 只是让它额外在进度条上显式报一次。
+  const selfReviewEnabled = requirePrelim || requireCommander
+  if (selfReviewEnabled) {
+    if (onStage) onStage('自审（成员自查产出与要求）')
+    try {
+      review.selfCheck = await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
+    } catch {
+      review.selfCheck = null
+    }
+  }
+
+  // ── 2) 初审（可选；审校成员存在且 requirePrelim 才跑）──────────────────
   if (requirePrelim) {
-    jobs.push((async () => {
-      review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
-      review.self = review.prelim || await selfReview(ctx, member, task, result, config, group, styleOverride, parent, callId)
-    })())
+    if (onStage) onStage('初审（审校快筛）')
+    review.prelim = await prelimReview(ctx, group, member, task, result, config, styleOverride, parent, brief, callId)
+    // 兼容旧字段：review.self 是「用于验收的初审结论」——优先初审，其次成员自审。
+    // 注意：初审「解析失败」仍按不通过处理（触发返工）——这是原有语义，别放宽。
+    review.self = review.prelim || review.selfCheck || null
+    // 初审明确不通过 → 直接打回，不再惊动指挥
+    const prelimOk = review.prelim && review.prelim.ok !== undefined ? Boolean(review.prelim.ok) : null
+    const prelimSeverity = review.prelim && review.prelim.severity ? String(review.prelim.severity) : ''
+    // 只有「偏差很大」（severity=major）才短路；普通不通过仍交给指挥复核（2026-11-16 用户口径）
+    if (prelimOk === false && prelimSeverity === 'major' && requireCommander) {
+      review.shortCircuited = true
+      return { shortCircuited: true }
+    }
+  } else {
+    review.self = review.selfCheck || null
   }
+
+  // ── 3) 指挥终审 ─────────────────────────────────────────────────────
   if (requireCommander) {
-    jobs.push((async () => {
-      review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
-    })())
+    if (onStage) onStage('终审（指挥）')
+    review.commander = await commanderReview(ctx, group, member, task, result, config, parent, brief, styleOverride, callId)
   }
-  if (!jobs.length) return
-  if (onStage) {
-    onStage(requirePrelim && requireCommander ? '审核中（审校 + 指挥并行）'
-      : requirePrelim ? '初审（审校）' : '终审（指挥）')
-  }
-  await Promise.all(jobs)
+  return { shortCircuited: false }
 }
 
 async function runMemberAction(group, args, ctx, config) {
