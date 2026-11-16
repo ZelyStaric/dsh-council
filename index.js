@@ -1286,11 +1286,13 @@ function jsonLines(text) {
 }
 
 /** One Codex turn. Resumes the stored thread when present. */
-async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config, scopeUnit = '', extraArgs = null }) {
+async function runCodex({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, member, config, scopeUnit = '', extraArgs = null }) {
   const args = ['exec', '--json', '--skip-git-repo-check', '-C', cwd]
   if (model) args.push('--model', model)
   // 团队大脑：只读沙箱 + 只挂 council MCP（必须在 prompt/resume 之前）
   if (Array.isArray(extraArgs) && extraArgs.length) args.push(...extraArgs)
+  // 按成员限定 MCP（2026-11-16）：把白名单外的 server 逐个 enabled=false
+  if (member) args.push(...mcpArgsForMember(member).args)
   if (resume) args.push('resume', resume, prompt)
   else args.push(prompt)
 
@@ -1396,7 +1398,7 @@ function cleanGeminiOutput(raw) {
  *
  * 权限：成员要能干活 → `--approval-mode yolo`；审核位（noTools）→ `plan`（只读）。
  */
-async function runGemini({ cwd, model, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, config, scopeUnit = '' }) {
+async function runGemini({ cwd, model, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, member, config, scopeUnit = '' }) {
   const geminiBin = process.env.COUNCIL_GEMINI_BIN || 'gemini'
   if (!(await commandExists(geminiBin))) {
     return {
@@ -1407,6 +1409,8 @@ async function runGemini({ cwd, model, prompt, env, noTools, signal, timeoutMs, 
   const args = ['-p', prompt, '--skip-trust']
   if (model) args.push('--model', String(model))
   args.push('--approval-mode', noTools ? 'plan' : 'yolo')
+  // 按成员限定 MCP（2026-11-16）
+  if (member) args.push(...mcpArgsForMember(member).args)
 
   const { code, out, err, reason, error: killedError } = await run(geminiBin, args, {
     cwd, env, signal, timeoutMs, idleMs, hardLimitMs, onActivity, memberName, scopeUnit,
@@ -1423,7 +1427,7 @@ async function runGemini({ cwd, model, prompt, env, noTools, signal, timeoutMs, 
   return { ok: Boolean(text), text, usage: null }
 }
 
-async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, noResume, config, steerable = false, callId, allowMcp = false, extraArgs = null, scopeUnit = '' }) {
+async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, timeoutMs, idleMs, hardLimitMs, maxDurationMs, onActivity, memberName, member, noResume, config, steerable = false, callId, allowMcp = false, extraArgs = null, scopeUnit = '' }) {
   const claudeBin = claudeBinary()
   if (!(await commandExists(claudeBin))) {
     return { ok: false, text: '', error: '未找到 claude CLI（' + claudeBin + '）。装 dsh-subagent-claude-code bundle，或用 COUNCIL_CLAUDE_BIN 指定绝对路径。', usage: null }
@@ -1435,7 +1439,21 @@ async function runClaude({ cwd, model, resume, prompt, env, noTools, signal, tim
   if (model) args.push('--model', claudeCliModel(model))
   if (noTools) args.push('--disallowedTools', 'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit')
   // 默认不带 MCP：member 的 MCP 越多，启动越慢（实测两个 Blender MCP 会让首轮卡几分钟）
-  if (!allowMcp) args.push('--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}')
+  // 成员指定了 mcpServers 白名单时，用内联 JSON 只挂这些（2026-11-16）。
+  // 注意：这里用的是**内联** --mcp-config，说明这套 SDK bundle 支持该参数（已实测）。
+  const wantedMcp = Array.isArray(member && member.mcpServers) ? member.mcpServers.filter(Boolean) : []
+  if (wantedMcp.length) {
+    const servers = {}
+    let pool = []
+    try { pool = (listMcpServers().claude || []) } catch { pool = [] }
+    for (const m of pool) {
+      if (!wantedMcp.includes(m.name)) continue
+      servers[m.name] = { command: m.command, args: m.args }
+    }
+    args.push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: servers }))
+  } else if (!allowMcp) {
+    args.push('--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}')
+  }
   // 团队模式：调用方自带 MCP 配置（只挂 council，其它一律不给），放在 --strict-mcp-config 之后
   if (Array.isArray(extraArgs) && extraArgs.length) args.push(...extraArgs)
   const exec = claudeExecOverride || run
@@ -3185,6 +3203,7 @@ async function runKindImpl(ctx, member, prompt, config, group, styleOverride, pa
       maxDurationMs,
       onActivity,
       memberName: member.name,
+      member,
       config,
     })
   }
@@ -4369,6 +4388,16 @@ export function createHandler(ctx, config = {}) {
                     body.kind = inferred
                   }
                   Object.assign(member, pick(body, ['name', 'kind', 'model', 'provider', 'providerId', 'roleId', 'cwd']))
+                  // MCP 白名单（2026-11-16）：字符串数组；undefined = 不限制（跟随框架全局配置）
+                  if (body.mcpServers !== undefined) {
+                    if (Array.isArray(body.mcpServers)) {
+                      const list = body.mcpServers.map((x) => String(x || '').trim()).filter(Boolean)
+                      if (list.length) member.mcpServers = list
+                      else delete member.mcpServers
+                    } else if (body.mcpServers === null) {
+                      delete member.mcpServers
+                    }
+                  }
                   // v0.4 P3：长久/临时 可随时切换（false = 临时，每轮重发上下文）
                   if (typeof body.persistent === 'boolean') member.persistent = body.persistent
                   if (kindChanged) delete member.convId
@@ -7848,3 +7877,51 @@ async function ensureWorkspace(ctx, group) {
   }
 }
 
+
+/**
+ * 把成员的 MCP 白名单翻译成各框架自己的 CLI 参数（2026-11-16）。
+ *
+ * 语义：member.mcpServers 为空/未设置 = **不限制**（跟随该框架的全局配置）；
+ *      给了数组 = 只保留这些 server，其余一律关掉/不许用。
+ *
+ * 各框架能力不同：
+ *   · gemini → `--allowed-mcp-server-names a,b`（官方白名单，最干净）
+ *   · codex  → 没有"清空所有"的开关，只能把**不想要的逐个** `-c mcp_servers.<name>.enabled=false`
+ *   · claude → `--mcp-config <file>`（生成临时配置；SDK bundle 是否透传需实测）
+ *   · deepseek → DSH 子会话继承主会话 profile，做不到，直接返回空
+ */
+function mcpArgsForMember(member) {
+  const want = Array.isArray(member && member.mcpServers) ? member.mcpServers.filter(Boolean) : []
+  if (!want.length) return { args: [] }
+  const kind = member && member.kind
+  let available = { codex: [], gemini: [], claude: [] }
+  try { available = listMcpServers() } catch { /* 拿不到清单就退化成不限制 */ return { args: [] } }
+  const names = (available[kind] || []).map((m) => m.name)
+
+  if (kind === 'gemini') {
+    return { args: ['--allowed-mcp-server-names', want.join(',')] }
+  }
+  if (kind === 'codex') {
+    const args = []
+    for (const name of names) {
+      if (want.includes(name)) continue
+      args.push('-c', 'mcp_servers.' + name + '.enabled=false')
+    }
+    return { args }
+  }
+  if (kind === 'claude') {
+    const servers = {}
+    for (const m of (available.claude || [])) {
+      if (!want.includes(m.name)) continue
+      servers[m.name] = { command: m.command, args: m.args }
+    }
+    try {
+      const file = path.join(os.tmpdir(), 'council-mcp-' + String(member.id || 'member') + '.json')
+      writeFileSync(file, JSON.stringify({ mcpServers: servers }, null, 2), 'utf8')
+      return { args: ['--mcp-config', file], tempFile: file }
+    } catch {
+      return { args: [] }
+    }
+  }
+  return { args: [] }
+}

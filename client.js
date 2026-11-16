@@ -572,6 +572,23 @@ window.__ModuleLoader__.load({
                 return member.kind === 'image' ? modelOptions('image') : null
               })()),
           roleSelect),
+        // MCP 白名单（2026-11-16）：只有 claude / codex / gemini 三条腿能按成员隔离。
+        // deepseek 成员跑在 DSH 子会话里，继承主会话 profile，改不了 → 不显示这一行。
+        (member.kind === 'claude' || member.kind === 'codex' || member.kind === 'gemini')
+          ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 } },
+            h('span', { style: Object.assign({}, styles.muted, { fontSize: 11, flexShrink: 0 }) }, 'MCP'),
+            h('input', {
+              style: Object.assign({}, styles.input, { flex: 1, fontSize: 11 }),
+              defaultValue: Array.isArray(member.mcpServers) ? member.mcpServers.join(', ') : '',
+              placeholder: '留空 = 用该框架全部 MCP；填名字用逗号分隔可限定',
+              title: '给这个成员限定加载哪些 MCP server（只影响 claude/codex/gemini 三条腿）',
+              onBlur: (event) => {
+                const raw = String(event.target.value || '').trim()
+                const list = raw ? raw.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean) : []
+                mutate('/members', { id: member.id, mcpServers: list })
+              },
+            }))
+          : null,
         h('div', { style: Object.assign({}, styles.muted, { marginTop: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }) },
           // 职位名在上一行的下拉里已经有了，这里不再重复「职位：指挥」；会话 id 对用户无意义，去掉
           h('span', null, role ? '' : '未分配职位'),
