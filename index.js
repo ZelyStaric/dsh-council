@@ -1637,11 +1637,20 @@ function chatMessagesFromLog(sessionId) {
     const hit = chatLogCache.get(id)
     if (hit && hit.stamp === stamp) return hit.msgs
 
-    const buffer = readFileSync(file)
-    const scanned = scanZstdFrames(buffer)
+    // 多帧 zstd：`zstdDecompressSync` 只解第一帧（header），scanZstdFrames 在本机这份文件上
+    // 也扫不全（2026-11-16 实测：系统 `zstd -d -c` 能解出 53 行/8 条 user 消息，自研扫描拿不到）。
+    // 直接用系统 zstd 命令，最可靠；结果按 mtime+size 缓存，所以只付一次解压成本。
     let text = ''
-    for (const frame of scanned.frames || []) {
-      try { text += zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8') } catch { /* 跳过坏帧 */ }
+    try {
+      const out = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
+      if (out && out.status === 0) text = String(out.stdout || '')
+    } catch { /* 没有 zstd 命令时走下面的兜底 */ }
+    if (!text) {
+      const buffer = readFileSync(file)
+      const scanned = scanZstdFrames(buffer)
+      for (const frame of scanned.frames || []) {
+        try { text += zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString('utf8') } catch { /* 跳过坏帧 */ }
+      }
     }
     const msgs = []
     for (const line of text.split('\n')) {
