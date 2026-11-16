@@ -2185,64 +2185,9 @@ function deepseekMemberModel(config, member, provider) {
  *
  * 保守起见：
  *  · 只处理最近 6 小时内有过活动的会话（避免把几天前的老会话翻出来重跑）
- *  · 只在 config.autoResume !== false 时启用（默认开）
  *  · 每个会话只续一次（重启多次也不会连环触发：续上之后日志里就有新的 turn 了）
  */
 /** 只读扫描：哪些绑定会话有「未闭合的 turn」（turn/start 之后没有 turn/end）。 */
-function scanInterruptedTurns() {
-  const out = []
-  try {
-    const cutoff = Date.now() - 6 * 3600 * 1000
-    // 与自动续上同口径：最近 6 小时内活跃的**所有**会话
-    const bound = []
-    for (const ws of readdirSync(SESSIONS_DIR)) {
-      const wsDir = path.join(SESSIONS_DIR, ws)
-      let names = []
-      try { names = readdirSync(wsDir) } catch { continue }
-      for (const name of names) {
-        if (!name.startsWith('session-')) continue
-        const f = path.join(wsDir, name, 'session.v4.jsonl.zstd')
-        try { if (existsSync(f) && statSync(f).mtimeMs >= cutoff) bound.push({ gid: 'session-' + name.replace(/^session-/, '').slice(0, 8), sid: name.replace(/^session-/, '') }) } catch { /* skip */ }
-      }
-    }
-    for (const item of bound) {
-      try {
-        let dir = ''
-        for (const name of readdirSync(SESSIONS_DIR)) {
-          const candidate = path.join(SESSIONS_DIR, name, 'session-' + item.sid)
-          if (existsSync(candidate)) { dir = candidate; break }
-        }
-        if (!dir) { out.push({ ...item, found: false }); continue }
-        const file = path.join(dir, 'session.v4.jsonl.zstd')
-        if (!existsSync(file)) { out.push({ ...item, found: false }); continue }
-        const mtime = statSync(file).mtimeMs
-        if (mtime < cutoff) { out.push({ ...item, found: true, old: true }); continue }
-        const res = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
-        if (!res || res.status !== 0) { out.push({ ...item, found: true, decompressFailed: true }); continue }
-        const lines = String(res.stdout || '').split('\n').filter(Boolean)
-        // 判定「被打断」：最后一个 turn/end 的 data.reason.kind === 'interrupted'
-        // （2026-11-16 实测：被打断的 turn **也会写 turn/end**，只是带 interrupted 标记；
-        //  之前用「有 turn/start 没 turn/end」判断，永远 false。）
-        let lastEndIdx = -1
-        let lastEndReason = ''
-        let lastStartIdx = -1
-        for (let i = lines.length - 1; i >= 0; i -= 1) {
-          let ev = null
-          try { ev = JSON.parse(lines[i]) } catch { continue }
-          if (!ev || !ev.type) continue
-          if (ev.type === 'turn/end' && lastEndIdx < 0) {
-            lastEndIdx = i
-            lastEndReason = String((ev.data && ev.data.reason && ev.data.reason.kind) || '')
-          }
-          if (ev.type === 'turn/start' && lastStartIdx < 0) { lastStartIdx = i; break }
-        }
-        const interrupted = lastEndReason === 'interrupted'
-        out.push({ ...item, found: true, interrupted, reason: lastEndReason, lastStart: lastStartIdx, lastEnd: lastEndIdx, total: lines.length })
-      } catch (e) { out.push({ ...item, error: String(e && e.message) }) }
-    }
-  } catch { /* ignore */ }
-  return out
-}
 
 /** 自动续上的调试日志（写文件，因为 console 在 systemd 下不一定进 journal）。 */
 
@@ -4910,10 +4855,6 @@ export function createHandler(ctx, config = {}) {
           }
           if (req.method === 'GET' && route === '/balance') {
             return send(res, 200, await deepseekBalance(ctx, config))
-          }
-          if (req.method === 'GET' && route === '/resume/scan') {
-            // 只读诊断：哪些绑定会话有未闭合的 turn（重启后会自动续上）
-            return send(res, 200, { sessions: scanInterruptedTurns() })
           }
           if (req.method === 'GET' && route === '/file') {
             // 只读地把成员产出的本地文件发给前端（图片预览 / 音频播放 / 文件下载）。
