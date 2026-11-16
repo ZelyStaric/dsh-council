@@ -109,12 +109,12 @@ for (const [name, state] of FIXTURES) {
     let expected = (EXPECT[name] || {})[id] || []
     if (id === 'council' && name === 'archived-bound') {
       // 组还带着 sessionId 但已归档 → groupForSession 必须排除它，页面回落到「单人模式」
-      expected = ['单人模式', '已归档 1 个']
+      expected = ['单人模式']
     } else if (id === 'council' && name !== 'empty') {
       // 与产品规则一致：已归档的组不再算「当前组」（v0.2.10 起归档组不进 groupForSession）
       const bound = Boolean(boundGroupOf(state))
-      expected = bound ? ['职位', '成员', '总画师风格', '清理 7 天前归档'] : ['单人模式']
-      if (name === 'archived') expected = expected.concat(['已归档 1 个'])
+      expected = bound ? ['职位', '成员', '总画师风格'] : ['单人模式']
+      // 已归档计数已从头部移除（2026-11-16 用户要求精简）
     }
     const missing = expected.filter((m) => !text.includes(m))
     if (missing.length) {

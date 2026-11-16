@@ -564,7 +564,8 @@ window.__ModuleLoader__.load({
               })()),
           roleSelect),
         h('div', { style: Object.assign({}, styles.muted, { marginTop: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }) },
-          h('span', null, '职位：' + (role ? role.name : '未分配') + ' · 会话：' + (member.convId ? member.convId.slice(0, 8) : '尚未开始')),
+          // 职位名在上一行的下拉里已经有了，这里不再重复「职位：指挥」；会话 id 对用户无意义，去掉
+          h('span', null, role ? '' : '未分配职位'),
           // v0.4 P3：长久成员继承上下文（可压缩）；临时成员每轮由指挥重发上下文
           h('span', {
             style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
@@ -694,15 +695,6 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.bar },
         h('strong', null, '小组编排'),
         h('span', { style: styles.chip }, group.name),
-        h('span', { style: styles.muted }, '（指挥职位负责拆解 + 终审，审校职位负责初审；对话只负责转达）'),
-        h('span', { style: styles.chip }, '指挥：' + (commanderMember ? commanderMember.name : '未分配')),
-        h('span', { style: styles.chip }, '审校：' + (reviewerMember ? reviewerMember.name : '未分配')),
-        archivedGroupCount
-          ? h('span', {
-            style: Object.assign({}, styles.muted, { fontSize: 11, opacity: 0.65 }),
-            title: '会话已归档的小组不再出现在小组列表里',
-          }, '已归档 ' + archivedGroupCount + ' 个')
-          : null,
         // 只清理「归档超过 N 天」的小组；会话目录一律不碰（「清理子会话」按钮已从 UI 移除）。
         h('button', {
           disabled: busy === 'archived',
