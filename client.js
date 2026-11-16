@@ -1909,6 +1909,9 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         refreshTeam()
+        // 同步一次「哪些会话有小组」——团队视图的「不渲染」判断依赖它。
+        // 小组页的 applyData 也会刷新，但用户可能根本没打开过小组页。
+        call('/state').then((data) => refreshGroupSessionSet(data && data.state)).catch(() => {})
         call('/providers').then((d) => setProviders((d && d.providers) || [])).catch(() => setProviders(null))
         let alive = true
         // 1 秒轮询：用户发完消息要立刻在团队页看到（2026-11-16 用户反馈 3 秒太慢）。
