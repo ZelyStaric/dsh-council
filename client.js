@@ -2401,13 +2401,19 @@ window.__ModuleLoader__.load({
         const hide = solo ? mine : dialog
         const show = solo ? dialog : mine
         // 先把选中项挪到「会被显示」的那一边，再隐藏——否则内容区会变成空白
+        // 需要切走的情况（2026-11-16 修）：
+        //  ① 选中的 tab 马上要被隐藏 → 切到要显示的第一个
+        //  ② **一个可见的 tab 都没选中**（DSH 隐藏后会把选中态清空）→ 必须补一次点击，
+        //     否则内容区不知道该显示什么，就是用户看到的那 1 秒空白（tab 栏全灰）。
         const activeHidden = hide.filter((b) => b.getAttribute('aria-selected') === 'true')[0]
+        const anyVisibleSelected = show.some((b) => b.getAttribute('aria-selected') === 'true')
+        const needSelect = Boolean(show[0]) && (activeHidden || !anyVisibleSelected)
         // 切换锁：click 会触发 DSH 切视图 → 重渲染 → MutationObserver 再进来，
         // 没有锁会在「对话 ↔ 团队」之间反复横跳（用户看到的闪烁）。
-        if (activeHidden && show[0] && !tabSwitching) {
+        if (needSelect && !tabSwitching) {
           tabSwitching = true
           try { show[0].click() } catch { /* ignore */ }
-          setTimeout(() => { tabSwitching = false }, 500)
+          setTimeout(() => { tabSwitching = false }, 200)
         }
         for (const b of hide) b.style.display = 'none'
         for (const b of show) b.style.display = ''
