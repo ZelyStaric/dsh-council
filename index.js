@@ -2239,20 +2239,32 @@ async function autoResumeInterruptedTurns() {
     const agents = ctx0 && typeof ctx0.get === 'function' ? ctx0.get('agents') : undefined
     if (!agents || typeof agents.get !== 'function') return 0
     const cutoff = Date.now() - 6 * 3600 * 1000
-    const bound = (state.groups || []).filter((g) => g.sessionId).map((g) => normalizeSessionId(g.sessionId))
-    let resumed = 0
-    for (const sid of bound) {
-      try {
-        // 找会话日志目录
-        let dir = ''
-        for (const name of readdirSync(SESSIONS_DIR)) {
-          const candidate = path.join(SESSIONS_DIR, name, 'session-' + sid)
-          if (existsSync(candidate)) { dir = candidate; break }
+    // 2026-11-16 修正：早先只扫「绑定了小组」的会话，结果**单人模式的会话永远续不上**
+    // （用户实际就是在本会话里被打断的）。现在扫最近 6 小时内有过日志写入的所有会话。
+    const candidates = []
+    try {
+      for (const ws of readdirSync(SESSIONS_DIR)) {
+        const wsDir = path.join(SESSIONS_DIR, ws)
+        let names = []
+        try { names = readdirSync(wsDir) } catch { continue }
+        for (const name of names) {
+          if (!name.startsWith('session-')) continue
+          const file = path.join(wsDir, name, 'session.v4.jsonl.zstd')
+          try {
+            if (existsSync(file) && statSync(file).mtimeMs >= cutoff) {
+              candidates.push({ ws, dir: path.join(wsDir, name), sid: name.replace(/^session-/, '') })
+            }
+          } catch { /* 单个跳过 */ }
         }
-        if (!dir) continue
+      }
+    } catch { /* ignore */ }
+    let resumed = 0
+    for (const cand of candidates) {
+      const sid = cand.sid
+      try {
+        const dir = cand.dir
         const file = path.join(dir, 'session.v4.jsonl.zstd')
         if (!existsSync(file)) continue
-        if (statSync(file).mtimeMs < cutoff) continue          // 太老的不管
         const out = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
         if (!out || out.status !== 0) continue
         const lines = String(out.stdout || '').split('\n').filter(Boolean)
