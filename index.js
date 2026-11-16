@@ -7195,6 +7195,36 @@ function makeDelegateTool(ctx, config, group) {
           const sid = normalizeSessionId(sessionIdOf(exec) || '')
           if (sid && groupForSession(state, sid)) {
             const entry = teamSessionState(sid)
+            // ── 指挥的「拆解回执」先落一条（2026-11-16 用户指出：团队页只看到成员回执，
+            //    看不到指挥是怎么拆解、派给谁的）。放在成员回执之前，时间线顺序才符合真实流程：
+            //    你的话 → 指挥拆解 → 成员回执。
+            try {
+              const plan = response.plan
+              const planned = Array.isArray(plan && plan.assignments) ? plan.assignments : []
+              if (planned.length) {
+                const plannerName = (response.planner && response.planner.name) || '指挥'
+                const plannerModel = [response.planner && response.planner.kind, response.planner && response.planner.model]
+                  .filter(Boolean).join(' / ')
+                const lines = ['**' + plannerName + '拆解了 **' + planned.length + ' 个任务' + (plannerModel ? '（' + plannerModel + '）' : '') + '：']
+                planned.forEach((a, i) => {
+                  const who = String((a && a.member) || '成员')
+                  const task = String((a && a.task) || '').replace(/\s+/g, ' ').trim()
+                  const short = task.length > 160 ? task.slice(0, 160) + '…' : task
+                  const mcp = Array.isArray(a && a.mcp) && a.mcp.length ? '（MCP：' + a.mcp.join('、') + '）' : ''
+                  lines.push((i + 1) + '. **' + who + '**' + mcp + '：' + short)
+                })
+                teamPushMessage(entry, 'assistant', lines.join('\n'), {
+                  name: plannerName,
+                  kind: (response.planner && response.planner.kind) || null,
+                  model: (response.planner && response.planner.model) || null,
+                  plan: true,
+                })
+              } else if (response.plannedBy === 'parent' && (response.members || []).length === 1) {
+                // 单成员直派：没有拆解，但说明"这次是谁直接派的"
+                const one = response.members[0]
+                teamPushMessage(entry, 'assistant', '直接派给 **' + String(one.name || '成员') + '**（未经指挥拆解）', { plan: true })
+              }
+            } catch { /* 拆解回执推送失败不影响派活 */ }
             for (const m of response.members || []) {
               const self = m.review && m.review.self ? m.review.self : null
               const commander = m.review && m.review.commander ? m.review.commander : null
