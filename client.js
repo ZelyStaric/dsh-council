@@ -2143,7 +2143,7 @@ window.__ModuleLoader__.load({
               : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                 h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
                 h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
-                h('span', { style: { opacity: 0.8 } }, waitStalled ? '没有响应（这次派发可能已中断，可以重新发一次）' : '正在拆解任务、挑选成员…'),
+                h('span', { style: { opacity: 0.8 } }, waitStalled ? '没有响应（可能被打断了）' : '正在拆解任务、挑选成员…'),
                 h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now()))))])] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。

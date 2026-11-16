@@ -2245,111 +2245,6 @@ function scanInterruptedTurns() {
 }
 
 /** 自动续上的调试日志（写文件，因为 console 在 systemd 下不一定进 journal）。 */
-function resumeLog(msg) {
-  try { appendFileSync('/tmp/council-resume.log', new Date().toISOString() + ' ' + msg + '\n') } catch { /* ignore */ }
-}
-
-async function autoResumeInterruptedTurns() {
-  resumeLog('=== boot scan start ===')
-  try {
-    if (state.config && state.config.autoResume === false) return 0
-    const agents = ctx0 && typeof ctx0.get === 'function' ? ctx0.get('agents') : undefined
-    if (!agents || typeof agents.get !== 'function') return 0
-    const cutoff = Date.now() - 6 * 3600 * 1000
-    // 2026-11-16 修正：早先只扫「绑定了小组」的会话，结果**单人模式的会话永远续不上**
-    // （用户实际就是在本会话里被打断的）。现在扫最近 6 小时内有过日志写入的所有会话。
-    const candidates = []
-    try {
-      for (const ws of readdirSync(SESSIONS_DIR)) {
-        const wsDir = path.join(SESSIONS_DIR, ws)
-        let names = []
-        try { names = readdirSync(wsDir) } catch { continue }
-        for (const name of names) {
-          if (!name.startsWith('session-')) continue
-          const file = path.join(wsDir, name, 'session.v4.jsonl.zstd')
-          try {
-            if (existsSync(file) && statSync(file).mtimeMs >= cutoff) {
-              candidates.push({ ws, dir: path.join(wsDir, name), sid: name.replace(/^session-/, '') })
-            }
-          } catch { /* 单个跳过 */ }
-        }
-      }
-    } catch { /* ignore */ }
-    let resumed = 0
-    for (const cand of candidates) {
-      const sid = cand.sid
-      // 2026-11-16 用户要求：**只对单人会话生效**。
-      // 绑定了小组的会话不自动续——小组模式下自动注入消息会跟派活/审核流程打架
-      // （可能出现「刚重启又自动派了一次活」这种怪事）。
-      if (groupForSession(state, sid) || groupForSession(state, 'session-' + sid)) {
-        resumeLog('skip: 小组会话不自动续 sid=' + sid)
-        continue
-      }
-      try {
-        const dir = cand.dir
-        const file = path.join(dir, 'session.v4.jsonl.zstd')
-        if (!existsSync(file)) continue
-        const out = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
-        if (!out || out.status !== 0) continue
-        const lines = String(out.stdout || '').split('\n').filter(Boolean)
-        // 从后往前找：最后一次 turn/start 之后有没有 turn/end
-        // 只续「最后一个 turn 是被打断的」（reason.kind === 'interrupted'）
-        let lastEndIdx = -1
-        let lastEndReason = ''
-        for (let i = lines.length - 1; i >= 0; i -= 1) {
-          let ev = null
-          try { ev = JSON.parse(lines[i]) } catch { continue }
-          if (!ev || ev.type !== 'turn/end') continue
-          lastEndIdx = i
-          lastEndReason = String((ev.data && ev.data.reason && ev.data.reason.kind) || '')
-          break
-        }
-        if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
-        // agents 是惰性加载的：服务刚起来时 get() 返回 undefined。
-        // 轮询等它就绪（最多约 30 秒），否则自动续上永远拿不到 agent。
-        let agent = agents.get(sid) || agents.get('session-' + sid)
-        for (let attempt = 0; attempt < 15 && !(agent && agent.inbox); attempt += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 2000))
-          agent = agents.get(sid) || agents.get('session-' + sid)
-        }
-        const inbox = agent && agent.inbox
-        // 真实可用的 inbox 方法里没有 followup（类型声明有、运行时没有），
-        // 只有 append(target, message)；target ∈ 'next-turn' | 'next-step'。
-        let diag = ''
-        try {
-          const proto = inbox ? Object.getPrototypeOf(inbox) : null
-          diag = ' inboxKeys=' + (inbox ? Object.keys(inbox).join('|') : '') + ' protoMethods=' + (proto ? Object.getOwnPropertyNames(proto).join('|') : '')
-          if (agent) diag += ' agentKeys=' + Object.keys(agent).join('|')
-        } catch (e) { diag = ' diagErr=' + String(e && e.message) }
-        resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function') + diag)
-        if (!inbox || typeof inbox.append !== 'function') { resumeLog('skip: inbox.append 不存在 sid=' + sid); continue }
-        try {
-          // ⚠️ 必须带 id + role：inbox 里的消息最终会落成 user/message 事件，
-          // 而 session 校验器（assertMessageEventShape）要求 user/message 有非空 id
-          // 且 role === 'user'。2026-11-16 实测：漏了这两个字段直接把
-          // session-6a0b95ac 写成「加载失败：lacks an identified message」，
-          // 整个会话打不开（只能逐帧解压重写才救回来）。
-          inbox.append('next-turn', {
-            id: 'msg_' + randomUUID(),
-            role: 'user',
-            source: { kind: 'user' },
-            content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
-          })
-          resumeLog('append ok sid=' + sid)
-        } catch (e) {
-          resumeLog('append failed sid=' + sid + ' err=' + String(e && e.message))
-          continue
-        }
-        resumed += 1
-        resumeLog('resumed ' + sid)
-        console.error('[council] 自动续上被中断的会话:', sid)
-      } catch { /* 单个会话失败不影响其它 */ }
-    }
-    return resumed
-  } catch {
-    return 0
-  }
-}
 
 async function migrateRolesDropKindModel() {
   const roles = state.roles || []
@@ -4409,9 +4304,6 @@ export function apply(ctx, config = {}) {
     // .then(() => migrateImageModels())  // 已停用：让用户自己选模型
     .then(() => migrateRolesDropKindModel())
     .then(() => migrateDeepseekMembers())
-    // 自动续上：等 agents 懒加载就绪再动手
-    .then(() => new Promise((resolve) => setTimeout(resolve, 4000)))
-    .then(() => autoResumeInterruptedTurns())
     .catch((error) => console.error('[council] startup migration failed:', String(error?.message ?? error)))
   // 进程重启后，已存在的会话不会再触发 agent/created：启动时补绑一次，
   // 否则“恢复的会话”会丢掉 council_* 工具（2026-11-02 实测踩到）。
