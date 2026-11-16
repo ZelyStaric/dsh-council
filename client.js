@@ -1330,6 +1330,8 @@ window.__ModuleLoader__.load({
         lastTabSessionId = sessionId
         if (switched || !bound) {
           applyTabVisibility(!bound, (switched ? 'switch' : 'immediate-solo') + ' sessionId=' + String(sessionId).slice(0, 8))
+          // 切会话后 2 秒内持续保障有选中项（DSH 会清空选中态，单次点击不够）
+          if (switched) ensureTabSelected()
         }
         let recheck = null
         const timer = setTimeout(() => {
@@ -2373,6 +2375,34 @@ window.__ModuleLoader__.load({
     // "Cannot access before initialization"；var 会提升成 undefined，逻辑本身能跑。
     var councilSoloMode = false
     var tabWatchTimer = null
+    /**
+     * 切会话后**持续**确保「有可见的 tab 被选中」。
+     *
+     * DSH 把 tab 设成 display:none 之后会把选中态清空，内容区就不知道显示什么（空白）。
+     * 单次 click 不可靠：effect 只触发一次、还可能被 tabSwitching 锁挡住。
+     * 所以在这里短时轮询（200ms × 10 次 = 2 秒），发现「可见 tab 全没选中」就补一次。
+     */
+    var ensureSelectedTimer = null
+    function ensureTabSelected() {
+      if (ensureSelectedTimer) return
+      let tries = 0
+      ensureSelectedTimer = setInterval(() => {
+        tries += 1
+        try {
+          const list = document.querySelector('[data-conversation-tabs]')
+          if (!list) return
+          const visible = Array.prototype.slice.call(list.querySelectorAll('button[role="tab"]'))
+            .filter((b) => b.style.display !== 'none')
+          if (!visible.length) return
+          const picked = visible.some((b) => b.getAttribute('aria-selected') === 'true')
+          if (!picked) { try { visible[0].click() } catch { /* ignore */ } }
+          else if (ensureSelectedTimer) { clearInterval(ensureSelectedTimer); ensureSelectedTimer = null }
+        } catch { /* ignore */ }
+        if (tries >= 10 && ensureSelectedTimer) { clearInterval(ensureSelectedTimer); ensureSelectedTimer = null }
+      }, 200)
+      try { ensureSelectedTimer.unref && ensureSelectedTimer.unref() } catch { /* ignore */ }
+    }
+
     var tabSwitching = false   // 正在切视图（防 click 重入）
 
     function applyTabVisibility(solo, why) {
