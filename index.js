@@ -4903,7 +4903,8 @@ export function createHandler(ctx, config = {}) {
                 const members = (entry ? entry.messages : [])
                   .filter((m) => m && m.role === 'member')
                   .map((m) => Object.assign({}, m))
-                const chat = sessionChatMessages(sessionId)
+                // 直接读日志（chatMessagesFromLog 已按 mtime+size 缓存）：不依赖 agent 是否被加载。
+                const chat = sessionChatMessages(sessionId).length ? sessionChatMessages(sessionId) : chatMessagesFromLog(sessionId)
                 return chat.concat(members).sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0))
               })(),
             })
