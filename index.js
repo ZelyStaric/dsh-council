@@ -5348,7 +5348,9 @@ function mandateText(group) {
     '本会话处于小组模式。你的**唯一职责**是把用户的话原样转给指挥，**不要自己回答、不要自己拆解、不要自己动手**。',
     '收到用户消息后，立即调用 council_delegate：',
     '· 把**用户原话**放进 request（一字不改，不要改写、不要润色、不要自己补充需求）；',
-    '· 不要用 assignments —— 拆解是「指挥」成员的职责，不是你的。',
+    '· **不要用 assignments** —— 拆解是「指挥」成员的职责，不是你的。',
+    '  即使任务看起来很简单、只涉及一个成员，也必须走 request：不然会出现「这次没经过指挥」，用户看不到拆解过程。',
+    '  唯一例外是用户明确说了「直接让 X 做 / 不用审」（那种情况带 direct:true 直派）。',
     '你的工具面**只有 council_***（其余工具已被硬性禁用，调用会被拒绝并计入越权记录）。',
     '**直派**：用户说「直接让某成员做 X」「不用审」「跳过审核/指挥」时，用 council_delegate 并带 direct:true ——',
     '  这会跳过指挥拆解与全部审核，只要那个成员的产出。用户没这么说时，一律走正常流程（request 交给指挥）。',
@@ -7128,6 +7130,18 @@ function makeDelegateTool(ctx, config, group) {
               plan: true,
             })
             response.__planPushed = true   // 收尾处据此跳过，避免重复推
+          }
+        } catch { /* 推送失败不影响派活 */ }
+        // 直派（主会话自己派的，没走指挥拆解）：也要在**开跑前**留一条，否则整个执行期间
+        // 团队页只有「进行中」，看不出这批活是谁派的（2026-11-16 用户反复反馈）。
+        try {
+          const dpSid = normalizeSessionId(sessionIdOf(exec) || '')
+          if (dpSid && groupForSession(state, dpSid) && assignments.length && !response.__planPushed) {
+            const dpEntry = teamSessionState(dpSid)
+            const names = assignments.map((a) => String((a && a.member) || '成员'))
+            const label = directMode ? '直派（不经审核）' : '直接派给'
+            teamPushMessage(dpEntry, 'assistant', label + ' **' + names.join('、') + '**' + (directMode ? '' : '（未经指挥拆解）'), { plan: true })
+            response.__planPushed = true
           }
         } catch { /* 推送失败不影响派活 */ }
         if (bypassPlanner && directAssignments.length > 1) response.bypassPlanner = true
