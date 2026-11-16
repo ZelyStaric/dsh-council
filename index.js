@@ -2298,7 +2298,13 @@ async function autoResumeInterruptedTurns() {
           break
         }
         if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
-        const agent = agents.get(sid) || agents.get('session-' + sid)
+        // agents 是惰性加载的：服务刚起来时 get() 返回 undefined。
+        // 轮询等它就绪（最多约 30 秒），否则自动续上永远拿不到 agent。
+        let agent = agents.get(sid) || agents.get('session-' + sid)
+        for (let attempt = 0; attempt < 15 && !(agent && agent.inbox); attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2000))
+          agent = agents.get(sid) || agents.get('session-' + sid)
+        }
         const inbox = agent && agent.inbox
         // 真实可用的 inbox 方法里没有 followup（类型声明有、运行时没有），
         // 只有 append(target, message)；target ∈ 'next-turn' | 'next-step'。
