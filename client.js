@@ -511,9 +511,11 @@ window.__ModuleLoader__.load({
         }
         // image 成员同样用真实 provider：选了 relay-image 就是它，没选才是 sentinel
         // deepseek 成员没有 provider 时兜底到默认（存量成员可能是早先建的，provider 为空）
+        const firstProvider = (providers || [])[0]
         const providerValue = member.provider
           || (member.kind === 'image' ? '__image__' : '')
-          || (member.kind === 'deepseek' ? ((providers || [])[0] ? ((providers || [])[0].id) : 'deepseek-official') : '')
+          // deepseek 成员没 provider 时兜底到真实存在的第一个；没有列表就留空（由下面的死下拉提示）
+          || (member.kind === 'deepseek' && firstProvider ? firstProvider.id : '')
         const providerSelect = h('select', {
           style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
@@ -555,7 +557,9 @@ window.__ModuleLoader__.load({
           providerSelect,
           h(Button, { onClick: () => mutate('/members/delete', { id: member.id }) }, '删')),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-          (member.kind !== 'image' && !member.provider)
+          // 只有「真需要 provider 却还没选」的成员才显示这个死下拉；
+          // CLI 成员（claude/codex/gemini）和出图成员都不需要，直接给模型下拉。
+          (member.kind === 'deepseek' && !member.provider)
             ? h('select', {
               style: Object.assign({}, styles.input, { flex: 1 }), disabled: true,
             }, [h('option', { key: 'none', value: '' }, '先选择提供商')])
