@@ -2324,9 +2324,16 @@ async function autoResumeInterruptedTurns() {
         resumeLog('candidate sid=' + sid + ' agent=' + Boolean(agent) + ' inbox=' + Boolean(inbox) + ' hasFollowup=' + Boolean(inbox && typeof inbox.followup === 'function') + diag)
         if (!inbox || typeof inbox.append !== 'function') { resumeLog('skip: inbox.append 不存在 sid=' + sid); continue }
         try {
+          // ⚠️ 必须带 id + role：inbox 里的消息最终会落成 user/message 事件，
+          // 而 session 校验器（assertMessageEventShape）要求 user/message 有非空 id
+          // 且 role === 'user'。2026-11-16 实测：漏了这两个字段直接把
+          // session-6a0b95ac 写成「加载失败：lacks an identified message」，
+          // 整个会话打不开（只能逐帧解压重写才救回来）。
           inbox.append('next-turn', {
-            content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
+            id: 'msg_' + randomUUID(),
+            role: 'user',
             source: { kind: 'user' },
+            content: [{ type: 'text', text: '继续（上次的 turn 被重启打断了，接着刚才那件事往下做）' }],
           })
           resumeLog('append ok sid=' + sid)
         } catch (e) {
