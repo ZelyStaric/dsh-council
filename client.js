@@ -516,7 +516,9 @@ window.__ModuleLoader__.load({
           || (member.kind === 'image' ? '__image__' : '')
           // deepseek 成员没 provider 时兜底到真实存在的第一个；没有列表就留空（由下面的死下拉提示）
           || (member.kind === 'deepseek' && firstProvider ? firstProvider.id : '')
-        const providerSelect = h('select', {
+        // CLI 成员（claude/codex/gemini）没有 provider 概念 → 整个下拉都不渲染（2026-11-16 用户要求）
+        const isCliMember = member.kind === 'claude' || member.kind === 'codex' || member.kind === 'gemini'
+        const providerSelect = isCliMember ? null : h('select', {
           style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
             const value = event.target.value
@@ -535,8 +537,7 @@ window.__ModuleLoader__.load({
             mutate('/members', { id: member.id, provider: value, kind: kind, model: next })
           },
         }, [
-          // CLI 成员（claude/codex/gemini/image）本来就没有 provider，别写成「未选择」让人以为没配完
-          h('option', { key: '__none__', value: '' }, member && member.kind && member.kind !== 'deepseek' ? '（CLI，无需提供商）' : '（未选择提供商）'),
+          h('option', { key: '__none__', value: '' }, '（未选择提供商）'),
           h('option', { key: '__image__', value: '__image__' }, 'image（出图）'),
         ].concat((providers || []).map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id))))
         const roleOptions = [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
@@ -1690,10 +1691,6 @@ window.__ModuleLoader__.load({
       // 反馈（2026-11-16 用户反馈「发完 30 秒没动静，以为卡住」）：
       // 最后一条是用户消息且已过 3 秒还没回复 → 明确显示"正在处理"，别让人干等。
       const lastMsg = messages.length ? messages[messages.length - 1] : null
-      const waitingForCommander = Boolean(
-        lastMsg && lastMsg.role === 'user' && !running && !streamText
-        && Date.now() - (Number(lastMsg.at) || 0) > 3000,
-      )
 
       // 新消息到达 → 贴着底部
       useEffect(() => {
@@ -1779,6 +1776,12 @@ window.__ModuleLoader__.load({
       }
 
       const running = Boolean(team && team.running) || busy
+      // 反馈：最后一条是你、且过了 3 秒还没回复 → 显示「指挥正在处理…」（必须放在 running 之后，否则 TDZ）
+      const lastMsgForWait = messages.length ? messages[messages.length - 1] : null
+      const waitingForCommander = Boolean(
+        lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText
+        && Date.now() - (Number(lastMsgForWait.at) || 0) > 3000,
+      )
       // 指挥气泡的头像种类：按 brainKind 推断
       const brainKind = team && team.brainKind === 'codex' ? 'codex'
         : team && team.brainKind === 'dsh-seam' ? 'deepseek'
