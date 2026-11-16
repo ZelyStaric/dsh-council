@@ -1411,7 +1411,7 @@ window.__ModuleLoader__.load({
           applyTabVisibility(!bound, 'effect bound=' + bound)
           // 兜底复核：万一中间被别的路径改错，1.2 秒后再纠正一次
           recheck = setTimeout(() => applyTabVisibility(!bound, 'recheck bound=' + bound), 1200)
-        }, 300)
+        }, 80)
         return () => { clearTimeout(timer); if (recheck) clearTimeout(recheck) }
       }, [sessionId, bound, Boolean(state)])
 
@@ -2095,14 +2095,22 @@ window.__ModuleLoader__.load({
     function watchTabList() {
       if (typeof MutationObserver !== 'function') return
       try {
-        const mo = new MutationObserver(() => {
+        const mo = new MutationObserver((mutations) => {
+          const relevant = mutations.some((mutation) =>
+            (mutation.target.nodeType === 1 && mutation.target.closest('[data-conversation-tabs]')) ||
+            Array.from(mutation.addedNodes).some((node) => node.nodeType === 1 &&
+              (node.matches('[data-conversation-tabs]') || node.querySelector('[data-conversation-tabs]')))
+          )
+          if (!relevant) return
           // 注意：两种模式都要复核（不只 solo）。DSH 重建 tab 节点时会把 display 重置，
           // group 模式下「对话」若不重新隐藏就会冒出来。
-          if (tabWatchTimer) return
-          tabWatchTimer = setTimeout(() => {
+          if (tabWatchTimer != null) return
+          const schedule = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame : (fn) => setTimeout(fn, 0)
+          tabWatchTimer = schedule(() => {
             tabWatchTimer = null
             applyTabVisibility(councilSoloMode, 'observer')
-          }, 60)
+          })
         })
         mo.observe(document.body, { childList: true, subtree: true })
       } catch { /* ignore */ }
