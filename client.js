@@ -721,23 +721,6 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
           h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'deepseek', groupId: group.id }) }, '+ 添加成员')),
         h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
-          h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '验收标准（追加到每个任务）'),
-          h('textarea', {
-            id: 'policy-standard',
-            style: Object.assign({}, styles.input, { minHeight: 46, resize: 'vertical' }),
-            defaultValue: group.standard || '',
-            placeholder: '例如：必须给出可复现的验证步骤；改动要说明风险',
-          }),
-          h('div', { style: { marginTop: 6 } },
-            h(Button, {
-              onClick: () => {
-                mutate('/groups/policy', {
-                  id: group.id,
-                  standard: document.getElementById('policy-standard').value,
-                })
-              },
-            }, '保存'))),
-        h('div', { style: Object.assign({}, styles.card, { marginTop: 16 }) },
           h('div', { style: Object.assign({}, styles.muted, { marginBottom: 6 }) }, '总画师风格（注入所有出图任务；留空则不校验）'),
           h('textarea', {
             style: Object.assign({}, styles.input, { minHeight: 54, resize: 'vertical' }),
