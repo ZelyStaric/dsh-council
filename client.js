@@ -1324,13 +1324,19 @@ window.__ModuleLoader__.load({
         // 单人模式**立即**藏起来：切换会话时 DSH 会重建 tab 列表，新节点默认全显示，
         // 如果等防抖，就会出现「切到单人会话后还闪出小组 tab」的半秒窗口（2026-11-16 用户实测）。
         // 小组模式仍然防抖——建组→绑定→state 刷新那几帧 bound 会抖，立刻应用会来回闪。
-        if (!bound) applyTabVisibility(true, 'immediate-solo sessionId=' + String(sessionId).slice(0, 8))
+        // 切换会话（sessionId 变了）→ **立即**应用，否则 tab 和内容会错位：
+        // 实测视频里切到小组会话的那一帧，tab 还写着「对话/轨迹」，内容已经是团队群聊了。
+        const switched = lastTabSessionId !== sessionId
+        lastTabSessionId = sessionId
+        if (switched || !bound) {
+          applyTabVisibility(!bound, (switched ? 'switch' : 'immediate-solo') + ' sessionId=' + String(sessionId).slice(0, 8))
+        }
         let recheck = null
         const timer = setTimeout(() => {
           applyTabVisibility(!bound, 'effect bound=' + bound)
           // 兜底复核：万一中间被别的路径改错，1.2 秒后再纠正一次
           recheck = setTimeout(() => applyTabVisibility(!bound, 'recheck bound=' + bound), 1200)
-        }, bound ? 80 : 0)
+        }, switched ? 0 : (bound ? 80 : 0))
         return () => { clearTimeout(timer); if (recheck) clearTimeout(recheck) }
       }, [sessionId, bound, Boolean(state)])
 
@@ -1794,6 +1800,7 @@ window.__ModuleLoader__.load({
      * 因为 DSH 会先把内容画出来（用户看到「折叠列表展开又消失」的那 1 秒就是这个）。
      * `null` 表示还没加载过 state（未知），此时不拦截，避免刚开始把小组会话也挡掉。
      */
+    var lastTabSessionId = null   // 上一次应用 tab 可见性时的 sessionId（区分「切会话」和「建组」）
     var groupSessionSet = null   // var：声明在组件之后，let 会 TDZ（2026-11-16 第四次踩）
 
     /** 从 /state 的返回里刷新集合。 */
