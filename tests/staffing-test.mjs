@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, modelGuideText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, modelGuideText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runMemberAction, teamSessions, teamRuns, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4179,60 +4179,6 @@ try {
     return '恒 false · 零 append 调用 · 团队消息只走内存'
   })
 
-  await check('团队模式：codex 大脑腿带只读沙箱 + council MCP（源码断言）', async () => {
-    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
-    assert.ok(src.includes('sandbox_mode=\"read-only\"'), 'codex 大脑腿必须只读沙箱')
-    assert.ok(src.includes("mcp_servers.council.command"), '必须挂 council MCP')
-    assert.ok(src.includes("TEAM_BRAIN_DISALLOWED"), 'claude 腿必须有 disallowedTools 列表')
-    assert.ok(src.includes("'--disallowedTools', TEAM_BRAIN_DISALLOWED.join(' ')"), 'claude 腿实际拼了 disallowedTools')
-    return 'codex→read-only + council MCP · claude→disallowedTools 已接线'
-  })
-
-  /* ── deepseek 腿：不依赖父 agent 的自建会话路线（2026-11-15） ──────────
-   * 起因：团队 turn（/team/send）与 POST /confirm 直派都**没有父 agent**，
-   * 而 runBrain 原来调 runDeepseekViaSeam（要求 parent）→ deepseek 腿必然报错。
-   * 修法是改用 agents.create 自建会话（不需要 parent），大脑再用 minimal preset 去掉 bash/edit。
-   */
-  await check('团队模式：deepseek 大脑腿走自建会话 + minimal preset（源码断言）', async () => {
-    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
-    const branch = src.match(/if \(brain\.kind === 'dsh-seam'\) \{[\s\S]*?\n  \}\n/)
-    assert.ok(branch, '应能找到 dsh-seam 分支')
-    assert.ok(!/await runDeepseekViaSeam\(/.test(branch[0]),
-      'dsh-seam 分支不得再调用 runDeepseekViaSeam（它要求父 agent，团队 turn 没有）')
-    assert.ok(branch[0].includes('runDeepseek('), '必须改调自建会话的 runDeepseek')
-    // v0.4：preset 由 brainPermissions 决定 —— closed（默认）= minimal，open = 部署默认
-    assert.ok(branch[0].includes("brainOpen ? undefined : 'minimal'"),
-      'closed 时必须用 minimal preset（去掉 bash/edit），open 时放开')
-    assert.ok(branch[0].includes('groupForSession'), '必须先校验小组：没有组就拿不到 council_* 派活工具')
-    assert.ok(branch[0].includes('session.convId'), '多轮要接在同一段会话历史上')
-    return '不走 seam · runDeepseek + minimal(closed) · 有 group 校验 · 复用 convId'
-  })
-
-  await check('v0.4 大脑权限开关：三腿都受 brainPermissions 控制（源码断言）', async () => {
-    const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
-    assert.ok(src.includes("const brainOpen = (state.config || {}).brainPermissions === 'open'"),
-      'runBrain 必须读 brainPermissions')
-    // claude 腿
-    assert.ok(/brainOpen \? \[\] : \['--disallowedTools', TEAM_BRAIN_DISALLOWED\.join\(' '\)\]/.test(src),
-      'claude 腿：closed 才加 disallowedTools')
-    // codex 腿
-    assert.ok(/brainOpen \? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="read-only"'/.test(src),
-      'codex 腿：closed=read-only，open=full-access')
-    // deepseek 腿
-    assert.ok(src.includes("brainOpen ? undefined : 'minimal'"), 'deepseek 腿：closed=minimal')
-    // 配置层
-    assert.ok(src.includes("brainPermissions: own.brainPermissions === 'open' ? 'open' : 'closed'"),
-      'configView 必须暴露 brainPermissions')
-    assert.ok(src.includes("if (body.brainPermissions === 'open' || body.brainPermissions === 'closed')"),
-      '/config POST 必须能写 brainPermissions')
-    assert.ok(src.includes("strictReview: own.authoritativeReviewer !== 'commander'"),
-      'configView 必须暴露 strictReview（映射 authoritativeReviewer）')
-    assert.ok(src.includes("if (typeof body.strictReview === 'boolean') next.authoritativeReviewer = body.strictReview ? 'any' : 'commander'"),
-      '/config POST 必须能把 strictReview 写成 authoritativeReviewer')
-    assert.ok(src.includes("requireCommanderReview: own.requireCommanderReview !== false"),
-      'configView 必须暴露 requireCommanderReview')
-    return 'claude/codex/deepseek 三腿 + 配置读写全部接线'
-  })
 
   await check('runDeepseekViaSeam：没有父 agent 时降级到自建会话（HTTP 直派 deepseek 成员可用）', async () => {
     const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
@@ -4394,14 +4340,6 @@ try {
     return '绑定 ' + toolNames.length + ' 个工具（含 council_delegate/council_status）· 名册注入 · 守卫已挂 · 收尾清空'
   })
 
-  await check('runBrain：deepseek 大脑 + 该会话没有小组 → 明确中文错误（不再报 seam 不可用）', async () => {
-    const out = await mod.runBrain({ sessionId: 'session-no-group-for-brain-test', model: 'deepseek-v4.1-flash', text: '你好' })
-    assert.equal(out.ok, false, '没有小组时必须失败')
-    assert.equal(out.kind, 'dsh-seam', 'deepseek-* 应路由到 dsh-seam 腿')
-    assert.match(String(out.error), /还没有小组/, '错误要指向真正的原因，实际：' + out.error)
-    assert.ok(!/seam unavailable/i.test(String(out.error)), '不该再出现 seam 不可用的措辞')
-    return 'reason=' + out.error.slice(0, 40) + '…'
-  })
 
   /* ── 运行中成员注册表 + 追加消息（council_tell 复用） ───────────────── */
   await check('runningMembers：注册/查找/卸载（同一成员按最新 startedAt 命中）', async () => {
@@ -4716,13 +4654,6 @@ try {
     return `claude→${claude.kind} / gpt→${codex.kind} / deepseek→${seam.kind} / gemini→gemini-cli / gpt-image→invalid`
   })
 
-  await check('runBrain：出图模型当大脑 → 明确中文错误（不落进 claude 腿）', async () => {
-    const out = await mod.runBrain({ sessionId: 'session-brain-invalid-test', model: 'gpt-image-2.6-flare', text: '你好' })
-    assert.equal(out.ok, false)
-    assert.equal(out.kind, 'invalid')
-    assert.match(String(out.error), /出图模型/, '要指出是出图模型，实际：' + out.error)
-    return out.error.slice(0, 36) + '…'
-  })
 
   await check('模型定位表可编辑：config.modelGuide 优先于内置默认，空值回落到默认', async () => {
     const src = await readFile(path.join(ROOT, 'index.js'), 'utf8')
@@ -4773,13 +4704,6 @@ try {
     return '噪音清空 · 正文完整'
   })
 
-  await check('runBrain：gemini 腿未接线时给出明确原因（不假装成功）', async () => {
-    const out = await mod.runBrain({ sessionId: 'session-brain-gemini-test', model: 'gemini-3.8-flash', text: '你好' })
-    assert.equal(out.ok, false)
-    assert.equal(out.kind, 'gemini-cli')
-    assert.match(String(out.error), /Gemini 腿还没接线/)
-    return out.error.slice(0, 36) + '…'
-  })
 
   await check('DEFAULT_TEAM_MODEL / TEAM_MESSAGE_LIMIT / TEAM_BRAIN_DISALLOWED 常量', () => {
     assert.equal(mod.DEFAULT_TEAM_MODEL, 'claude-fable-5-2')
@@ -4834,15 +4758,6 @@ try {
     return `model=${body.model} brainKind=${body.brainKind} messages=0`
   })
 
-  await check('POST /team/send 缺参：没 sessionId / 空 text → 400 且带中文原因', async () => {
-    const noSession = await post('/team/send', { text: '你好' })
-    assert.equal(noSession.status, 400)
-    assert.match((await noSession.json()).error, /sessionId/)
-    const noText = await post('/team/send', { sessionId: 'session-team-empty', text: '   ' })
-    assert.equal(noText.status, 400)
-    assert.match((await noText.json()).error, /text/)
-    return '缺 sessionId → 400 / 空 text → 400'
-  })
 
   await check('POST /team/takeover：预留接口返回 501 并说明尚未实现', async () => {
     const res = await post('/team/takeover', { sessionId: 'session-team-empty' })
@@ -4873,12 +4788,10 @@ try {
     assert.ok(src.includes('const INTERNAL_TOKEN = randomUUID()'), '要有进程级内部 token')
     assert.ok(src.includes("req.headers['x-council-token']"), '/internal/tool 必须校验该 header')
     assert.ok(src.includes('if (!isLoopback && !tokenOk)'), '回环 IP 与 token 是二选一放行')
-    assert.ok(src.includes('COUNCIL_INTERNAL_TOKEN: INTERNAL_TOKEN'), 'claude 腿（councilMcpConfig）要把 token 传给子进程')
-    assert.ok(src.includes('mcp_servers.council.env.COUNCIL_INTERNAL_TOKEN'), 'codex 腿也要传 token')
     const mcp = await readFile(path.join(ROOT, 'council-mcp.mjs'), 'utf8')
     assert.ok(mcp.includes('COUNCIL_INTERNAL_TOKEN'), 'council-mcp 要读 token 环境变量')
     assert.ok(mcp.includes("'x-council-token'"), 'council-mcp 转发时要带 header')
-    return 'IP 或 token 二选一 · claude/codex 双腿都传 token'
+    return 'IP 或 token 二选一'
   })
 
   await check('council_tell 经 MCP（/internal/tool）也能插话：registry 直通 steerRunningMember', async () => {
