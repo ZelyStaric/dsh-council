@@ -2209,15 +2209,24 @@ function scanInterruptedTurns() {
         const res = spawnSync('zstd', ['-d', '-c', file], { maxBuffer: 64 * 1024 * 1024 })
         if (!res || res.status !== 0) { out.push({ ...item, found: true, decompressFailed: true }); continue }
         const lines = String(res.stdout || '').split('\n').filter(Boolean)
-        let lastStart = -1, lastEnd = -1
-        for (let i = lines.length - 1; i >= 0 && (lastStart < 0 || lastEnd < 0); i -= 1) {
+        // 判定「被打断」：最后一个 turn/end 的 data.reason.kind === 'interrupted'
+        // （2026-11-16 实测：被打断的 turn **也会写 turn/end**，只是带 interrupted 标记；
+        //  之前用「有 turn/start 没 turn/end」判断，永远 false。）
+        let lastEndIdx = -1
+        let lastEndReason = ''
+        let lastStartIdx = -1
+        for (let i = lines.length - 1; i >= 0; i -= 1) {
           let ev = null
           try { ev = JSON.parse(lines[i]) } catch { continue }
           if (!ev || !ev.type) continue
-          if (ev.type === 'turn/start' && lastStart < 0) lastStart = i
-          if (ev.type === 'turn/end' && lastEnd < 0) lastEnd = i
+          if (ev.type === 'turn/end' && lastEndIdx < 0) {
+            lastEndIdx = i
+            lastEndReason = String((ev.data && ev.data.reason && ev.data.reason.kind) || '')
+          }
+          if (ev.type === 'turn/start' && lastStartIdx < 0) { lastStartIdx = i; break }
         }
-        out.push({ ...item, found: true, interrupted: lastStart >= 0 && lastEnd <= lastStart, lastStart, lastEnd, total: lines.length })
+        const interrupted = lastEndReason === 'interrupted'
+        out.push({ ...item, found: true, interrupted, reason: lastEndReason, lastStart: lastStartIdx, lastEnd: lastEndIdx, total: lines.length })
       } catch (e) { out.push({ ...item, error: String(e && e.message) }) }
     }
   } catch { /* ignore */ }
@@ -2248,16 +2257,18 @@ async function autoResumeInterruptedTurns() {
         if (!out || out.status !== 0) continue
         const lines = String(out.stdout || '').split('\n').filter(Boolean)
         // 从后往前找：最后一次 turn/start 之后有没有 turn/end
-        let lastStart = -1
-        let lastEnd = -1
-        for (let i = lines.length - 1; i >= 0 && (lastStart < 0 || lastEnd < 0); i -= 1) {
+        // 只续「最后一个 turn 是被打断的」（reason.kind === 'interrupted'）
+        let lastEndIdx = -1
+        let lastEndReason = ''
+        for (let i = lines.length - 1; i >= 0; i -= 1) {
           let ev = null
           try { ev = JSON.parse(lines[i]) } catch { continue }
-          if (!ev || !ev.type) continue
-          if (ev.type === 'turn/start' && lastStart < 0) lastStart = i
-          if (ev.type === 'turn/end' && lastEnd < 0) lastEnd = i
+          if (!ev || ev.type !== 'turn/end') continue
+          lastEndIdx = i
+          lastEndReason = String((ev.data && ev.data.reason && ev.data.reason.kind) || '')
+          break
         }
-        if (lastStart < 0 || lastEnd > lastStart) continue       // 没有未闭合的 turn
+        if (lastEndIdx < 0 || lastEndReason !== 'interrupted') continue
         const agent = agents.get(sid) || agents.get('session-' + sid)
         const inbox = agent && agent.inbox
         if (!inbox || typeof inbox.followup !== 'function') continue
