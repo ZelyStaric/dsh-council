@@ -811,11 +811,19 @@ window.__ModuleLoader__.load({
           h('div', {
             title: '展开 / 收起职位栏',
             onClick: toggleRoles,
+            // 折叠把手（2026-11-16 用户反馈辨识度低）：
+            //  ① 底色用 bg-layer-2——它比周边（layer-1）深/浅一档，且**自动跟随主题**，
+            //     不需要为深浅模式写两套颜色；
+            //  ② hover 再深一档，给出「这里可点」的反馈；
+            //  ③ 18 → 22px，点击热区更宽容。
+            onMouseEnter: (e) => { try { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-2))' } catch { /* ignore */ } },
+            onMouseLeave: (e) => { try { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-2)' } catch { /* ignore */ } },
             style: {
-              width: 18, flexShrink: 0, cursor: 'pointer', userSelect: 'none',
+              width: 22, flexShrink: 0, cursor: 'pointer', userSelect: 'none',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--dsw-alias-bg-layer-2)',
               borderRight: '1px solid var(--dsw-alias-border-l1)',
-              color: 'var(--dsw-alias-label-secondary)', fontSize: 10,
+              color: 'var(--dsw-alias-label-primary)', fontSize: 11,
             },
           }, h('span', { 'data-council-roles-handle': '1' }, '◀')),
           rolesPanel, board, teamOptionsPanel()))
