@@ -819,6 +819,36 @@ function sessionIdOf(exec) {
   return normalizeSessionId(exec && exec.agent && exec.agent.id)
 }
 
+/**
+ * 成员最近一行输出（2026-11-17 用户要求：要能看出成员卡没卡）。
+ *
+ * key = memberName；value = { at, text }。
+ * 只保留**最后一行**、截断 120 字——目的是「有动静 vs 没动静」，不是完整日志。
+ * 完整输出仍在成员回执里（跑完一次性给）。
+ */
+const memberTails = new Map()
+
+/** 从一块 stdout 里取最后一行有内容的东西（去 ANSI、截断）。 */
+function lastLineOf(chunk) {
+  try {
+    const clean = String(chunk || '')
+      .replace(/\u001b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\r/g, '\n')
+    const lines = clean.split('\n').map((x) => x.trim()).filter(Boolean)
+    if (!lines.length) return ''
+    const last = lines[lines.length - 1]
+    if (last.startsWith('{')) {
+      try {
+        const obj = JSON.parse(last)
+        const t = obj.text || obj.delta || obj.message || (obj.item && obj.item.text)
+        if (typeof t === 'string' && t.trim()) return t.trim().slice(0, 120)
+        return ''
+      } catch { /* 不完整 JSON，按普通文本处理 */ }
+    }
+    return last.slice(0, 120)
+  } catch { return '' }
+}
+
 /** 正在跑、可接收“插话”的成员：callId -> { memberName, kind, write(text) } */
 const steerTargets = new Map()
 
@@ -1257,7 +1287,15 @@ function run(bin, args, options = {}) {
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
     }
-    child.stdout.on('data', (b) => { out += b; noteActivity() })
+    child.stdout.on('data', (b) => {
+      out += b
+      noteActivity()
+      // 记录「最近一行」：前端成员卡显示它，卡住时输出会停 → 一眼看出
+      if (memberName) {
+        const line = lastLineOf(b)
+        if (line) memberTails.set(memberName, { at: Date.now(), text: line })
+      }
+    })
     child.stderr.on('data', (b) => { err += b })
     child.on('error', (e) => {
       finish({ code: -1, out, err: `${err}${e.message}`, reason: endedBy ?? undefined })
@@ -4803,7 +4841,12 @@ export function createHandler(ctx, config = {}) {
                 // 阶段时间：新条目有 stageChangedAt；老条目回落 at（旧版 at 就是阶段变化时间）
                 const stageChangedAt = (slot && (slot.stageChangedAt ?? slot.at)) ?? entry.startedAt ?? now
                 const stageAgeMs = slot && slot.finishedAt ? 0 : Math.max(0, now - stageChangedAt)
-                members[memberId] = Object.assign({ id: memberId }, slot, { silentMs, stageChangedAt, stageAgeMs })
+                // 带上「最近一行输出」（2026-11-17）：前端成员卡显示它，卡住时输出会停 → 一眼看出
+                const tail = slot && slot.name ? memberTails.get(slot.name) : null
+                members[memberId] = Object.assign({ id: memberId }, slot, {
+                  silentMs, stageChangedAt, stageAgeMs,
+                  ...(tail ? { tailText: tail.text, tailAt: tail.at } : {}),
+                })
               }
               out[id] = Object.assign({}, entry, {
                 members,

@@ -742,7 +742,8 @@ window.__ModuleLoader__.load({
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 4 }) }, '职位（把成员拖到职位上完成分配）'),
         // 整段说明只在**这里**出现一次（之前每个职位卡都重复一遍，2026-11-16 用户指出）
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 8, fontSize: 11, opacity: 0.85, lineHeight: 1.5 }) },
-          '职位只提供提示词模板；成员用哪个框架由它选的模型自动决定（claude-*→Claude Code，gpt-*/o*→Codex，deepseek-*→DSH，gemini-*→Gemini，gpt-image-*/nano-banana-*→出图）'),
+          // 2026-11-17 用户要求：删掉那段框架映射说明（对用户没用），只留一句「自己分配」
+          '职位只提供提示词模板，成员自己分配'),
         roles.map(roleCard),
         h(Button, { onClick: () => mutate('/roles', { name: '职位 ' + (roles.length + 1) }) }, '+ 新增职位'),
         h('span', { style: { width: 6, display: 'inline-block' } }),
@@ -1113,10 +1114,18 @@ window.__ModuleLoader__.load({
         return h('div', { style: styles.card },
           h('div', { style: styles.who }, '小组派发中…' + (started === null ? '' : ' ' + started + 's')),
           members.length
-            ? members.map((m, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 } },
+            ? members.map((m, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 4 } },
               h(Avatar, { kind: m.kind, name: m.name }),
-              h('span', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
-                + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')) + silenceSuffix(m))))
+              h('div', { style: { flex: 1, minWidth: 0 } },
+                h('div', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
+                  + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')) + silenceSuffix(m)),
+                // 最近一行输出（2026-11-17）：能看出成员在干什么、有没有卡住
+                m.tailText
+                  ? h('div', {
+                    style: { fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+                    title: m.tailText,
+                  }, '› ' + m.tailText)
+                  : null)))
             : h('div', { style: styles.muted }, stageEntry
               ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中')
               : (planned.length ? planned.join('、') + '（等待开始）' : '准备中')))
