@@ -3632,7 +3632,12 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
 
     // 被否 / 未判定 一律返工，次数由 maxRework 控制（0 = 不返工，仅标记）
     let round = 0
-    while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework) {
+    // 指挥终审若判「问题不在成员」（owner=other：需求歧义/环境限制/依赖缺失），
+    // **不返工**——原样退回去重做结果必然一样，白烧一次调用（2026-11-16 实测：
+    // 成员因「验收环境禁用只读工具」被判不通过，返工 400 秒后仍是同样结果）。
+    const commanderOwner = review.commander && review.commander.owner ? String(review.commander.owner) : ''
+    const blockedByEnvironment = commanderOwner === 'other'
+    while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework && !blockedByEnvironment) {
       round += 1
       const blocks = []
       // commander 模式（且指挥给了结论）：只把指挥不通过的理由写进返工单，审校的否决不再算数
@@ -7189,6 +7194,10 @@ function makeDelegateTool(ctx, config, group) {
         const acceptanceSummary = summarizeAcceptance(response.members)
         response.acceptanceStatus = acceptanceSummary.acceptanceStatus
         response.acceptanceNote = acceptanceSummary.acceptanceNote
+        // 环境类不通过：明确告诉用户「不是成员的锅，所以没返工」
+        if (response.members && response.members.length && response.members[0].review && response.members[0].review.commander && response.members[0].review.commander.owner === 'other') {
+          response.acceptanceNote = (response.acceptanceNote || '') + '（问题不在成员，已跳过返工）'
+        }
         // v0.4 P2：成员回执也进「团队」群聊时间线（微信式：用户/指挥/成员混排）。
         // 只对已绑定小组的会话推；单人会话没有 group，不产生团队消息。
         try {
