@@ -51,10 +51,13 @@ window.__ModuleLoader__.load({
 
     /** Give a brand-new group a working default roster (editable in the 小组 page). */
     async function provisionDefaultRoster(groupId) {
+      // 默认阵容统一用 deepseek（2026-11-17 用户要求）：
+      // 这个插件要对外分发，别人不一定有 claude / gpt-image 的 key，
+      // 而 deepseek 是 DSH 自带的，开箱可用。
+      // 出图成员（画师）默认**不建**——它必须要 gpt-image key，等用户自己加。
       const presets = [
-        { role: '指挥', kind: 'claude', model: 'claude-sonnet-5' },
+        { role: '指挥', kind: 'deepseek', model: 'deepseek-v4.1-flash' },
         { role: '审校', kind: 'deepseek', model: 'deepseek-v4.1-flash' },
-        { role: '画师', kind: 'image', model: 'gpt-image-2.6-flare' },
       ]
       let snapshot = (await call('/state')).state
       const group = (snapshot.groups || []).find((g) => g.id === groupId)
