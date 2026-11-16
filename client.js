@@ -1669,6 +1669,10 @@ window.__ModuleLoader__.load({
       const [note, setNote] = useState('')
       const scrollerRef = useRef(null)
       const esRef = useRef(null)
+      // 进行中的执行步骤（DSH 风格）：{callId: {members: {id: {name, stage, silentMs, stageAgeMs}}}}
+      const [progress, setProgress] = useState(null)
+      // 长回执的展开状态（key → true 表示已展开）
+      const [expandedSet, setExpandedSet] = useState({})
 
       const refreshTeam = () => {
         if (!sessionId) return
@@ -1684,7 +1688,15 @@ window.__ModuleLoader__.load({
         // 1 秒轮询：用户发完消息要立刻在团队页看到（2026-11-16 用户反馈 3 秒太慢）。
         // 服务端读日志有 mtime+size 缓存，文件没变时不会重复解压，1 秒一轮开销可接受。
         const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
-        return () => { alive = false; clearInterval(timer) }
+        // 进行中的「步骤」：/progress 里有每个成员的 stage / 静默时长（DSH 风格的执行步骤）
+        const refreshProgress = () => {
+          call('/progress?sessionId=' + encodeURIComponent(sessionId))
+            .then((d) => { if (alive) setProgress((d && d.progress) || null) })
+            .catch(() => { /* 没有进行中的任务就忽略 */ })
+        }
+        refreshProgress()
+        const ptimer = setInterval(() => { if (alive && !document.hidden) refreshProgress() }, 1500)
+        return () => { alive = false; clearInterval(timer); clearInterval(ptimer) }
       }, [sessionId])
 
       const messages = (team && team.messages) || []
@@ -1776,6 +1788,32 @@ window.__ModuleLoader__.load({
       }
 
       const running = Boolean(team && team.running) || busy
+      // 进行中的步骤（DSH 风格）：把所有 callId 下的阶段摊平成一行一条
+      const activeSteps = (() => {
+        if (!progress) return []
+        const rows = []
+        for (const callId of Object.keys(progress)) {
+          const entry = progress[callId] || {}
+          const members = entry.members || {}
+          for (const id of Object.keys(members)) {
+            const m = members[id] || {}
+            if (id === '__stage__' || m.stageOnly) continue
+            if (!m.name) continue
+            rows.push({
+              name: m.name,
+              stage: m.stage || '执行中',
+              silentMs: Number(m.silentMs) || 0,
+              stageAgeMs: Number(m.stageAgeMs) || 0,
+            })
+          }
+        }
+        return rows
+      })()
+      const fmtSec = (ms) => {
+        const s2 = Math.max(0, Math.round((Number(ms) || 0) / 1000))
+        return s2 < 60 ? s2 + 's' : Math.floor(s2 / 60) + 'm' + (s2 % 60) + 's'
+      }
+
       // 反馈：最后一条是你、且过了 3 秒还没回复 → 显示「指挥正在处理…」（必须放在 running 之后，否则 TDZ）
       const lastMsgForWait = messages.length ? messages[messages.length - 1] : null
       const waitingForCommander = Boolean(
@@ -1816,7 +1854,18 @@ window.__ModuleLoader__.load({
         isUser ? null : h(Avatar, { kind, name: who }),
         h('div', { style: Object.assign({}, styles.bubble, isUser ? styles.mine : {}, { flex: 1, minWidth: 0 }) },
           h('div', { style: styles.who }, sub + ' · ' + new Date(m.at || Date.now()).toLocaleTimeString()),
-          h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(m.text || '')),
+          (() => {
+            const full = String(m.text || '')
+            const long = full.length > 260 && !isUser
+            const collapsed = long && expandedSet[key] !== true
+            const shown = collapsed ? full.slice(0, 260) + '…' : full
+            return h('div', null,
+              h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, shown),
+              long ? h('span', {
+                style: Object.assign({}, styles.linkButton, { fontSize: 11, cursor: 'pointer', opacity: 0.75, marginTop: 2 }),
+                onClick: () => setExpandedSet(Object.assign({}, expandedSet, { [key]: !collapsed })),
+              }, collapsed ? '展开全部（' + full.length + ' 字）' : '收起') : null)
+          })(),
           m.image ? h('img', {
             src: m.image, alt: 'member output',
             style: { display: 'block', maxWidth: 360, marginTop: 6, borderRadius: 8 },
@@ -1853,12 +1902,28 @@ window.__ModuleLoader__.load({
             h('div', { style: Object.assign({}, styles.bubble, { flex: 1, minWidth: 0, opacity: 0.92 }) },
               h('div', { style: styles.who }, '指挥 · 生成中'),
               h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, streamText)))]
-            : (waitingForCommander ? [h('div', {
-              key: 'waiting',
-              style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, opacity: 0.75 },
+            : ((activeSteps.length || waitingForCommander) ? [h('div', {
+              key: 'steps',
+              style: Object.assign({}, styles.card, { marginTop: 10, padding: '8px 10px', maxWidth: '92%' }),
             },
-            h(Avatar, { kind: brainKind, name: '指挥' }),
-            h('div', { style: Object.assign({}, styles.bubble, { fontSize: 12 }) }, '指挥正在处理…（已收到你的消息）'))] : []))
+            h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 6, letterSpacing: 0.3 } },
+              (running ? '● ' : '') + '进行中'),
+            // 有成员阶段 → 逐条列出（DSH 风格的执行步骤）
+            activeSteps.length
+              ? activeSteps.map((st, i) => h('div', {
+                key: 'st' + i,
+                style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '2px 0' },
+              },
+              h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
+              h('span', { style: { fontWeight: 600, minWidth: 48 } }, st.name),
+              h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, st.stage),
+              h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs))))
+              // 还没进入成员阶段 → 说明指挥在校解，给一句更具体的话
+              : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
+                h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
+                h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
+                h('span', { style: { opacity: 0.8 } }, '正在拆解任务、挑选成员…'),
+                h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now()))))])] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
