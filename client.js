@@ -1118,7 +1118,8 @@ window.__ModuleLoader__.load({
               h(Avatar, { kind: m.kind, name: m.name }),
               h('div', { style: { flex: 1, minWidth: 0 } },
                 h('div', { style: styles.muted }, (m.name || '成员') + ' · ' + (m.stage || '…')
-                  + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : '')) + silenceSuffix(m)),
+                  // 时间统一用「本次派发开始」为基准，跟上面那行「小组派发中… Ns」一致
+                  + (m.finishedAt ? '' : (started === null ? '' : ' · ' + started + 's')) + silenceSuffix(m)),
                 // 最近一行输出（2026-11-17）：能看出成员在干什么、有没有卡住
                 m.tailText
                   ? h('div', {
@@ -1676,13 +1677,16 @@ window.__ModuleLoader__.load({
         + (longTask ? '（长任务，成员仅在结束时回报）' : '')
       return h('div', {
         key: entry.callId || rowIndex,
+        // 2026-11-17 用户要求：视觉上并进输入框，不再做成独立气泡。
+        // 做法：去圆角、只留上边框、横向贴边——上方与内容区相接，下方紧贴输入框。
         style: {
-          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 8px 6px',
-          padding: '6px 10px', borderRadius: 10, fontSize: 12,
-          background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l1)',
+          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0',
+          padding: '5px 12px', borderRadius: 0, fontSize: 12,
+          background: 'transparent',
+          borderTop: '1px solid var(--dsw-alias-border-l1)',
         },
       },
-      h('span', { style: { fontWeight: 600 } }, '小组'),
+      h('span', { style: { fontWeight: 600, opacity: 0.75 } }, '小组'),
       h('span', { style: styles.muted }, total === null ? '' : total + 's'),
       members.length
         ? members.map((m, i) => h('span', {
@@ -1692,7 +1696,7 @@ window.__ModuleLoader__.load({
         },
           (m.name || '成员') + ' · ' + (m.stage || '…')
           + taskSuffix(m)
-          + (m.finishedAt ? '' : (m.at ? ' · ' + Math.round((now - m.at) / 1000) + 's' : ''))
+          + (m.finishedAt ? '' : '')
           + silenceSuffix(m),
           m.finishedAt ? null : h('span', {
             title: '只停这个成员',

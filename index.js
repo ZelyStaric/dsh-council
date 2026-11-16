@@ -828,6 +828,28 @@ function sessionIdOf(exec) {
  */
 const memberTails = new Map()
 
+/** 从任意 JSON 结构里递归挖出第一段文本（claude/codex 的 stream-json 结构各不相同）。 */
+function deepTextOf(node, depth = 0) {
+  if (depth > 5 || node === null || node === undefined) return ''
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const t = deepTextOf(item, depth + 1)
+      if (t) return t
+    }
+    return ''
+  }
+  if (typeof node !== 'object') return ''
+  // 按优先级找常见承载文本的键
+  for (const key of ['text', 'delta', 'content', 'message', 'result', 'output', 'item', 'summary']) {
+    if (node[key] !== undefined) {
+      const t = deepTextOf(node[key], depth + 1)
+      if (t) return t
+    }
+  }
+  return ''
+}
+
 /** 从一块 stdout 里取最后一行有内容的东西（去 ANSI、截断）。 */
 function lastLineOf(chunk) {
   try {
@@ -840,12 +862,13 @@ function lastLineOf(chunk) {
     if (last.startsWith('{')) {
       try {
         const obj = JSON.parse(last)
-        const t = obj.text || obj.delta || obj.message || (obj.item && obj.item.text)
-        if (typeof t === 'string' && t.trim()) return t.trim().slice(0, 120)
-        return ''
-      } catch { /* 不完整 JSON，按普通文本处理 */ }
+        const t = deepTextOf(obj)
+        // JSON 里挖不出人话（心跳/元数据）→ 当没动静，别把整个 JSON 糊到界面上
+        if (!t || !t.trim()) return ''
+        return t.replace(/\s+/g, ' ').trim().slice(0, 120)
+      } catch { /* 不完整 JSON（跨 chunk），按普通文本处理 */ }
     }
-    return last.slice(0, 120)
+    return last.replace(/\s+/g, ' ').slice(0, 120)
   } catch { return '' }
 }
 
