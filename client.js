@@ -1851,10 +1851,10 @@ window.__ModuleLoader__.load({
       const hasGroup = sessionHasGroup(sessionId)
       // 明确没有小组 → 完全不渲染（连提示都不要，这是单人会话，切过来不该看到小组界面）
       if (hasGroup === false) return null
-      // 还不知道（刚启动/刚切会话，groupSessionSet 未就绪）→ 渲染一个**空白占位**：
-      // 不能返回空态卡片，否则单人会话切过去会闪出「点右上角胶囊切到小组」这种误导提示；
-      // 也不能渲染正常内容，否则小组会话的首帧会和单人会话的 tab 对不上。
-      if (hasGroup === null) return h('div', { style: { height: '100%' } })
+      // 还不知道（刚刷新页面 / 集合未就绪）→ **正常渲染**，别返回空占位：
+      // 空占位会让用户看到 1 秒空白再出内容（2026-11-16 实测）。
+      // 「单人会话不该看到小组空态卡片」这件事，由下面空态分支自己判断（hasGroupUnknown）。
+      const hasGroupUnknown = hasGroup === null
       const [team, setTeam] = useState(null)
       const [providers, setProviders] = useState(null)
       const [model, setModel] = useState('')
@@ -2320,12 +2320,16 @@ window.__ModuleLoader__.load({
           // 单人模式（或还没绑定小组）时给明确入口。
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
           // 在单人模式下仍然存在；这里用引导卡片替代"消失"，避免用户进来看到空白。
-          h('div', { style: { fontSize: 14, fontWeight: 600 } },
-            team ? '还没有对话' : '这个会话没有绑定小组'),
-          h('div', { style: styles.muted },
-            team
-              ? '用底部对话框说话，指挥会拆解后派给成员。'
-              : '点右上角胶囊切到「小组」即可开始。'))),
+          // 还不知道有没有小组时不要给「点右上角胶囊」这种误导提示（单人会话切过来会闪）
+          hasGroupUnknown
+            ? null
+            : h('div', null,
+              h('div', { style: { fontSize: 14, fontWeight: 600 } },
+                team ? '还没有对话' : '这个会话没有绑定小组'),
+              h('div', { style: styles.muted },
+                team
+                  ? '用底部对话框说话，指挥会拆解后派给成员。'
+                  : '点右上角胶囊切到「小组」即可开始。')))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
       // 「跳到最新」：常驻 DOM，靠上面的原生滚动监听切 display；点击**平滑滚动**（不是瞬移）
       h('div', {
