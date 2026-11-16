@@ -4817,6 +4817,10 @@ try {
   })
 
   await check('GET /team/state 空态：结构齐全、messages 为空数组、running=false', async () => {
+    // 2026-11-16：无小组的会话现在直接 400（否则每秒解压会话日志，拖慢对话）
+    // 先给它绑个组再测空态结构
+    const emptyGroup = mod.state.groups.find((g) => g.sessionId === 'session-team-empty')
+    if (!emptyGroup) mod.state.groups.push({ id: 'g_empty_probe', name: 'probe', sessionId: 'session-team-empty', memberIds: [] })
     const res = await fetch(base + '/team/state?sessionId=session-team-empty')
     assert.equal(res.status, 200)
     const body = await res.json()

@@ -1912,14 +1912,17 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         refreshTeam()
-        // 同步一次「哪些会话有小组」——团队视图的「不渲染」判断依赖它。
-        // 小组页的 applyData 也会刷新，但用户可能根本没打开过小组页。
-        call('/state').then((data) => refreshGroupSessionSet(data && data.state)).catch(() => {})
+        // 只在**还没拿到过**时拉一次：/state 的 JSON 很大（所有组/成员/角色），
+        // 每次切会话都拉会跟会话内容抢带宽，用户会看到对话延迟一秒才出来（2026-11-16 实测）。
+        if (!groupSessionSet) call('/state').then((data) => refreshGroupSessionSet(data && data.state)).catch(() => {})
         call('/providers').then((d) => setProviders((d && d.providers) || [])).catch(() => setProviders(null))
         let alive = true
         // 1 秒轮询：用户发完消息要立刻在团队页看到（2026-11-16 用户反馈 3 秒太慢）。
         // 服务端读日志有 mtime+size 缓存，文件没变时不会重复解压，1 秒一轮开销可接受。
-        const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
+        // 单人会话（已知没绑组）不必轮询：/team/state 只会一直 400，白占连接。
+        const timer = sessionHasGroup(sessionId) === false
+          ? null
+          : setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
         // 进行中的「步骤」：/progress 里有每个成员的 stage / 静默时长（DSH 风格的执行步骤）
         const refreshProgress = () => {
           call('/progress?sessionId=' + encodeURIComponent(sessionId))
@@ -1928,7 +1931,7 @@ window.__ModuleLoader__.load({
         }
         refreshProgress()
         const ptimer = setInterval(() => { if (alive && !document.hidden) refreshProgress() }, 1500)
-        return () => { alive = false; clearInterval(timer); clearInterval(ptimer) }
+        return () => { alive = false; if (timer) clearInterval(timer); clearInterval(ptimer) }
       }, [sessionId])
 
       const messages = (team && team.messages) || []

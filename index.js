@@ -5082,6 +5082,9 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/team/state') {
             const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
             if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
+            // ⚠️ 没有绑定小组的会话直接 400：这个端点会合并主会话时间线（要**解压会话日志**），
+            // 单人会话被轮询会每秒解压一次 7MB 日志，把对话内容挤到后面（2026-11-16 实测 1s 延迟）。
+            if (!groupForSession(state, sessionId)) return send(res, 400, { error: '会话没有绑定小组' })
             // 不能直接 teamSessions.get：那样会绕过「首次创建时从磁盘恢复」的逻辑（重启后消息就没了）
             const entry = teamSessionState(sessionId)
             // 大脑模型优先级：内存态 → 组级（持久化）→ 全局默认
