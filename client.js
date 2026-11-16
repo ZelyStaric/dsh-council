@@ -486,8 +486,7 @@ window.__ModuleLoader__.load({
           nameRow,
           h('span', { style: { flex: 1 } }),
           h(Button, { onClick: () => mutate('/roles/delete', { id: role.id }) }, '删')),
-        h('div', { style: Object.assign({}, styles.muted, { marginTop: 6, fontSize: 11 }) },
-          '职位只提供提示词模板；成员用哪个框架由它选的模型自动决定（claude-*→Claude Code，gpt-*/o*→Codex，deepseek-*→DSH，gemini-*→Gemini，gpt-image-*/nano-banana-*→出图）'),
+        // 这行说明已上移到职位区标题下方（每个职位都重复一遍太吵，2026-11-16 用户指出）
         h('textarea', {
           style: Object.assign({}, styles.input, { marginTop: 6, minHeight: 54, resize: 'vertical' }),
           defaultValue: role.prompt, placeholder: '职位提示词（派活时注入）',
@@ -763,7 +762,10 @@ window.__ModuleLoader__.load({
         }, '删除小组'))
 
       const rolesPanel = h('div', { style: styles.roles },
-        h('div', { style: Object.assign({}, styles.muted, { marginBottom: 8 }) }, '职位（把成员拖到职位上完成分配）'),
+        h('div', { style: Object.assign({}, styles.muted, { marginBottom: 4 }) }, '职位（把成员拖到职位上完成分配）'),
+        // 整段说明只在**这里**出现一次（之前每个职位卡都重复一遍，2026-11-16 用户指出）
+        h('div', { style: Object.assign({}, styles.muted, { marginBottom: 8, fontSize: 11, opacity: 0.85, lineHeight: 1.5 }) },
+          '职位只提供提示词模板；成员用哪个框架由它选的模型自动决定（claude-*→Claude Code，gpt-*/o*→Codex，deepseek-*→DSH，gemini-*→Gemini，gpt-image-*/nano-banana-*→出图）'),
         roles.map(roleCard),
         h(Button, { onClick: () => mutate('/roles', { name: '职位 ' + (roles.length + 1) }) }, '+ 新增职位'),
         h('span', { style: { width: 6, display: 'inline-block' } }),
@@ -1532,17 +1534,9 @@ window.__ModuleLoader__.load({
             onClick: busy || bound ? undefined : switchToGroup,
           }, '小组'),
         ),
-        bound || pendingGroup
-          ? h('select', {
-            value: bound ? brainModel : pendingBrain,
-            title: bound
-              ? '指挥大脑用哪个模型（本会话持久化）'
-              : '先选好指挥大脑：发出第一条消息后自动应用',
-            style: selectStyle,
-            onClick: (e) => e.stopPropagation(),
-            onChange: (e) => (bound ? pickBrain(e.target.value) : pickPendingBrain(e.target.value)),
-          }, options.length ? options : [h('option', { key: '__none', value: '' }, '（无可用模型）')])
-          : null,
+        // 2026-11-16 用户要求：**天角不再有「选指挥模型」的下拉**。
+        // 指挥 = 小组里那个「指挥」成员，它的模型在「小组」页成员卡上改；
+        // 原生对话框右下角的模型选择器决定的是主会话（传话器）用哪个模型。
         bound ? h('span', {
           style: Object.assign({}, styles.chip, { cursor: 'pointer', fontSize: 11 }),
           title: '编辑本组名册',
@@ -1974,14 +1968,8 @@ window.__ModuleLoader__.load({
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: '0 0 auto' } },
         h('strong', null, '团队'),
         h('span', { style: styles.muted, fontSize: 12 }, messages.length + ' 条消息'),
-        h('select', {
-          style: Object.assign({}, styles.input, { width: 230, fontSize: 12 }),
-          value: model || '',
-          title: '指挥大脑用哪个模型（本会话持久化）',
-          onChange: (event) => pickModel(event.target.value),
-        }, (brainModels.length ? brainModels : [model || 'claude-fable-5-2']).map((m) => h('option', { key: m, value: m }, m))),
         h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
-          (team && team.brainKind ? team.brainKind : '…') + (team && team.persisted ? ' · 已持久化' : ' · 仅内存')),
+          '指挥模型在「小组」页的成员卡上改'),
         h('span', { style: { flex: 1 } }),
         running ? h(Button, { onClick: stop }, '停止') : null),
       /* 时间线 */
@@ -2017,16 +2005,12 @@ window.__ModuleLoader__.load({
               ? '（团队成员回执来自内存，重启 dsh-web 后历史会清空；「对话」页里的会话记录不受影响。）'
               : '（单人模式下这个页签可忽略：消息直接由本会话回答，不经过指挥。）'))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
-      /* 输入区 */
-      h('div', { style: { display: 'flex', gap: 6, flex: '0 0 auto' } },
-        h('input', {
-          style: Object.assign({}, styles.input, { flex: 1 }),
-          placeholder: '对指挥说话：说清你要什么，它会拆解并派给成员',
-          value: draft,
-          onChange: (event) => setDraft(event.target.value),
-          onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey) send() },
-        }),
-        h(Button, { onClick: running ? stop : send }, running ? '停止' : '发送')))
+      /* 不再有独立输入框：小组模式下**直接用原生对话框**（对话页底部那个），
+       * 主会话只负责把用户原话转给指挥。这里只留一句说明 + 停止按钮。 */
+      h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto', flexWrap: 'wrap' } },
+        h('span', { style: Object.assign({}, styles.muted, { fontSize: 12, flex: 1 }) },
+          '小组模式直接用底部对话框说话——它会转给指挥拆解；成员回执会出现在这里。'),
+        running ? h(Button, { onClick: stop }, '停止') : null))
     }
 
     /* ── 按模式显示 tab（v0.4.17）──────────────────────────────────────
