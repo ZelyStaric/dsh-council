@@ -1955,10 +1955,13 @@ window.__ModuleLoader__.load({
 
       // 反馈：最后一条是你、且过了 3 秒还没回复 → 显示「指挥正在处理…」（必须放在 running 之后，否则 TDZ）
       const lastMsgForWait = messages.length ? messages[messages.length - 1] : null
+      const waitMs = lastMsgForWait ? Date.now() - (Number(lastMsgForWait.at) || 0) : 0
       const waitingForCommander = Boolean(
-        lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText
-        && Date.now() - (Number(lastMsgForWait.at) || 0) > 3000,
+        lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText && waitMs > 3000,
       )
+      // 超过 2 分钟还没有任何回应 → 大概率是 turn 被打断（服务重启/崩溃），
+      // 不能让「正在拆解…」无限计时（2026-11-16 用户看到 7m43s 以为卡死）。
+      const waitStalled = waitingForCommander && waitMs > 120000
       // 指挥气泡的头像种类：按 brainKind 推断
       const brainKind = team && team.brainKind === 'codex' ? 'codex'
         : team && team.brainKind === 'dsh-seam' ? 'deepseek'
@@ -2066,7 +2069,7 @@ window.__ModuleLoader__.load({
               : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                 h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
                 h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
-                h('span', { style: { opacity: 0.8 } }, '正在拆解任务、挑选成员…'),
+                h('span', { style: { opacity: 0.8 } }, waitStalled ? '没有响应（这次派发可能已中断，可以重新发一次）' : '正在拆解任务、挑选成员…'),
                 h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now()))))])] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。
