@@ -1317,14 +1317,16 @@ window.__ModuleLoader__.load({
         // hero 实例没有 sessionId → bound 恒为 false → 它会把刚显示出来的「团队/小组」又藏掉。
         if (!sessionId) return
         if (!state) return
-        // 防抖 300ms：新建小组会话时 bound 会抖动几帧（建组→绑定→state 刷新），
-        // 每帧都立刻应用会让内容区在「对话 / 团队」之间来回闪（2026-11-16 用户实测）。
+        // 单人模式**立即**藏起来：切换会话时 DSH 会重建 tab 列表，新节点默认全显示，
+        // 如果等防抖，就会出现「切到单人会话后还闪出小组 tab」的半秒窗口（2026-11-16 用户实测）。
+        // 小组模式仍然防抖——建组→绑定→state 刷新那几帧 bound 会抖，立刻应用会来回闪。
+        if (!bound) applyTabVisibility(true, 'immediate-solo sessionId=' + String(sessionId).slice(0, 8))
         let recheck = null
         const timer = setTimeout(() => {
           applyTabVisibility(!bound, 'effect bound=' + bound)
           // 兜底复核：万一中间被别的路径改错，1.2 秒后再纠正一次
           recheck = setTimeout(() => applyTabVisibility(!bound, 'recheck bound=' + bound), 1200)
-        }, 80)
+        }, bound ? 80 : 0)
         return () => { clearTimeout(timer); if (recheck) clearTimeout(recheck) }
       }, [sessionId, bound, Boolean(state)])
 
