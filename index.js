@@ -7219,10 +7219,11 @@ function makeDelegateTool(ctx, config, group) {
                   model: (response.planner && response.planner.model) || null,
                   plan: true,
                 })
-              } else if (response.plannedBy === 'parent' && (response.members || []).length === 1) {
-                // 单成员直派：没有拆解，但说明"这次是谁直接派的"
-                const one = response.members[0]
-                teamPushMessage(entry, 'assistant', '直接派给 **' + String(one.name || '成员') + '**（未经指挥拆解）', { plan: true })
+              } else if ((response.members || []).length) {
+                // 没走指挥（主会话直派 / bypassPlanner）：也要留一条，否则时间线里看不出"这批活是谁派的"
+                const names = (response.members || []).map((m) => String(m.name || '成员'))
+                teamPushMessage(entry, 'assistant',
+                  '直接派给 **' + names.join('、') + '**（未经指挥拆解）', { plan: true })
               }
             } catch { /* 拆解回执推送失败不影响派活 */ }
             for (const m of response.members || []) {
