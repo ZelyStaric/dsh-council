@@ -116,6 +116,15 @@ try {
     await page.keyboard.press('Enter')
     await page.waitForTimeout(9000)
   } else {
+    // 会话多了以后侧边栏会折叠（「展开其余 N 个会话」），旧会话直接点不到 → 先展开
+    for (let i = 0; i < 8; i++) {
+      const visible = await page.getByText(sessionHint, { exact: false }).first().isVisible().catch(() => false)
+      if (visible) break
+      const expand = page.getByText(/^展开其余/).first()
+      if (!(await expand.isVisible().catch(() => false))) break
+      await expand.click().catch(() => {})
+      await page.waitForTimeout(600)
+    }
     await page.getByText(sessionHint, { exact: false }).first().click()
     await page.waitForTimeout(3500)
   }
