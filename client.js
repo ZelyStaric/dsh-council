@@ -2092,12 +2092,12 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 2026-11-17 修：原来调的是 /team/stop（团队大脑的旧接口，那个功能已删=永远无效）。
+      // 真正的取消接口是 /runs/cancel（all:true = 停本轮所有成员）。
       const stop = async () => {
-        const runId = ((team && team.runIds) || [])[0]
         stopStream()
         setBusy(false)
-        if (!runId) return
-        try { await call('/team/stop', { runId }) } catch { /* ignore */ }
+        try { await call('/runs/cancel', { all: true }) } catch { /* ignore */ }
         refreshTeam()
       }
 
@@ -2377,17 +2377,22 @@ window.__ModuleLoader__.load({
               // 只要**这个卡片出现了**（有 activeSteps 或在等指挥），就说明有活在跑。
               (activeSteps.length || waitingForCommander || running)
                 ? h('span', {
+                  // 2026-11-17 修：**这个按钮点了没反应**（后端日志里连 cancel 请求都没有）。
+                  // 成员行的 ✕ 用同样的 onClick 却能用，差异在这条嵌在 flex 标题行里。
+                  // 加 onMouseDown 兜底 + data-* 标记，并在 onMouseDown 里也发一次请求。
+                  'data-council-stop': '1',
                   title: '停止本轮所有成员',
-                  onClick: async () => {
-                    try {
-                      await call('/runs/cancel', { all: true })
-                      notifyCouncilChange()
-                    } catch { /* ignore */ }
+                  onMouseDown: (e) => { try { e.preventDefault() } catch { /* ignore */ } },
+                  onClick: (e) => {
+                    try { e && e.stopPropagation && e.stopPropagation() } catch { /* ignore */ }
+                    // 复用工具栏那个 stop()，避免两处逻辑分叉
+                    try { stop() } catch { /* ignore */ }
                   },
                   style: {
                     cursor: 'pointer', padding: '1px 9px', borderRadius: 999,
                     fontSize: 11, fontWeight: 600, color: '#fff',
                     background: '#e5484d', border: '1px solid #c93a3f', opacity: 0.95,
+                    userSelect: 'none',
                   },
                 }, '停止')
                 : null),
