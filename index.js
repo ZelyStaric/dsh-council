@@ -4621,6 +4621,16 @@ export function createHandler(ctx, config = {}) {
                 return send(res, 200, { stoppedMembers: hit, at })
               }
               let stopped = 0
+              // 2026-11-17 修：后台 job 的 runOnce() 是**异步启动**的，
+              // 用户点「停止」时它可能还没走到 activeCalls.set —— 原来的遍历会漏掉它，
+              // 于是「点了停止，指挥照样拆解、照样派活」。这里给所有 running 的 job 打取消标记，
+              // runOnce() 在每个关键节点检查它。
+              let canceledJobs = 0
+              if (!target || body.all) {
+                for (const job of backgroundJobs.values()) {
+                  if (job.status === 'running') { job.cancelled = true; canceledJobs += 1 }
+                }
+              }
               if (!target || body.all) {
                 for (const [id, entry] of activeCalls) { entry.cancelled = true; try { entry.controller.abort() } catch { /* */ } stopped += 1 }
               } else if (activeCalls.has(target)) {
@@ -4639,7 +4649,7 @@ export function createHandler(ctx, config = {}) {
               } else if (finishProgressEntry(progressMap.get(target), at, { cancelled: true })) {
                 clearedProgress = 1
               }
-              return send(res, 200, { stopped, clearedProgress, running: [...activeCalls.keys()], at })
+              return send(res, 200, { stopped, canceledJobs, clearedProgress, running: [...activeCalls.keys()], at })
             }
             if (route === '/groups/policy') {
               const group = findGroup(body.id)
@@ -7037,6 +7047,16 @@ function makeDelegateTool(ctx, config, group) {
         response.selfWorkBlocked = blockedSoFar.blocked
         response.selfWorkBlockedDetail = selfWorkBlockedDetail(blockedSoFar)
         if (callId) activeCalls.set(callId, { cancelled: false, controller: new AbortController() })
+        // 2026-11-17：后台 job 可能在**还没注册**时就被用户停止（runOnce 是异步启动的）。
+        // 每到一个关键节点都检查一次，一旦发现已取消就立刻收尾，
+        // 绝不继续拆解 / 派活（用户原话：「只要是用户终止，就不继续派活」）。
+        const bgJob = background ? backgroundJobs.get(runId) : null
+        const abortedByUser = () => Boolean((bgJob && bgJob.cancelled) || callCancelled(callId))
+        if (abortedByUser()) {
+          response.acceptanceStatus = 'cancelled'
+          response.acceptanceNote = '已被用户停止（后台任务在拆解前被取消）'
+          break delegate
+        }
         const staffing = await ensureStaffing(live, args?.staffing, ephemeral, config)
         let assignments = Array.isArray(args && args.assignments) ? args.assignments : []
         let planRaw
@@ -7057,6 +7077,12 @@ function makeDelegateTool(ctx, config, group) {
         }
         // 拆解归属：request 路径由指挥拆解；assignments 直派由主对话自己派（单成员单任务，
         // 或多任务显式 bypassPlanner）。回执顶部「## 拆解」与结构化字段都从这里取。
+        // 拆解完了但用户可能在这期间点了停止 → 派活前最后一道闸
+        if (abortedByUser()) {
+          response.acceptanceStatus = 'cancelled'
+          response.acceptanceNote = '已被用户停止（拆解完成但未派活）'
+          break delegate
+        }
         response.plannedBy = requestText && !directAssignments.length ? 'commander' : 'parent'
         if (response.plannedBy === 'commander') {
           const cmdr = memberWithRole(live, '指挥')
