@@ -2111,6 +2111,10 @@ window.__ModuleLoader__.load({
               stage: m.stage || '执行中',
               silentMs: Number(m.silentMs) || 0,
               stageAgeMs: Number(m.stageAgeMs) || 0,
+              // 2026-11-17：终止按钮需要这两个（只停单个成员 / 停整轮）
+              callId,
+              memberId: id,
+              finished: Boolean(m.finishedAt),
             })
           }
         }
@@ -2354,8 +2358,26 @@ window.__ModuleLoader__.load({
               key: 'steps',
               style: Object.assign({}, styles.card, { marginTop: 10, padding: '8px 10px', maxWidth: '92%' }),
             },
-            h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 6, letterSpacing: 0.3 } },
-              (running ? '● ' : '') + '进行中'),
+            h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 6, letterSpacing: 0.3, display: 'flex', alignItems: 'center', gap: 8 } },
+              h('span', null, (running ? '● ' : '') + '进行中'),
+              h('span', { style: { flex: 1 } }),
+              // 终止整轮（2026-11-17 用户要求：放进「进行中」卡片）
+              running
+                ? h('span', {
+                  title: '停止本轮所有成员',
+                  onClick: async () => {
+                    try {
+                      await call('/runs/cancel', { all: true })
+                      notifyCouncilChange()
+                    } catch { /* ignore */ }
+                  },
+                  style: {
+                    cursor: 'pointer', padding: '1px 9px', borderRadius: 999,
+                    fontSize: 11, fontWeight: 600, color: '#fff',
+                    background: '#e5484d', border: '1px solid #c93a3f', opacity: 0.95,
+                  },
+                }, '停止')
+                : null),
             // 有成员阶段 → 逐条列出（DSH 风格的执行步骤）
             activeSteps.length
               ? activeSteps.map((st, i) => h('div', {
@@ -2365,7 +2387,20 @@ window.__ModuleLoader__.load({
               h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
               h('span', { style: { fontWeight: 600, minWidth: 48 } }, st.name),
               h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, st.stage),
-              h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs))))
+              h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs)),
+              // 只停这个成员
+              st.finished
+                ? null
+                : h('span', {
+                  title: '只停这个成员',
+                  onClick: async () => {
+                    try {
+                      await call('/runs/cancel', { member: st.memberId, callId: st.callId })
+                      notifyCouncilChange()
+                    } catch { /* ignore */ }
+                  },
+                  style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 4px', flexShrink: 0 },
+                }, '✕')))
               // 还没进入成员阶段 → 说明指挥在校解，给一句更具体的话
               : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                 h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
