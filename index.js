@@ -492,9 +492,19 @@ function memberStopController(callId, memberId) {
 function stopMember(callId, memberId) {
   const key = memberStopKey(callId, memberId)
   const controller = memberStops.get(key)
-  if (!controller) return false
-  try { controller.abort() } catch { /* ignore */ }
-  memberStops.delete(key)
+  if (controller) {
+    try { controller.abort() } catch { /* ignore */ }
+    memberStops.delete(key)
+    return true
+  }
+  // 2026-11-17 修：**成员还没启动**就点了叉（第一次派活最常见的时序）时，
+  // 原来直接 return false → 取消请求被丢掉 → 成员照常跑完、失败、触发重试，
+  // 用户看到的就是「点了叉它还又派了一次活」。
+  // 现在留一个**已 abort 的占位 controller**：等成员真正启动、
+  // 通过 signalFor() 取到它时会立刻发现是 aborted，从而直接返回 cancelled。
+  const pre = new AbortController()
+  try { pre.abort() } catch { /* ignore */ }
+  memberStops.set(key, pre)
   return true
 }
 
@@ -2401,8 +2411,12 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   const cancelSignal = signalFor(callId)
   const activationSignal = cancelSignal ? AbortSignal.any([controller.signal, cancelSignal]) : controller.signal
   // 监听取消信号：立即 resolve 并标记 cancelled
-  if (cancelSignal && !cancelSignal.aborted) {
-    cancelSignal.addEventListener('abort', () => { cancelled = true }, { once: true })
+  // 2026-11-17 修：**已经 aborted 的信号也要处理**。
+  // 用户可能在成员启动前就点了叉（stopMember 会塞一个已 abort 的占位 controller），
+  // 原来这里只挂监听、不检查，导致「预取消」对 deepseek 成员完全无效。
+  if (cancelSignal) {
+    if (cancelSignal.aborted) cancelled = true
+    else cancelSignal.addEventListener('abort', () => { cancelled = true }, { once: true })
   }
   // 显式预算（审校等有界调用）才设总计时；成员调用没有总时长，只有静默看门狗。
   const budgetTimer = Number.isFinite(budgetMs) && budgetMs > 0
@@ -3725,7 +3739,10 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     await save().catch(() => {})
   }
   if (attempt > 1) result = Object.assign({}, result, { attempts: attempt })
-  if (callCancelled(callId)) {
+  // 2026-11-17 修：**单成员取消也要在这里收口**。
+  // 原来只认 callCancelled（整轮停止 all:true），用户点单个 ✕ 时不会走这里，
+  // 于是一个被用户掐掉的成员还会继续走审核/返工，看起来就像「又派了一次活」。
+  if (callCancelled(callId) || result.reason === 'cancelled') {
     finishMemberStage(callId, member, onStage, '已停止')
     return {
       memberId: member.id,
@@ -3795,7 +3812,9 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     // 新格式下 owner 来自「OWNER: MEMBER|OTHER」那行（verdictOf 已解析进 review.commander.owner）
     const commanderOwner = review.commander && review.commander.owner ? String(review.commander.owner) : ''
     const blockedByEnvironment = commanderOwner === 'other'
-    while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework && !blockedByEnvironment) {
+    // 2026-11-17：用户已终止（整轮或该成员）→ 一律不返工
+    const stoppedByUser = callCancelled(callId) || result.reason === 'cancelled'
+    while ((acceptance === 'rejected' || acceptance === 'unverified') && round < maxRework && !blockedByEnvironment && !stoppedByUser) {
       round += 1
       const blocks = []
       // commander 模式（且指挥给了结论）：只把指挥不通过的理由写进返工单，审校的否决不再算数
