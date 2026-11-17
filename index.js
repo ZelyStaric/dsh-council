@@ -3018,6 +3018,17 @@ async function memberEndpoint(member, config) {
 async function envFor(kindOrMember, config) {
   const member = kindOrMember && typeof kindOrMember === 'object' ? kindOrMember : { kind: kindOrMember }
   const endpoint = await memberEndpoint(member, config).catch(() => null)
+  // 临时诊断（2026-11-17）：排查 request 路径 0 产出，确认 claude 指挥到底拿到了什么 env
+  try {
+    appendFileSync('/tmp/council-env.log', JSON.stringify({
+      at: new Date().toISOString(),
+      kind: member.kind, name: member.name, provider: member.provider,
+      resolvedProvider: providerIdFor(member),
+      hasEndpoint: Boolean(endpoint),
+      base: endpoint && endpoint.baseURL ? String(endpoint.baseURL) : null,
+      keyLen: endpoint && endpoint.key ? String(endpoint.key).length : 0,
+    }) + String.fromCharCode(10))
+  } catch {}
   if (endpoint && member.kind === 'claude') {
     return Object.assign({ ANTHROPIC_BASE_URL: rootUrl(endpoint.baseURL) || undefined, ANTHROPIC_API_KEY: endpoint.key || undefined }, proxyEnv(config))
   }
