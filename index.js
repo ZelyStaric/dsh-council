@@ -732,9 +732,24 @@ function notifyParentJobDone(ctx, job) {
       body = String(job.error || (error && error.message) || '（回执渲染失败）')
     }
     body = String(body || '')
-    const text = '[后台派活完成] runId=' + String(job.runId || '') + ' · 状态=' + String(job.status || 'done') + ' · 用时=' + seconds + 's\n'
-      + body
-      + '\n\n—— 以上是本轮后台派活的回执。请据此向用户汇报结果（验收未通过就如实说未通过，不能当交付）。'
+    // 2026-11-17 修：**别再塞整份回执**。
+    // 用户反馈「指挥本来就收到成员回执了，为什么还要用排队消息的形式再发一次」。
+    // 确实冗余：这条 followup 的唯一职责是**唤醒主会话**（后台模式下它的 turn 早就结束了，
+    // 没人唤醒就永远不会去看结果）。所以只给
+    //   · 状态与用量（够判断成败）
+    //   · 验收结论那一行（如果有）
+    //   · 一句指路（细节去团队页看，或调 council_collect 取全文）
+    // 完整回执仍在 job.response 里，需要时 council_collect 取。
+    const acceptanceLine = (() => {
+      const m = body.match(/^## 验收[^\n]*$/m)
+      return m ? m[0] : ''
+    })()
+    const head = body.split('\n').slice(0, 2).join(' ').slice(0, 120)
+    const text = '[后台派活完成] runId=' + String(job.runId || '') + ' · 状态=' + String(job.status || 'done') + ' · 用时=' + seconds + 's'
+      + (head ? '\n摘要：' + head : '')
+      + (acceptanceLine ? '\n' + acceptanceLine : '')
+      + '\n\n（完整回执已经写进团队页，需要全文用 council_collect runId=' + String(job.runId || '') + ' 取。）'
+      + '\n—— 请据此向用户汇报结果（验收未通过就如实说未通过，不能当交付）。'
     const msg = {
       id: 'msg_' + randomUUID().replace(/-/g, ''),
       role: 'user',
