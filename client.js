@@ -228,9 +228,26 @@ window.__ModuleLoader__.load({
     const statusLabel = { pending: '排队中', running: '正在说…', done: '已回执', failed: '失败' }
 
     /** The group owned by one session (1:1 binding). */
+    /**
+     * 会话 id 归一化（和后端 normalizeSessionId 保持一致）。
+     *
+     * 为什么必须归一：DSH 在不同 slot 里传进来的 id 有时带 `session-` 前缀、有时不带；
+     * 而 groups 里存的永远是带前缀的。原来这里用 `g.sessionId === sessionId` 直接比，
+     * 一旦收到不带前缀的 id 就匹配不上 → bound=false → **切换到已绑定小组的会话时
+     * 胶囊仍显示「单人」**（用户实测：从单人会话切到 session-6a5f5317 还是单人）。
+     */
+    function normalizeSessionIdLike(value) {
+      const raw = String(value || '').trim()
+      if (!raw) return ''
+      return raw.startsWith('session-') ? raw : 'session-' + raw
+    }
+
     function groupForSession(state, sessionId) {
       if (!state || !sessionId) return null
-      return (state.groups || []).find((g) => g.sessionId === sessionId && !g.archived) || null
+      const target = normalizeSessionIdLike(sessionId)
+      if (!target) return null
+      return (state.groups || []).find((g) =>
+        g && g.sessionId && !g.archived && normalizeSessionIdLike(g.sessionId) === target) || null
     }
 
     function groupMembers(state, group) {
