@@ -2560,24 +2560,39 @@ window.__ModuleLoader__.load({
                   }, '› ' + st.tailText)
                   : null))
               // 还没进入成员阶段 → 说明指挥在校解，给一句更具体的话
-              : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
-                h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
-                h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
-                h('span', { style: { opacity: 0.8 } }, (() => {
-                  // 2026-11-17：按**真实 job 状态**说，不再一律「正在拆解」
+              // 2026-11-17：指挥行也拆成两行——第一行状态，第二行「最近一行输出」。
+              // 用户要求：指挥自己动手时也要像成员那样有滚动字（原来只有「后台任务运行中…」）。
+              // tail 来自后端 /progress 的 jobs[].tailText（指挥的 stdout 一直有写到 memberTails）。
+              : [(() => {
+                const j = liveJobs[0] || doneJobs[doneJobs.length - 1] || null
+                const cmdTail = j && j.tailText ? String(j.tailText) : ''
+                const statusText = (() => {
                   if (waitPhase === 'job-running') {
-                    const j = liveJobs[0]
                     return '后台任务 ' + String(j.runId || '') + ' 运行中…'
                   }
                   if (waitPhase === 'job-done') {
-                    const j = doneJobs[doneJobs.length - 1]
-                    const cost = j.finishedAt && j.startedAt ? Math.round((j.finishedAt - j.startedAt) / 1000) : null
+                    const cost = j && j.finishedAt && j.startedAt ? Math.round((j.finishedAt - j.startedAt) / 1000) : null
                     return '后台任务已完成' + (cost === null ? '' : '（' + cost + 's）') + '，等待指挥汇总…'
                   }
                   if (waitStalled) return '没有响应（可能被打断了）'
                   return '正在拆解任务、挑选成员…'
-                })()),
-                h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now()))))])] : []))
+                })()
+                return h('div', { key: 'decompose', style: { padding: '2px 0' } },
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
+                    h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
+                    h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
+                    h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, statusText),
+                    h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now())))),
+                  cmdTail
+                    ? h('div', {
+                      style: {
+                        fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 1, marginLeft: 18,
+                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      },
+                      title: cmdTail,
+                    }, '› ' + cmdTail)
+                    : null)
+              })()])] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab

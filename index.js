@@ -5057,11 +5057,27 @@ export function createHandler(ctx, config = {}) {
                 const js = job.sessionId ? (job.sessionId.startsWith('session-') ? job.sessionId : 'session-' + job.sessionId) : null
                 return js === normalizedFilter
               })
-              .map((job) => ({
-                runId: job.runId, status: job.status,
-                startedAt: job.startedAt, finishedAt: job.finishedAt || null,
-                error: job.error || null,
-              }))
+              .map((job) => {
+                // 2026-11-17：带上「指挥最近一行输出」。
+                // 指挥自己动手时（brainPermissions=open）它的 stdout 一直写进 memberTails，
+                // 但 /progress 的 members 里没有指挥条目 → 前端只能看到「后台任务运行中」，
+                // 看不到它在干什么（用户要求：指挥动手时也要有成员那样的滚动字）。
+                // 后台 job 跑的时候场上只有指挥在动，取最新的一条即可。
+                let tail = ''
+                try {
+                  let bestAt = 0
+                  for (const tv of memberTails.values()) {
+                    if (tv && Number(tv.at) > bestAt) { bestAt = Number(tv.at); tail = String(tv.text || '') }
+                  }
+                  if (tail && Date.now() - bestAt > 120000) tail = ''
+                } catch { /* ignore */ }
+                return {
+                  runId: job.runId, status: job.status,
+                  startedAt: job.startedAt, finishedAt: job.finishedAt || null,
+                  error: job.error || null,
+                  tailText: tail,
+                }
+              })
             return send(res, 200, { progress: out, jobs: jobList, residentChildren: residentChildren.size, runningMembers: runningMembers.size })
           }
           if (req.method === 'GET' && route === '/jobs') {
