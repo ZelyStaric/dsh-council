@@ -1088,6 +1088,8 @@ window.__ModuleLoader__.load({
       const planned = (args.assignments || []).map((item) => item.member)
       const [progress, setProgress] = useState(null)
       const [now, setNow] = useState(Date.now())
+      // 本轮是否已请求停止（按钮置灰用）
+      const [stoppedAt, setStoppedAt] = useState(0)
 
       useEffect(() => {
         if (phase === 'result') return undefined
@@ -1111,8 +1113,31 @@ window.__ModuleLoader__.load({
           ? Object.keys(progress.members).filter((id) => id !== '__stage__').map((id) => progress.members[id])
           : []
         const started = progress && progress.startedAt ? Math.round((now - progress.startedAt) / 1000) : null
+        // 2026-11-17 用户要求：底部状态栏那两个「终止」按钮合并到这里。
+        //  · ✕ 只停这个成员（/runs/cancel { member, callId }）
+        //  · 「停止」停本轮所有成员（/runs/cancel { all: true }）
+        const stopMember = async (id) => {
+          try { await call('/runs/cancel', { member: id, callId: props && props.callId }) } catch { /* ignore */ }
+        }
+        const stopAll = async () => {
+          if (stoppedAt) return
+          setStoppedAt(Date.now())
+          try { await call('/runs/cancel', { all: true }) } catch { /* ignore */ }
+        }
         return h('div', { style: styles.card },
-          h('div', { style: styles.who }, '小组派发中…' + (started === null ? '' : ' ' + started + 's')),
+          h('div', { style: Object.assign({}, styles.who, { display: 'flex', alignItems: 'center', gap: 8 }) },
+            h('span', null, '小组派发中…' + (started === null ? '' : ' ' + started + 's')),
+            h('span', { style: { flex: 1 } }),
+            h('span', {
+              title: stoppedAt ? '已发送停止请求，正在终止…' : '停止本轮所有成员（立即终止进行中的 CLI / 子代理）',
+              onClick: stopAll,
+              style: {
+                cursor: stoppedAt ? 'default' : 'pointer', padding: '2px 10px', borderRadius: 999,
+                fontSize: 12, fontWeight: 600, color: '#fff',
+                background: stoppedAt ? '#8a5a5a' : '#e5484d', border: '1px solid #c93a3f',
+                opacity: stoppedAt ? 0.7 : 1,
+              },
+            }, stoppedAt ? '取消中…' : '停止')),
           members.length
             ? members.map((m, i) => h('div', { key: i, style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 4 } },
               h(Avatar, { kind: m.kind, name: m.name }),
@@ -1126,7 +1151,13 @@ window.__ModuleLoader__.load({
                     style: { fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
                     title: m.tailText,
                   }, '› ' + m.tailText)
-                  : null)))
+                  : null),
+              // 只停这个成员
+              m.finishedAt ? null : h('span', {
+                title: '只停这个成员',
+                onClick: () => stopMember(m.id || m.memberId),
+                style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 4px', flexShrink: 0 },
+              }, '✕')))
             : h('div', { style: styles.muted }, stageEntry
               ? (stageEntry.name || '指挥') + ' · ' + (stageEntry.stage || '处理中')
               : (planned.length ? planned.join('、') + '（等待开始）' : '准备中')))
@@ -1705,33 +1736,11 @@ window.__ModuleLoader__.load({
           + taskSuffix(m)
           + (m.finishedAt ? '' : '')
           + silenceSuffix(m),
-          m.finishedAt ? null : h('span', {
-            title: '只停这个成员',
-            onClick: async (event) => {
-              event.stopPropagation()
-              try { await call('/runs/cancel', { member: m.id || m.memberId, callId: entry.callId }) } catch { /* ignore */ }
-            },
-            style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 2px' },
-          }, '✕')))
+          // 2026-11-17：单个成员的 ✕ 已移进「进行中」卡片，这里只显示状态
+          null))
         : h('span', { style: styles.muted }, idleText),
-      h('span', { style: { flex: 1 } }),
-      h('span', {
-        onClick: async () => {
-          if (entry.stoppedAt) return
-          setRowStopped(Date.now())
-          try {
-            const result = await call('/runs/cancel', { all: true })
-            // 即使 stopped=0 也本地置灰，反馈"已请求取消"
-            if (!result || !result.stopped) setRowStopped(Date.now())
-          } catch { /* ignore */ }
-        },
-        title: entry.stoppedAt ? '已发送停止请求，正在终止…' : '停止本轮所有成员（立即终止进行中的 CLI / 子代理）',
-        style: {
-          cursor: entry.stoppedAt ? 'default' : 'pointer', padding: '2px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-          color: '#fff', background: entry.stoppedAt ? '#8a5a5a' : '#e5484d', border: '1px solid #c93a3f',
-          opacity: entry.stoppedAt ? 0.7 : 1,
-        },
-      }, entry.stoppedAt ? '取消中…' : '停止'))
+      // 2026-11-17 用户要求：「停止本轮」已移进「进行中」卡片
+      h('span', { style: { flex: 1 } }))
     }
 
     /** 本地绝对路径 → 插件文件端点 URL（只读、限制在 HOME 下）。 */

@@ -133,15 +133,15 @@ for (const [name, state] of FIXTURES) {
 // 四种情况都必须有「停止」按钮（点了要能发 /runs/cancel）。
 const NOW = Date.now()
 const PROGRESS_CASES = [
-  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中', '停止'], ['准备中…', '长任务']],
-  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）', '停止'], ['准备中…', '长任务']],
-  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…', '停止'], ['等待成员…', '长任务']],
-  ['long-task-400s', { startedAt: NOW - 400_000, members: {} }, ['等待成员…（400s）', '（长任务，成员仅在结束时回报）', '停止'], ['准备中…']],
+  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中'], ['准备中…', '长任务']],
+  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）'], ['准备中…', '长任务']],
+  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…'], ['等待成员…', '长任务']],
+  ['long-task-400s', { startedAt: NOW - 400_000, members: {} }, ['等待成员…（400s）', '（长任务，成员仅在结束时回报）'], ['准备中…']],
   // 看门狗：静默 > 3 分钟要在成员条目上显示「静默 Ns」（silentMs 由服务端 /progress 计算）
-  ['silent-4min', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 240_000, silentMs: 240_000 } } }, ['代码 · 执行中', '静默 240s', '停止'], ['准备中…']],
-  ['active-fresh', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 5_000, silentMs: 5_000 } } }, ['代码 · 执行中', '停止'], ['静默 ']],
+  ['silent-4min', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 240_000, silentMs: 240_000 } } }, ['代码 · 执行中', '静默 240s'], ['准备中…']],
+  ['active-fresh', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 5_000, silentMs: 5_000 } } }, ['代码 · 执行中'], ['静默 ']],
   // Bug 1 回归：已收尾（finishedAt）的成员不再显示静默，也不再显示一直涨的秒数
-  ['finished', { startedAt: NOW - 9_000_000, members: { m1: { name: '材质', kind: 'claude', stage: '完成', at: NOW - 6_400_000, lastActivity: NOW - 6_400_000, finishedAt: NOW - 6_300_000, silentMs: 6_400_000 } } }, ['材质 · 完成', '停止'], ['静默', '· 6400s']],
+  ['finished', { startedAt: NOW - 9_000_000, members: { m1: { name: '材质', kind: 'claude', stage: '完成', at: NOW - 6_400_000, lastActivity: NOW - 6_400_000, finishedAt: NOW - 6_300_000, silentMs: 6_400_000 } } }, ['材质 · 完成'], ['静默', '· 6400s']],
 ]
 for (const [label, entry, need, forbid] of PROGRESS_CASES) {
   try {
@@ -177,7 +177,7 @@ try {
   const text = result.text
   const rows = (text.match(/小组/g) || []).length
   if (rows !== 2) throw new Error('应当 2 行「小组」，实际 ' + rows + ' 行（' + text + '）')
-  const need = ['代码 · 执行中', '画师 · 出图中', '重构进度条渲染，支持并行多条条目', '给新角色画一张立绘', '停止']
+  const need = ['代码 · 执行中', '画师 · 出图中', '重构进度条渲染，支持并行多条条目', '给新角色画一张立绘']
   const missing = need.filter((m) => !text.includes(m))
   if (missing.length) throw new Error('缺 ' + missing.join(' / ') + '（实际：' + text + '）')
   // 摘要超过 24 字要截断加 …（服务端 60 字、前端只显示前 24 字）
@@ -194,29 +194,27 @@ try {
   console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
 }
 
-// 点「停止」真的能跑通：progressRow 是模块级函数，看不见 CouncilProgress 里的 setEntries——
-// 曾因此点停止直接 ReferenceError setEntries is not defined（只读文案的断言发现不了）。
+// 2026-11-17：用户要求把「停止单个成员 / 停止本轮」两个按钮从底部状态栏
+// 移进「进行中」卡片（CouncilCardInner）。所以这里改为反向断言：
+// 底部状态栏**不应该**再出现「停止」按钮，但仍要能正常渲染两行进度。
 try {
   const entry = { callId: 'call-stop', sessionId: 'session-test-bound', startedAt: NOW - 5_000,
     members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 4_000, task: '点一下停止' } } }
   const rendered = renderOne('council-progress', payload.state, [[entry, { callId: 'call-stop2', sessionId: 'session-test-bound', startedAt: NOW - 3_000, members: {} }], NOW, false, false])
   if (rendered.error) throw rendered.error
-  const findStop = (node) => {
+  // 按**节点**判断（文本里的「停止」可能只是任务描述，不是按钮）
+  const findStopBtn = (node) => {
     if (!node || typeof node !== 'object') return null
-    if (Array.isArray(node)) { for (const child of node) { const hit = findStop(child); if (hit) return hit } return null }
+    if (Array.isArray(node)) { for (const c of node) { const h = findStopBtn(c); if (h) return h } return null }
     if (node.props && typeof node.props.onClick === 'function' && Array.isArray(node.children) && node.children[0] === '停止') return node
-    for (const child of (node.children || [])) { const hit = findStop(child); if (hit) return hit }
+    for (const c of (node.children || [])) { const h = findStopBtn(c); if (h) return h }
     return null
   }
-  const stopNode = findStop(rendered.node)
-  if (!stopNode) throw new Error('两行里找不到「停止」按钮')
-  await stopNode.props.onClick()
-  const marked = (rendered.state[0] || []).filter((e) => e.stoppedAt)
-  if (marked.length !== 1) throw new Error('点停止后应只有被点的那一行置灰，实际 ' + marked.length + ' 行')
-  console.log('ok   progress/stop-click: 点「停止」不抛 ReferenceError · 仅该行置灰（' + marked[0].callId + '）')
+  if (findStopBtn(rendered.node)) throw new Error('底部状态栏仍有「停止」按钮节点（应已移进进行中卡片）')
+  console.log('ok   progress/stop-moved: 底部状态栏已无「停止」按钮节点（移入进行中卡片）')
 } catch (error) {
   failed++
-  console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
+  console.log('FAIL progress/stop-moved: ' + (error && error.message))
 }
 
 // Bug 4 回归：客户端双保险过滤 - 不同 sessionId 的 entry 不渲染
