@@ -2135,11 +2135,14 @@ window.__ModuleLoader__.load({
       // 反馈：最后一条是你、且过了 3 秒还没回复 → 显示「指挥正在处理…」（必须放在 running 之后，否则 TDZ）
       const lastMsgForWait = messages.length ? messages[messages.length - 1] : null
       const waitMs = lastMsgForWait ? Date.now() - (Number(lastMsgForWait.at) || 0) : 0
+      // 2026-11-17：**硬超时 3 分钟**。
+      // 之前只有文案会变（2 分钟后改成「没有响应」），但「进行中」卡片本身一直挂在那儿转圈——
+      // 实测遇到：turn 被重启打断，最后一条是用户消息、running=false，于是这个卡片永远在转。
+      // 现在超过 3 分钟就不再当"在等"，直接收掉卡片（用户自己决定要不要重发）。
       const waitingForCommander = Boolean(
-        lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText && waitMs > 3000,
+        lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText
+          && waitMs > 3000 && waitMs < 180000,
       )
-      // 超过 2 分钟还没有任何回应 → 大概率是 turn 被打断（服务重启/崩溃），
-      // 不能让「正在拆解…」无限计时（2026-11-16 用户看到 7m43s 以为卡死）。
       const waitStalled = waitingForCommander && waitMs > 120000
       // 指挥气泡的头像种类：按 brainKind 推断
       const brainKind = team && team.brainKind === 'codex' ? 'codex'
