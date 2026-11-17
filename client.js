@@ -109,6 +109,15 @@ window.__ModuleLoader__.load({
       } catch { /* ignore */ }
     }
 
+    /**
+     * 团队时间线缓存：sessionId → /team/state 的最后一个响应。
+     *
+     * 2026-11-17：切换会话时 CouncilChatView 会重新挂载，team 初始为 null → 先渲染空白，
+     * 等 /team/state 回来（约 1 秒）才有内容。用户反馈「切过去有一秒空白」。
+     * 有缓存：切回见过的会话立刻有内容，后台再刷新。
+     */
+    const teamCache = {}
+
     const tailCollapsedMap = {}
     /* 从 /models 拿到的实时模型列表（换 key / 换中转后要刷新） */
     const liveModels = {}
@@ -1966,7 +1975,8 @@ window.__ModuleLoader__.load({
       // 空占位会让用户看到 1 秒空白再出内容（2026-11-16 实测）。
       // 「单人会话不该看到小组空态卡片」这件事，由下面空态分支自己判断（hasGroupUnknown）。
       const hasGroupUnknown = hasGroup === null
-      const [team, setTeam] = useState(null)
+      // 2026-11-17：缓存优先——切回见过的会话立刻有内容，不再空白一秒
+      const [team, setTeam] = useState(() => (sessionId && teamCache[String(sessionId)]) || null)
       const [providers, setProviders] = useState(null)
       const [model, setModel] = useState('')
       const [draft, setDraft] = useState('')
@@ -2042,6 +2052,8 @@ window.__ModuleLoader__.load({
         call('/team/state?sessionId=' + encodeURIComponent(sessionId))
           .then((d) => {
             setTeam(d)
+            // 写缓存：切回这个会话时立刻有内容
+            if (sessionId) teamCache[String(sessionId)] = d
             if (d && d.model) setModel(d.model)
             // 能拉到 → 这个会话确实有小组，补进集合
             if (groupSessionSet && !groupSessionSet.has(String(sessionId))) {
@@ -2562,8 +2574,10 @@ window.__ModuleLoader__.load({
           // 注：DSH 的 conversation.view 只暴露 id/label，没有条件隐藏，所以这个 tab
           // 在单人模式下仍然存在；这里用引导卡片替代"消失"，避免用户进来看到空白。
           // 还不知道有没有小组时不要给「点右上角胶囊」这种误导提示（单人会话切过来会闪）
+          // 2026-11-17：原来这里渲染 null —— 切换会话的那一秒整块是**空白页**（用户实测）。
+          // 改成明确的加载提示，等 /team/state 回来再切换成正常内容。
           hasGroupUnknown
-            ? null
+            ? h('div', { style: Object.assign({}, styles.muted, { padding: '4px 0' }) }, '正在加载群聊…')
             : h('div', null,
               h('div', { style: { fontSize: 14, fontWeight: 600 } },
                 team ? '还没有对话' : '这个会话没有绑定小组'),
