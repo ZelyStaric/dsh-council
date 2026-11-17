@@ -2259,6 +2259,9 @@ window.__ModuleLoader__.load({
           return h('details', {
             key: round.key,
             open: isLast,
+            // 2026-11-17：给**轮次折叠**打标记。页面里还有另一种 <details>（成员回执的
+            // 「展开全部」），不加标记的话「折叠本轮」按钮会选错对象。
+            'data-council-round': '1',
             style: { marginTop: 10, borderTop: ridx === 0 ? 'none' : '1px solid var(--dsw-alias-border-l1)', paddingTop: ridx === 0 ? 0 : 8 },
           },
           h('summary', {
@@ -2379,7 +2382,9 @@ window.__ModuleLoader__.load({
           try {
             const scroller = document.querySelector('[data-council-scroller]')
             if (!scroller) return
-            const list = scroller.querySelectorAll('details')
+            // ⚠️ 只选**轮次级** details（带 data-council-round）；
+            // 页面里还有成员回执的「展开全部」details，混在一起会折叠错对象。
+            const list = scroller.querySelectorAll('details[data-council-round]')
             if (!list.length) return
             const last = list[list.length - 1]
             const summary = last.querySelector('summary')
