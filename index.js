@@ -5257,6 +5257,14 @@ const PLANNER_REQUIRED_ERROR = '多成员/多任务派活必须用 request 交�
 /** 回执顶部的「## 拆解」一节：谁做的拆解（指挥 / 主对话直派），被拒绝时写清原因。 */
 function plannerSection(value) {
   const input = value || {}
+  // BUG-5（2026-11-17）： 路径拆解为空时 delegate 会写 response.plan={ok:false,reason}，
+  // 但这里原来只认 input.error / plannedBy，于是 reason（真正的原因，比如「claude 未登录」）
+  // 从来没渲染过——父会话只看到「（本轮没有成员产出）」，排障时完全摸瞎。
+  if (input.plan && input.plan.ok === false && !(input.members || []).length) {
+    const why = String(input.plan.reason || '').trim()
+    return '## 拆解\n- **指挥没有拆出可派的任务**' + (why ? '：' + why : '')
+      + '\n\n> 常见原因：指挥模型不可用（未登录/无 key）、任务描述里没有可执行内容。'
+  }
   if (input.error && !(input.members || []).length) {
     return '## 拆解\n- 未执行：主对话试图直派多个任务（多成员/多任务必须交给指挥拆解）\n\n## 派活被拒绝\n' + String(input.error)
   }
@@ -5498,6 +5506,17 @@ function makeSelfWorkGuard(group, config) {
     // 用 `cat > file` 就能绕过去。现在改成白名单：手上没有能干活的工具，
     // 越权在结构上不可能，而不是"提示词请求它别越权"。
     if (name.startsWith('council_')) return undefined
+
+    // BUG-6（2026-11-17）：放行 send_message。
+    // 白名单的目的是「父会话不能自己干活」，而 send_message 只往上/下级发一条消息——
+    // 既不能写文件、也不能跑命令，拦它没有任何安全收益，却造成一个实际后果：
+    // **被绑定的小组会话无法向父会话汇报**（subagent 实测被拦，只能靠派「代码」成员
+    // 调 API 解绑来绕）。所以这里单独放行，但仍记一笔审计（便于看清谁在跟谁说话）。
+    if (name === 'send_message') {
+      const audit = selfWorkAuditFor(groupId)
+      audit.tools[name] = (audit.tools[name] || 0) + 1
+      return undefined
+    }
 
     // 白名单下没有"放行但审计"这回事：任何非 council_* 调用都算一次越权尝试，
     // 统一计入 blocked（selfRan 因此恒为 0，「越权审计」那节自然不再出现）。

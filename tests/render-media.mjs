@@ -188,3 +188,21 @@ check('E7', '小组状态栏已并入输入框（无独立气泡样式）', () =
 const pass2 = cases.filter((c) => c.ok).length
 console.log('\n最终: ' + pass2 + ' / ' + cases.length + ' passed')
 if (pass2 < cases.length) process.exitCode = 1
+
+// ── D4/D6：审核链分支的源码级验证 ─────────────────────────────
+check('D4', '初审 FAIL MAJOR 会短路（跳过指挥终审）', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const ok = /prelimOk === false\s*&&\s*prelimSeverity === 'major'\s*&&\s*requireCommander/.test(src)
+    && src.includes('review.shortCircuited = true')
+  return [ok, '未找到短路条件']
+})
+
+check('D6', '指挥判 owner=other 时跳过返工', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const ok = src.includes("const blockedByEnvironment = commanderOwner === 'other'")
+    && /while \(\(acceptance === 'rejected' \|\| acceptance === 'unverified'\) && round < maxRework && !blockedByEnvironment\)/.test(src)
+  return [ok, '未找到 owner=other 跳过返工']
+})
+
+const p3 = cases.filter((c) => c.ok).length
+console.log('\n含 D4/D6: ' + p3 + ' / ' + cases.length)
