@@ -914,7 +914,7 @@ function registerSteerTarget(callId, memberId, target) {
 }
 
 /** 往运行中的成员投递一段“补充说明”；返回 { ok, via, error }。 */
-async function steerRunningMember(callId, text, memberId) {
+async function steerRunningMember(callId, text, memberId, sessionId) {
   let target = memberId ? steerTargets.get(String(callId) + '\u0000' + String(memberId)) : undefined
   if (!target) {
     // 没指定成员 / 没精确命中：取这个 callId 下的任意一个可插话目标
@@ -925,7 +925,23 @@ async function steerRunningMember(callId, text, memberId) {
   if (!target) return { ok: false, error: '没有可插话的运行中成员（claude / codex 成员暂不支持实时插话）' }
   try {
     const sent = await target.write(String(text))
-    return { ok: sent !== false, via: target.kind, memberName: target.memberName }
+    const ok = sent !== false
+    // 2026-11-17 修：**插话内容要进团队时间线**。
+    // 原来只把文本转发给成员，用户在自己的界面上看不到自己说了什么 ——
+    // 表现为「我插的话消失了」，而且事后复盘也查不到。
+    if (ok && sessionId) {
+      try {
+        const entry = teamSessionState(String(sessionId))
+        if (entry) {
+          teamPushMessage(entry, 'user', String(text), {
+            steer: true,
+            steerTo: target.memberName || '',
+            at: Date.now(),
+          })
+        }
+      } catch { /* 时间线写失败不影响插话本身 */ }
+    }
+    return { ok, via: target.kind, memberName: target.memberName }
   } catch (error) {
     return { ok: false, error: String(error && error.message || error) }
   }
@@ -4345,7 +4361,7 @@ function teamToolRegistry() {
         const callId = String((args && args.callId) || sessionIdOf(exec) || '')
         const member = String((args && args.member) || '')
         // 复用既有插话通道：callId 精确命中优先，否则取任意在跑目标（member 名由 * 通配键兜底）
-        const result = await steerRunningMember(callId, text, member || undefined)
+        const result = await steerRunningMember(callId, text, member || undefined, sessionIdOf(exec))
         return result && typeof result === 'object'
           ? { ok: Boolean(result.ok), via: result.via ?? null, memberName: result.memberName ?? null, error: result.error ?? null }
           : { ok: false, error: '插话通道无响应' }
@@ -5711,6 +5727,15 @@ function makeSelfWorkGuard(group, config) {
     if (!live || !live.sessionId) return undefined
     if (normalizeSessionId(execution.agent.id) !== normalizeSessionId(live.sessionId)) return undefined
     if (!strictDelegateEnabled(config)) return undefined
+    // 2026-11-17 修：**大脑权限是「可动手」时，守卫整体放行**。
+    // 原来这里完全不看 brainPermissions —— 用户在小组页切到「可动手」，
+    // 指挥仍然被这道守卫拦住（因为它继承了父会话的 tools.guard），
+    // 表现为「我点了可动手，但它一跑 bash 就被拒，还反过来让我去关 strictDelegate」。
+    // 语义上两个开关的分工：
+    //   · brainPermissions=open  → 允许动手（放行一切）
+    //   · brainPermissions=closed + strictDelegate=true → 只派活
+    const brainPermission = String((state.config && state.config.brainPermissions) || 'closed')
+    if (brainPermission === 'open') return undefined
     const name = String(execution.name || '')
 
     // 用户本轮已明确放行（说了「你自己做」等）→ 全放行
@@ -7712,7 +7737,7 @@ function bindAgent(ctx, config, group, agent) {
           if (reused && reused.ok) return toolResult(reused)
           if (reused && reused.error) return toolResult(reused)
         }
-        const result = await steerRunningMember(targetCallId, text, memberKey)
+        const result = await steerRunningMember(targetCallId, text, memberKey, sessionId)
         return toolResult(result)
       },
     }))

@@ -733,10 +733,11 @@ window.__ModuleLoader__.load({
           row('指挥终审',
             '由指挥对成员产出做最终验收（关掉则只看初审结论）',
             check(!(group && group.requireCommander === false), (v) => saveGroupFlag({ requireCommander: v }))),
+          // 2026-11-17：文案要说清「可动手」到底放开什么（用户原来点了却仍被拦，因为守卫没读这个开关）
           row('大脑权限',
             mode === 'open'
-              ? '开放：大脑可以自己动手（跑命令 / 改文件）'
-              : '关闭：大脑只拆解、做计划、派活',
+              ? '开放：指挥/大脑可以自己动手（跑命令、改文件、用 MCP），不再受「只能派活」限制'
+              : '关闭：大脑只拆解、做计划、派活；父会话被白名单锁住，只能用 council_* 工具',
             h('div', {
               style: { display: 'inline-flex', gap: 2, padding: 2, borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)' },
             }, [seg('closed', '只派活'), seg('open', '可动手')])),
