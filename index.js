@@ -4891,13 +4891,16 @@ export function createHandler(ctx, config = {}) {
                 }
               }
             }
-            // 2026-11-17 第 N 次尝试：**完全模仿 send()**（它一直工作正常）。
-            // 之前加了 content-length / accept-ranges / cache-control 都导致 Empty reply，
-            // 说明多设的响应头会跟 DSH 的响应处理打架。这里只带 content-type。
-            res.writeHead(200, { 'content-type': type })
-            // 图片/音频直接流；其它（glb/zip）当附件下载
+            // 2026-11-17 BUG-1 真因（第 6 次尝试才对）：
+            // setHeader 必须在 writeHead **之前**调用。原代码先 writeHead 再 setHeader，
+            // 抛 ERR_HTTP_HEADERS_SENT → DSH 的 catch 看到 headersSent 就 res.destroy()
+            // → 客户端收到 Empty reply（HTTP 000）。
+            // 这也解释了为什么 .txt/.js/.png 能过、.json/.bin 必挂：
+            // 前者 inline=true 不调 setHeader，后者 inline=false 会调。
             const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
-            if (!inline) res.setHeader('content-disposition', 'attachment; filename="' + path.basename(abs).replace(/"/g, '') + '"')
+            const headers = { 'content-type': type, 'accept-ranges': 'bytes' }
+            if (!inline) headers['content-disposition'] = 'attachment; filename="' + path.basename(abs).replace(/"/g, '') + '"'
+            res.writeHead(200, headers)
             // 同上：pipe 不工作，改一次性读。超大文件明确拒绝，避免把服务打爆。
             if (total > 200 * 1024 * 1024) return send(res, 413, { error: '文件超过 200MB，请直接到磁盘打开' })
             try {
