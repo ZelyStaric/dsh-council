@@ -5151,6 +5151,16 @@ export function createHandler(ctx, config = {}) {
                 if (body.modelGuide.trim()) next.modelGuide = body.modelGuide
                 else delete next.modelGuide
               }
+              // 2026-11-18 新增：**可用模型白名单**（全局）。
+              // 数据源来自 DSH 设置里各 provider 的模型目录，用户在小组页打勾。
+              // 语义：数组非空 → 只有勾选的模型能被**指挥自动创建的成员**使用；
+              //       数组为空/未设 → 不限制（向后兼容）。
+              // 注意：**只管指挥自动创建的成员**，用户手工建的成员随便用哪个模型。
+              if (Array.isArray(body.enabledModels)) {
+                const list = body.enabledModels.map((x) => String(x || '').trim()).filter(Boolean)
+                if (list.length) next.enabledModels = Array.from(new Set(list))
+                else delete next.enabledModels
+              }
               if (typeof body.failOnRejectedAcceptance === 'boolean') next.failOnRejectedAcceptance = body.failOnRejectedAcceptance
               if (typeof body.backgroundDelegations === 'boolean') next.backgroundDelegations = body.backgroundDelegations
               // 看门狗参数可写：memberIdleMinutes > 0；memberMaxMinutes >= 0（0 = 不限制）
@@ -6145,6 +6155,12 @@ function catalogText() {
  * 所以加一道**代码层校验**：指挥给的 model 不在表里就换回该框架的默认模型。
  */
 function allowedModelIds() {
+  // 优先用**结构化白名单**（用户在「小组」页按 provider 分组勾选的）。
+  // 没有勾选过时才回落到「从模型定位表文本里解析」的旧逻辑。
+  const picked = (state.config && state.config.enabledModels) || []
+  if (Array.isArray(picked) && picked.length) {
+    return picked.map((x) => String(x || '').trim()).filter(Boolean)
+  }
   const custom = String((state.config && state.config.modelGuide) || '').trim()
   if (!custom) return []
   const ids = []

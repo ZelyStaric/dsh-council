@@ -300,6 +300,8 @@ window.__ModuleLoader__.load({
       // 模型定位表编辑器（v0.4 P3）：注入给指挥，帮它自动建成员时选模型
       const [guideEditing, setGuideEditing] = useState(false)
       const [guideDraft, setGuideDraft] = useState('')
+      // 可用模型勾选面板（2026-11-18）：数据源 = DSH 设置里各 provider 的模型目录
+      const [modelsEditing, setModelsEditing] = useState(false)
 
       const applyData = useCallback((data) => {
         if (data && data.state) setState(data.state)
@@ -741,6 +743,53 @@ window.__ModuleLoader__.load({
             h('div', {
               style: { display: 'inline-flex', gap: 2, padding: 2, borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)' },
             }, [seg('closed', '只派活'), seg('open', '可动手')])),
+          row('可用模型',
+            '只有打勾的模型，指挥**自动创建**成员时才能选；用户手工建的成员不受此限',
+            h(Button, {
+              onClick: () => setModelsEditing(!modelsEditing),
+            }, modelsEditing ? '收起' : '选择')),
+          modelsEditing
+            ? (() => {
+              const chosen = Array.isArray(cur.enabledModels) ? cur.enabledModels : []
+              const chosenSet = new Set(chosen)
+              const allIds = []
+              for (const p of (providers || [])) for (const id of (p.models || [])) allIds.push(id)
+              const toggle = (id, on) => {
+                const nextSet = new Set(chosen)
+                if (on) nextSet.add(id)
+                else nextSet.delete(id)
+                saveTeam({ enabledModels: Array.from(nextSet) })
+              }
+              const bulk = (on) => saveTeam({ enabledModels: on ? allIds.slice() : [] })
+              const groups = (providers || []).map((p) => ({
+                id: p.id,
+                title: (p.name || p.id) + '（' + p.id + '）',
+                rows: (p.models || []).map((id) => ({ id, on: chosenSet.has(id) })),
+              }))
+              return h('div', {
+                style: {
+                  marginTop: 8, padding: 8, borderRadius: 8,
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  maxHeight: 320, overflowY: 'auto',
+                },
+              },
+              h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' } },
+                h(Button, { onClick: () => bulk(true) }, '全选'),
+                h(Button, { onClick: () => bulk(false) }, '全不选'),
+                h('span', { style: Object.assign({}, styles.muted, { fontSize: 11 }) },
+                  chosenSet.size ? ('已选 ' + chosenSet.size + ' / ' + allIds.length) : '未勾选 = 不限制')),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                ...groups.map((g) => h('div', { key: g.id },
+                  h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 3, opacity: 0.85 } }, g.title),
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 12 } },
+                    ...g.rows.map((r) => h('label', {
+                      key: g.id + ':' + r.id,
+                      style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, cursor: 'pointer' },
+                    },
+                    check(r.on, (v) => toggle(r.id, v)),
+                    h('span', { style: { fontFamily: 'ui-monospace, monospace' } }, r.id))))))))
+            })()
+            : null,
           row('模型定位表',
             '注入给指挥，帮它自动建成员时选模型（性能 / 性价比）',
             h(Button, {
