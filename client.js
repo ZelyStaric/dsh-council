@@ -2218,10 +2218,14 @@ window.__ModuleLoader__.load({
       )
       const waitStalled = waitingForCommander && waitMs > 120000
       // 指挥气泡的头像种类：按 brainKind 推断
-      const brainKind = team && team.brainKind === 'codex' ? 'codex'
-        : team && team.brainKind === 'dsh-seam' ? 'deepseek'
-          : team && team.brainKind === 'gemini-cli' ? 'codex'
-            : 'claude'
+      // 2026-11-17 修：/team/state 现在返回**指挥成员真实的 kind**（claude/codex/deepseek/gemini/image），
+      // 而这里原来只认「团队大脑」时代的枚举（dsh-seam / gemini-cli），
+      // 于是 deepseek 指挥落到默认 `claude` —— 头像显示成橘发大小姐（用户截图指出）。
+      const rawBrainKind = String((team && team.brainKind) || '').toLowerCase()
+      const brainKind = ['claude', 'codex', 'deepseek', 'image'].includes(rawBrainKind)
+        ? rawBrainKind
+        // gemini 没有专属头像 → 复用 codex 那张
+        : (rawBrainKind === 'gemini' ? 'codex' : 'claude')
 
       const bubble = (m, key) => {
         const isUser = m.role === 'user'
