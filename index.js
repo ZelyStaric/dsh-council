@@ -1231,6 +1231,13 @@ function createIdleWatchdog({
   let hardFired = false
   let lastCpu = null
   let cpuAdvanced = false
+  // CPU 续命次数上限（2026-11-17）：CPU 推进只能证明「东西在动」，
+  // 不能证明「这个成员在干活」。deepseek 成员跑在 DSH 主进程里，
+  // 探测到的其实是整个 dsh-web 的 CPU —— 只要主进程在忙就会一直续命，
+  // 于是真卡死的审校（261 秒零进展、无任何子进程）永远不会被杀。
+  // 折中：最多续命 CPU_GRACE_ROUNDS 个 idle 周期，之后按静默处理。
+  let cpuGraceUsed = 0
+  const CPU_GRACE_ROUNDS = 2
   const sampleCpu = () => {
     if (typeof cpuProbe !== 'function') return
     let value = null
@@ -1256,7 +1263,8 @@ function createIdleWatchdog({
         //
         // 现在 CPU 推进 → 当作一次心跳，续命一个 idle 周期，继续观察。
         // 只有「CPU 完全不动」才是真的卡死。
-        if (cpuAdvanced) {
+        if (cpuAdvanced && cpuGraceUsed < CPU_GRACE_ROUNDS) {
+          cpuGraceUsed += 1
           lastActivity = at
           return null
         }
@@ -2554,6 +2562,8 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   let timedOut = false
   let cancelled = false
   let maxDurationFired = false
+  // 看门狗 → 主流程的唤醒通道（见下方 Promise.race）
+  let wakeWaiter = null
   let lastSeamStamp = ''
   let lastSeamTool = ''
   const controller = new AbortController()
@@ -2601,9 +2611,16 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       lastSeamTool = tool
       setMemberTail(member.name, '正在调用 ' + tool)
     }
-    if (watchdog.tick(now) === 'idle-timeout') {
+    const tickReason = watchdog.tick(now)
+    if (tickReason === 'idle-timeout' || tickReason === 'stalled-no-progress') {
       idleFired = true
       try { controller.abort() } catch { /* ignore */ }
+      // 2026-11-17 关键修复：**叫醒卡在 await 上的主流程**。
+      // 原来这里只置 idleFired = true，但主流程正 await activation.result ——
+      // 而那个 Promise 在「子会话已完成但 DSH 没把结果投递回来」时永不 resolve，
+      // 于是 await 永远不返回、后面的 if (idleFired) 永远执行不到，
+      // 看门狗形同虚设（实测：审校 turn/end completed 后仍显示「执行中 · 静默 261s」）。
+      if (wakeWaiter) { try { wakeWaiter({ aborted: true, reason: tickReason }) } catch { /* ignore */ } }
     }
   }, WATCHDOG_TICK_MS)
   // 成员该用哪个 provider/model：优先级 = member.provider → providerByKind[kind] → 旧 key 字段 → 默认
@@ -2730,7 +2747,24 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
     let keepResident = false
     let degraded = false
     try {
-      const result = await activation.result
+      // 2026-11-17：race 一个「看门狗唤醒」通道。
+      // 单独 await activation.result 有真实风险：DSH 的 delivery:'caller' 路径
+      // 在「子会话已 completed 但结果未投递」时不 resolve，插件会永久挂起。
+      const watchdogWake = new Promise((resolve) => { wakeWaiter = resolve })
+      const raced = await Promise.race([
+        activation.result.then((value) => ({ value })),
+        watchdogWake,
+      ])
+      wakeWaiter = null
+      if (raced && raced.aborted) {
+        keepChild = false
+        if (idleFired) return idleResult()
+        if (timedOut) return timeoutResult()
+        if (maxDurationFired) return maxDurationResult()
+        return idleResult()
+      }
+      const result = raced ? raced.value : undefined
+      if (!result) { keepChild = false; return idleResult() }
       if (maxDurationFired) { keepChild = false; return maxDurationResult() }
       if (idleFired) { keepChild = false; return idleResult() }
       if (timedOut) { keepChild = false; return timeoutResult() }
@@ -4898,6 +4932,56 @@ export function createHandler(ctx, config = {}) {
               return
             } catch {
               return send(res, 404, { error: 'image not found' })
+            }
+          }
+          // 2026-11-17 新增：视频封面帧。
+          // 起因：回执里的 <video> 没有 poster、preload 默认只拿元数据，
+          // 浏览器显示成一块黑板 + 播放按钮，用户以为视频坏了（实际文件完全正常：
+          // h264 High / yuv420p / aac / 206 Range 都 OK）。
+          // 这里用 ffmpeg 抽第 1 秒的一帧，缓存到 council-images/thumb-<md5>.png。
+          if (req.method === 'GET' && route === '/video-thumb') {
+            const target = String(url.searchParams.get('path') || '')
+            if (!target || !/^(\/home\/|\/tmp\/)/.test(target)) {
+              return send(res, 403, { error: '只允许 HOME 或 /tmp 下的文件' })
+            }
+            const lower = target.toLowerCase()
+            if (!/\.(mp4|webm|mov|m4v|mkv)$/.test(lower)) {
+              return send(res, 400, { error: '不是视频文件' })
+            }
+            try {
+              const stat = await statSync(target)
+              if (!stat || stat.size <= 0) return send(res, 404, { error: 'video not found' })
+            } catch {
+              return send(res, 404, { error: 'video not found' })
+            }
+            const stamp = String(Date.now())
+            const hash = createHash('md5').update(target + ':' + String(statSync(target).mtimeMs)).digest('hex').slice(0, 16)
+            const outName = 'thumb-' + hash + '.png'
+            const outPath = path.join(IMAGE_DIR, outName)
+            if (!existsSync(outPath)) {
+              await mkdir(IMAGE_DIR, { recursive: true }).catch(() => {})
+              await new Promise((resolve) => {
+                let child
+                try {
+                  child = spawn('ffmpeg', [
+                    '-v', 'error', '-ss', '1', '-i', target,
+                    '-frames:v', '1', '-vf', 'scale=960:-2',
+                    '-y', outPath,
+                  ], { stdio: 'ignore' })
+                } catch { resolve(); return }
+                child.on('error', () => resolve())
+                child.on('close', () => resolve())
+                // 兜底：8 秒还没抽完就别等了
+                setTimeout(resolve, 8000)
+              })
+            }
+            try {
+              const bytes = await readFile(outPath)
+              res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'private, max-age=300' })
+              res.end(bytes)
+              return
+            } catch {
+              return send(res, 404, { error: 'thumb not ready' })
             }
           }
           if (req.method === 'GET' && route === '/progress') {

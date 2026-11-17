@@ -2319,11 +2319,19 @@ window.__ModuleLoader__.load({
                 })
               }
               if (p.kind === 'video') {
+                // 2026-11-17：加 poster + preload。
+                // 原来只有 controls+src，浏览器默认只拿元数据、首帧常常是黑的，
+                // 用户看到一块黑板加播放键就以为视频坏了（实测文件完全正常）。
+                // poster 由后端用 ffmpeg 抽第 1 秒的一帧生成（/video-thumb）。
+                const thumb = '/council/api/video-thumb?path=' + encodeURIComponent(p.path)
                 return h('video', {
                   key: prefix + 'v' + idx,
                   controls: true,
+                  preload: 'metadata',
+                  playsInline: true,
+                  poster: thumb,
                   src: url,
-                  style: { display: 'block', maxWidth: 420, marginTop: 6, borderRadius: 8 },
+                  style: { display: 'block', width: '100%', maxWidth: 560, marginTop: 6, borderRadius: 8, background: '#000' },
                 })
               }
               return h('a', {
