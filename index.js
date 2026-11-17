@@ -6132,6 +6132,29 @@ function catalogText() {
   ].join('\n')
 }
 
+/**
+ * 从「模型定位表」里提取允许使用的模型 id 列表。
+ *
+ * 表是用户手写的自由文本，形如：
+ *   - claude-opus-5-5：代码顶尖
+ *   - gpt-6.1-sol：性价比高
+ * 这里用行首 `- ` + 冒号切出 id。解析不出来就返回空数组 = 不做限制。
+ *
+ * 2026-11-18：用户表里明确写了「不要使用非本表里面列出来的模型」，
+ * 但指挥仍给成员选了 claude-sonnet-5-5（表里没有）。只靠提示词约束不住，
+ * 所以加一道**代码层校验**：指挥给的 model 不在表里就换回该框架的默认模型。
+ */
+function allowedModelIds() {
+  const custom = String((state.config && state.config.modelGuide) || '').trim()
+  if (!custom) return []
+  const ids = []
+  for (const line of custom.split('\n')) {
+    const m = line.match(/^\s*[-*]\s*([A-Za-z0-9._-]+)\s*[:：]/)
+    if (m) ids.push(m[1])
+  }
+  return ids
+}
+
 /** 在组内按 id / 职位名 / 成员名解析派活目标。 */
 function resolveMember(group, key) {
   const inGroup = (m) => (group.memberIds || []).includes(m.id)
@@ -7390,6 +7413,26 @@ function makeDelegateTool(ctx, config, group) {
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
         if ((!assignments.length) && requestText) {
           const planned = await planWithCommander(ctx, live, args.request.trim(), config, exec && exec.agent, callId)
+          // 2026-11-18：**模型白名单硬校验**。用户的「模型定位表」里写着
+          // 「不要使用非本表里面列出来的模型」，但指挥仍会给成员选表外的型号
+          // （实测选了 claude-sonnet-5-5，而表里只有 claude-fable-5-2 / claude-opus-5-5 等）。
+          // 只靠提示词约束不住，这里直接换回该框架的默认模型并记日志。
+          try {
+            const allowed = allowedModelIds()
+            if (allowed.length && Array.isArray(planned.staffing) && planned.staffing.length) {
+              for (const item of planned.staffing) {
+                if (!item || typeof item !== 'object') continue
+                const want = String(item.model || '').trim()
+                if (!want || allowed.includes(want)) continue
+                const kind = String(item.kind || '').trim()
+                const fallback = STAFF_MODELS[kind] || ''
+                if (fallback) {
+                  console.error('[council] model not in guide, fallback: ' + want + ' -> ' + fallback)
+                  item.model = fallback
+                }
+              }
+            }
+          } catch { /* 校验失败不影响派活 */ }
           staffing.push(...await ensureStaffing(live, planned.staffing, ephemeral, config))
           planRaw = planned.raw
           assignments = planned.assignments
