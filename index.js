@@ -4887,9 +4887,12 @@ export function createHandler(ctx, config = {}) {
                     // 这里显式声明不压缩，交给下面的 stream.pipe 原样输出。
                     'content-encoding': 'identity',
                   })
-                  const stream = createReadStream(abs, { start, end })
-                  stream.on('error', () => { try { res.end() } catch { /* ignore */ } })
-                  return stream.pipe(res)
+                  // 2026-11-17 修 BUG-1：pipe 在 DSH 的 handler 里不工作（连接直接断）。
+                  // 改成一次性读进内存再 end —— 媒体文件有上限保护，几 MB 可接受。
+                  try {
+                    const buf = readFileSync(abs).subarray(start, end + 1)
+                    return res.end(buf)
+                  } catch { return send(res, 500, { error: '读取失败' }) }
                 }
               }
             }
@@ -4904,9 +4907,13 @@ export function createHandler(ctx, config = {}) {
             // 图片/音频直接流；其它（glb/zip）当附件下载
             const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
             if (!inline) res.setHeader('content-disposition', 'attachment; filename="' + path.basename(abs).replace(/"/g, '') + '"')
-            const stream = createReadStream(abs)
-            stream.on('error', () => { try { res.end() } catch { /* ignore */ } })
-            return stream.pipe(res)
+            // 同上：pipe 不工作，改一次性读。超大文件明确拒绝，避免把服务打爆。
+            if (total > 200 * 1024 * 1024) return send(res, 413, { error: '文件超过 200MB，请直接到磁盘打开' })
+            try {
+              return res.end(readFileSync(abs))
+            } catch (e) {
+              return send(res, 500, { error: '读取失败：' + String(e && e.message || e) })
+            }
           }
           if (req.method === 'GET' && route === '/mcp/list') {
             // 只读：各框架当前配置的 MCP server 清单（成员卡的选择器用）
