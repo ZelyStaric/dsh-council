@@ -1113,6 +1113,66 @@ function readProcCpuMs(pid) {
 }
 
 /**
+ * 读**整个进程树**的累计 CPU 时间（毫秒）。
+ *
+ * 为什么要树而不是单进程：成员常是 CLI（claude/codex），真正吃 CPU 的是它派生的
+ * ffmpeg / python / blender 子进程，父进程本身几乎不耗 CPU。
+ * 只看父进程会得出「CPU 没推进」的错误结论，进而把正在渲染的任务当成卡死杀掉。
+ *
+ * 实现：扫 /proc/<pid>/stat 拿 ppid，从 root 向下 BFS 出整棵树，累加 utime+stime。
+ * 读不到 /proc 时返回 null（调用方按「未知」处理）。
+ */
+function readProcTreeCpuMs(rootPid) {
+  if (!rootPid) return null
+  try {
+    const children = new Map()
+    for (const entry of readdirSync('/proc')) {
+      if (!/^[0-9]+$/.test(entry)) continue
+      let raw
+      try { raw = readFileSync('/proc/' + entry + '/stat', 'utf8') } catch { continue }
+      const close = raw.lastIndexOf(')')
+      if (close < 0) continue
+      const fields = raw.slice(close + 2).trim().split(/\s+/)
+      const ppid = Number(fields[1])
+      const utime = Number(fields[11])
+      const stime = Number(fields[12])
+      if (!Number.isFinite(ppid) || !Number.isFinite(utime) || !Number.isFinite(stime)) continue
+      let list = children.get(ppid)
+      if (!list) { list = []; children.set(ppid, list) }
+      list.push({ pid: Number(entry), cpu: utime + stime })
+    }
+    let total = 0
+    let found = 0
+    const queue = [Number(rootPid)]
+    const seen = new Set()
+    while (queue.length) {
+      const pid = queue.shift()
+      if (seen.has(pid)) continue
+      seen.add(pid)
+      for (const node of (children.get(pid) || [])) {
+        total += node.cpu
+        found += 1
+        queue.push(node.pid)
+      }
+    }
+    // 根进程自己的 CPU 也算上（它是树根）
+    try {
+      const raw = readFileSync('/proc/' + rootPid + '/stat', 'utf8')
+      const close = raw.lastIndexOf(')')
+      if (close >= 0) {
+        const f = raw.slice(close + 2).trim().split(/\s+/)
+        total += Number(f[11]) + Number(f[12])
+        found += 1
+      }
+    } catch { /* ignore */ }
+    if (!found) return null
+    return Math.round((total * 1000) / PROC_CLOCK_TICKS_PER_SEC)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 可注入时钟的静默看门狗。
  *
  * 判定规则（`tick()` 由调用方按 interval 驱动）：
@@ -1156,9 +1216,21 @@ function createIdleWatchdog({
       sampleCpu()
       // 严格大于：正好 idle 分钟时还不算超（11 分钟 > idle=10 才杀）
       if (!idleFired && idleTimeoutMs > 0 && at - lastActivity > idleTimeoutMs) {
+        // 2026-11-17 修：**CPU 仍在推进就说明在干活，不能杀**。
+        //
+        // 原逻辑是「读不到 CPU 或 CPU 推进了 → 仍按 idle-timeout 处理」，
+        // 也就是说不管 CPU 有没有动静都照杀，只是换个 reason 名字。
+        // 实测后果：视频渲染（ffmpeg 满载跑十几分钟、没有 stdout）每次都被杀，
+        // 成员明明在正常工作却反复「超时」，返工也救不回来。
+        //
+        // 现在 CPU 推进 → 当作一次心跳，续命一个 idle 周期，继续观察。
+        // 只有「CPU 完全不动」才是真的卡死。
+        if (cpuAdvanced) {
+          lastActivity = at
+          return null
+        }
         idleFired = true
-        // 读不到 /proc（lastCpu=null）或读数是推进的 → 仍按 idle-timeout 处理，不误判「彻底卡死」
-        const reason = lastCpu !== null && !cpuAdvanced ? 'stalled-no-progress' : 'idle-timeout'
+        const reason = lastCpu !== null ? 'stalled-no-progress' : 'idle-timeout'
         if (onIdle) onIdle(reason)
         return reason
       }
@@ -1242,7 +1314,8 @@ function run(bin, args, options = {}) {
     clearIntervalFn = clearInterval,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
-    cpuProbe = (pid) => readProcCpuMs(pid),
+    // 2026-11-17：默认改用**进程树** CPU（成员常是 CLI，真正吃 CPU 的是 ffmpeg/python 子进程）
+    cpuProbe = (pid) => readProcTreeCpuMs(pid),
     // 测试注入：强制一个 unit 名 / 覆写「同名 scope 是否已存在」的探测
     scopeUnit = '',
     scopeExists = scopeUnitExists,
@@ -1322,6 +1395,8 @@ function run(bin, args, options = {}) {
       onIdle: (reason) => terminate(reason),
       onHardLimit: () => terminate('hard-limit'),
       // 每 tick 采样一次本进程 CPU 时间（读不到 → null → 退化为只看 stdout）
+      // 2026-11-17：用**进程树** CPU 而不是单进程。
+      // 成员通常是 CLI，真正干活的是它派生的 ffmpeg/python/blender 子进程。
       cpuProbe: typeof cpuProbe === 'function' ? () => cpuProbe(child.pid) : undefined,
     })
     // 只有 stdout 算「有进展」：stderr 只收进 err（codex 网络重试会把 stderr 刷满）

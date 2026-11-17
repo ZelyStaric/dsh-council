@@ -2857,7 +2857,10 @@ try {
     }
   })
 
-  await check('看门狗④c：CPU 仍在推进（stdout 静默）→ 不标 stalled，按 idle-timeout 收尾', async () => {
+  // 2026-11-17 语义变更：CPU 仍在推进 = 在干活（典型：ffmpeg 渲染十几分钟无 stdout）→ **不终止**。
+  // 原设计是「照样终止、只换 reason 名字」，实测导致视频渲染类任务反复被判超时、返工也救不回来。
+  // 兜底交给 memberMaxMinutes（默认 60 分钟硬上限）。
+  await check('看门狗④c：CPU 仍在推进（stdout 静默）→ 不终止，按心跳续命', async () => {
     setState({ ...structuredClone(fixture), config: {} })
     const clock = { t: 1_700_000_000_000 }
     const timers = fakeTimers()
@@ -2872,10 +2875,8 @@ try {
         cpu += 260 // 每 15s 都在烧 CPU（但 stdout 没输出）
         timers.tick()
       }
-      assert.deepEqual(child.kills, ['SIGTERM'], 'stdout 静默超阈值仍然要终止（CPU 推进只改 reason）')
-      const result = await pending
-      assert.equal(result.reason, 'idle-timeout', 'CPU 有推进时不该标 stalled-no-progress，实际 ' + result.reason)
-      return 'CPU 推进 + stdout 静默 → reason=idle-timeout（不误标 stalled）'
+      assert.deepEqual(child.kills, [], 'CPU 仍在推进时不应终止（它在干活）')
+      return 'CPU 推进 + stdout 静默 → 不终止（心跳续命）'
     } finally {
       console.error = originalError
     }
