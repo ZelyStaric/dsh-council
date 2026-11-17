@@ -83,6 +83,32 @@ window.__ModuleLoader__.load({
     /* 群聊「回到最新」总线：输入框旁的按钮 → 群聊视图滚动 */
     const jumpListeners = new Set()
     /* 对话行里的群聊块默认展开，折叠状态按会话+轮次记住 */
+    /**
+     * 轮次折叠状态（2026-11-17 用户要求：切 tab / 切会话 / 刷新后要记住）。
+     *
+     * key = `sessionId|roundId`，value = true(展开) / false(折叠)。
+     * roundId 用**该轮第一条消息的 at 时间戳** —— 比索引稳定（消息一多索引就错位）。
+     * 存 localStorage：内存变量刷新就没了，而用户明显希望「回来看还是折叠的」。
+     */
+    const ROUND_OPEN_KEY = 'council-round-open'
+    function readRoundOpenMap() {
+      try {
+        const raw = window.localStorage.getItem(ROUND_OPEN_KEY)
+        const parsed = raw ? JSON.parse(raw) : null
+        return parsed && typeof parsed === 'object' ? parsed : {}
+      } catch { return {} }
+    }
+    function writeRoundOpen(key, open) {
+      try {
+        const map = readRoundOpenMap()
+        map[key] = Boolean(open)
+        const keys = Object.keys(map)
+        // 只保留最近 400 条，避免无限增长
+        if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete map[k]
+        window.localStorage.setItem(ROUND_OPEN_KEY, JSON.stringify(map))
+      } catch { /* ignore */ }
+    }
+
     const tailCollapsedMap = {}
     /* 从 /models 拿到的实时模型列表（换 key / 换中转后要刷新） */
     const liveModels = {}
@@ -1941,6 +1967,24 @@ window.__ModuleLoader__.load({
       // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
       // 2026-11-16 实测：状态改了但按钮不出现）。直接拿 DOM 引用改 display。
       const jumpBtnRef = useRef(null)
+      // 轮次折叠状态回写（2026-11-17）：用**原生 toggle 事件**（捕获阶段）。
+      // 不用 React 的 onToggle —— DSH 的合成事件不可靠（onScroll/onClick 都踩过）。
+      useEffect(() => {
+        const node = scrollerRef.current
+        if (!node || typeof node.addEventListener !== 'function') return undefined
+        const onToggle = (event) => {
+          try {
+            const el = event && event.target
+            if (!el || el.tagName !== 'DETAILS') return
+            const key = el.getAttribute && el.getAttribute('data-round-key')
+            if (!key) return
+            writeRoundOpen(key, el.open)
+          } catch { /* ignore */ }
+        }
+        node.addEventListener('toggle', onToggle, true)
+        return () => { try { node.removeEventListener('toggle', onToggle, true) } catch { /* ignore */ } }
+      }, [sessionId])
+
       // 首次进入团队 tab 是否已经滚到底
       const didInitScrollRef = useRef(false)
       // 切到团队 tab 时组件不会重新挂载，effect 的依赖也不会变 —— 用轮询探测
@@ -2319,9 +2363,15 @@ window.__ModuleLoader__.load({
           const meta = round.items.length + ' 条' + (memberCount ? ' · ' + memberCount + ' 个成员' : '')
           // 最后一轮默认展开（你正在看的这轮），历史轮折叠
           const isLast = ridx === rounds.length - 1
+          // 稳定 id：优先用该轮第一条消息的时间戳（索引会随消息增多而错位）
+          const roundId = String((round.head && round.head.at) || round.key)
+          const storageKey = String(sessionId || '') + '|' + roundId
+          const savedOpen = readRoundOpenMap()[storageKey]
+          const openNow = savedOpen === undefined ? isLast : Boolean(savedOpen)
           return h('details', {
             key: round.key,
-            open: isLast,
+            open: openNow,
+            'data-round-key': storageKey,
             // 2026-11-17：给**轮次折叠**打标记。页面里还有另一种 <details>（成员回执的
             // 「展开全部」），不加标记的话「折叠本轮」按钮会选错对象。
             'data-council-round': '1',
