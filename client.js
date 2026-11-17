@@ -530,13 +530,21 @@ window.__ModuleLoader__.load({
         // image 成员同样用真实 provider：选了 relay-image 就是它，没选才是 sentinel
         // deepseek 成员没有 provider 时兜底到默认（存量成员可能是早先建的，provider 为空）
         const firstProvider = (providers || [])[0]
+        // provider 默认值（2026-11-17 用户要求：所有成员——包括指挥——都能选提供商）：
+        //   ① 成员自己存的 provider
+        //   ② 出图成员 → __image__ 哨兵
+        //   ③ 没存过 → 用 config.providerByKind 里该 kind 的映射（这正是它「实际在走」的那个）
+        const byKindProvider = (state && state.config && state.config.providerByKind) || {}
         const providerValue = member.provider
           || (member.kind === 'image' ? '__image__' : '')
-          // deepseek 成员没 provider 时兜底到真实存在的第一个；没有列表就留空（由下面的死下拉提示）
-          || (member.kind === 'deepseek' && firstProvider ? firstProvider.id : '')
-        // CLI 成员（claude/codex/gemini）没有 provider 概念 → 整个下拉都不渲染（2026-11-16 用户要求）
-        const isCliMember = member.kind === 'claude' || member.kind === 'codex' || member.kind === 'gemini'
-        const providerSelect = isCliMember ? null : h('select', {
+          || byKindProvider[member.kind]
+          // 最后兜底到真实存在的第一个；没有列表就留空（由下面的死下拉提示）
+          || (firstProvider ? firstProvider.id : '')
+        // 2026-11-17 用户要求：**CLI 成员也渲染 provider 下拉**。
+        // 之前排除 claude/codex/gemini 是基于「CLI 的 endpoint 是全局的」，
+        // 但 providerIdFor() 本来就支持按成员读，放开后用户可以直接在卡片上
+        // 把指挥指到任意 provider（比如 astra 挂 relay-claude），不用改配置文件。
+        const providerSelect = h('select', {
           style: Object.assign({}, styles.input, { width: 190 }), defaultValue: providerValue,
           onChange: (event) => {
             const value = event.target.value
@@ -770,7 +778,8 @@ window.__ModuleLoader__.load({
 
       const board = h('div', { style: styles.board },
         h('div', { style: Object.assign({}, styles.muted, { marginBottom: 8 }) },
-          '成员（拖到左侧职位即可分配；聊天在「对话」页底部的群聊框里）'),
+          // 2026-11-17 用户要求：删掉过时的「聊天在对话页底部的群聊框里」（团队页早就不是那样了）
+          '成员（拖到左侧职位即可分配）'),
         members.map(memberCard),
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
           h(Button, { onClick: () => mutate('/members', { name: '成员 ' + (members.length + 1), kind: 'claude', groupId: group.id }) }, '+ 添加成员')),
