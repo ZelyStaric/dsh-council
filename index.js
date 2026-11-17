@@ -5862,15 +5862,17 @@ function makeSelfWorkGuard(group, config) {
     if (!live || !live.sessionId) return undefined
     if (normalizeSessionId(execution.agent.id) !== normalizeSessionId(live.sessionId)) return undefined
     if (!strictDelegateEnabled(config)) return undefined
-    // 2026-11-17 修：**大脑权限是「可动手」时，守卫整体放行**。
-    // 原来这里完全不看 brainPermissions —— 用户在小组页切到「可动手」，
-    // 指挥仍然被这道守卫拦住（因为它继承了父会话的 tools.guard），
-    // 表现为「我点了可动手，但它一跑 bash 就被拒，还反过来让我去关 strictDelegate」。
-    // 语义上两个开关的分工：
-    //   · brainPermissions=open  → 允许动手（放行一切）
-    //   · brainPermissions=closed + strictDelegate=true → 只派活
-    const brainPermission = String((state.config && state.config.brainPermissions) || 'closed')
-    if (brainPermission === 'open') return undefined
+    // 2026-11-17 修正（重要）：**不要**因为 brainPermissions=open 就整体放行。
+    //
+    // 这道守卫拦的是 execution.agent.id === live.sessionId —— 也就是**主会话**。
+    // 「可动手」的本意是让**指挥（子会话）**能动手，那个由 commanderOpts.__noTools 控制，
+    // 跟守卫无关（子会话的 agent.id 本来就不等于主会话 sessionId，守卫压根不拦它）。
+    //
+    // 上一版在这里直接 return undefined 的后果实测很严重：主会话被放行后**自己动手干活**，
+    // 不再调 council_delegate → 没有 callId → 没有进度条目 → 「进行中」卡片不出现、
+    // 也看不到任何流式字符（用户反馈「可动手的时候没有进行中卡片」）。
+    //
+    // 正确分工：主会话永远只派活（白名单），指挥能不能动手由 brainPermissions 决定。
     const name = String(execution.name || '')
 
     // 用户本轮已明确放行（说了「你自己做」等）→ 全放行
