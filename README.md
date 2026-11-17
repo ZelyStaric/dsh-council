@@ -1,8 +1,12 @@
 # dsh-council — DeepSeek Harness「小组」插件
 
-把**会话变成群聊**：你说一句需求，指挥拆解 → 成员在各自的 agent 框架里并发干活 → 审校初审 → 指挥终审 → 不合格自动返工一次。所有过程在「群聊」页实时可见。
+把**会话变成一支团队**：你说一句需求，指挥拆解 → 成员在各自的 agent 框架里并行干活 → 审核链把关 → 全过程在「团队」页实时可见，产出（图/音/视频/模型文件）可直接预览。
 
-> 与官方子代理的区别：官方只回最终答案；本插件把每一步（谁、什么阶段、多久）暴露出来，并且**每个成员可以挂不同框架/模型**，各跑各的原生 agent（Codex CLI / Claude Code CLI / DSH 内建 agent / 图像接口 / 任意 OpenAI·Anthropic 兼容中转）。
+> **只想看它能干什么？** → [FEATURES.md](./FEATURES.md)（纯功能清单，12 个分类）
+> **想了解实现与踩过的坑？** → [`~/docs/dsh-council-handoff.md`](/home/nanami/docs/dsh-council-handoff.md)
+
+> 与官方子代理的区别：官方只回最终答案；本插件把每一步（谁、什么阶段、多久、最近一行输出）暴露出来，
+> 并且**每个成员可以挂不同框架/模型**，各跑各的原生 agent（Codex CLI / Claude Code CLI / DSH 内建 agent / 图像接口 / 任意 OpenAI·Anthropic 兼容中转）。
 
 > 仓库标签：`dsh` · `deepseek-harness` · `cordis` · `plugin` · `multi-agent` · `agent-orchestration` · `codex` · `claude` · `ai-agents`
 
@@ -11,111 +15,110 @@
 ```bash
 # 从 GitHub 克隆后安装（推荐）
 git clone https://github.com/ZelyStaric/dsh-council
-plugin_manager install_bundle --target ./dsh-council
-
-# 或直接用目录路径
-plugin_manager install_bundle --target /path/to/dsh-council
-
-# 或 npm 安装（如已发布）
-plugin_manager install_bundle --target @zelystaric/dsh-council
+dsh plugin --profile web add -w file:/path/to/dsh-council
+systemctl --user restart dsh-web
 ```
 
-安装后在任意会话顶部点 `小组模式`，进「小组」页配置成员。
+安装后在任意会话顶部胶囊点「**小组**」，进「小组」页配置成员。
 
-## 首次配置
+## 上手三步
 
-1. **名册**：岗位 → 成员 → 每个成员选框架与模型；
-2. **API**：在「小组」页填中转站地址与 key（同时支持两种通用格式）：
+```
+① 发一条消息，建立会话
+② 点顶部胶囊「小组」→ 自动建组 + 默认成员（指挥 / 审校）
+③ 直接说需求：会交给指挥拆解、派给成员
+```
 
-| 用途 | 协议 | 填在哪 |
-|---|---|---|
-| `codex` 成员（GPT 系） | OpenAI | ① 卡片的 gpt key（base 来自 `~/.codex`） |
-| `image` 成员（出图） | OpenAI `/v1/images/generations` | ① 卡片的 gpt-image key |
-| `claude` 成员（Anthropic 系） | Anthropic `/v1/messages` | ① 卡片的 claude key + claude base URL |
+默认阵容只有 **指挥 / 审校**，都走 DSH 自带的 deepseek，**开箱可用、不需要额外 key**。
+想要出图就在「小组」页「+ 添加成员」，把框架选成 `image`（需要 gpt-image key）。
 
-3. **首次使用的顺序**（全新安装时很重要）：
+## 配置
 
-   ```
-   ① 先发一条消息，建立一个会话
-   ② 点顶部「小组模式」（Hero 草稿态点它会提示先建会话）
-   ③ 进「小组」页填密钥、确认名册
-   ④ 再派活
-   ```
+### 模型与提供商（推荐在页面里配）
 
-4. 也可以不填页面，改 profile 的 `cordis.patch.yml`：
+「小组」页的**成员卡**上直接选：
+
+```
+[成员名]  [提供商 ▾]  [删]
+          [模型 ▾]
+          [职位 ▾]
+```
+
+- **提供商**：列出 DSH 里已配置的全部 provider（`relay-*` / `local` / `deepseek-official`…）
+- **模型**：随提供商变化
+- **框架自动推断**：选完 provider/model，插件自己决定跑哪条 CLI（规则见 [FEATURES.md](./FEATURES.md) 第五节）
+
+**指挥也能这么配** —— 不用改配置文件。想让 `astra` 当指挥，把它加进某个 provider 的模型列表，然后在指挥卡上选它即可。
+
+### 或改 profile
 
 ```yaml
 - insert:
     - id: council
       name: '@zelystaric/dsh-council'
       config:
-        claudeBaseUrl: https://your-relay      # claude 成员用
         defaultWorkspace: /your/workspace      # 成员的工作目录
-        strictDelegate: true                   # 小组模式硬拦截父会话自己写文件（默认 true）
-        memberIdleMinutes: 10                  # 成员连续多久没有任何输出才算死（看门狗，默认 10 分钟）
-        memberHardLimitMinutes: 360            # 极大兵底（默认 6 小时；0 = 完全不限制总时长）
-        imageTimeoutSeconds: 240               # 出图 HTTP 请求超时（无流式输出，默认 240s）
+        strictDelegate: true                   # 小组模式白名单（默认 true，见下）
+        memberIdleMinutes: 10                  # 成员连续多久没输出算死（默认 10 分钟）
+        memberHardLimitMinutes: 360            # 极大兜底（默认 6 小时；0 = 不限制）
+        imageTimeoutSeconds: 240               # 出图 HTTP 超时（默认 240s）
 ```
 
-> 页面里的 base 留空 = 用 profile 里的；页面填了会覆盖它。
-> 成员**没有总时长超时**：只要还在输出就一直跑，静默超过 `memberIdleMinutes` 才终止；
-> 旧的 `memberTimeoutMinutes` 仍可读但已废弃、不再生效。
+> 页面里的配置优先于 profile。
+> 成员**没有总时长超时**：只要还在输出就一直跑，静默超过 `memberIdleMinutes` 才终止。
 
-### 硬拦截：小组模式下父会话不许自己动手
+### 白名单：小组模式下父会话只能派活
 
-光靠提示词拦不住（实测有会话自己跑了 120 次 bash / 12 次 edit 却不派活），所以 Host 半在
-`agent.ctx.tools.guard()` 上加了一道守卫：**写类工具直接拒绝**，理由会回到父会话。
+提示词拦不住（实测有会话自己跑了 120 次 bash 却不派活），所以 Host 半在 `agent.ctx.tools.guard()` 上加了守卫。
 
-- 拒绝名单：`edit`、`write`、`apply_patch`、`blender_python`、`blender_import`、`blender_export`、
-  `blender_render`、`blender_render_frames`；
-- **不拦** `bash`（只计审计数）与只读工具（`read` / `read_image` / `grep` / `glob` / `blender_status` /
-  `blender_scene_info` / `blender_object_info` / `blender_validate_*` / `blender_helper_catalog`）；
-- 两条逃生口：本轮最后一条用户消息里说「你自己做 / 你直接改 / 你亲自动手 / 放行」；或把
-  `strictDelegate` 设为 `false`（默认 `true`，改 profile 的 `config.strictDelegate`，见上）。
+**v0.5 起改成白名单**（早先是黑名单，用 `cat > file` 就能绕过去）：
 
-- 被拦次数会累加，`council_delegate` 回执末尾出现 `## 越权拦截`（如「edit×3、blender_render×2」），
-  `GET /council/api/progress` 的 entry 里也有 `selfWorkBlocked`；`GET/POST /council/api/config`
-  读写 `strictDelegate`。
+- **只放行 `council_*`** —— 父会话手上没有能干活的工具，越权在结构上不可能；
+- **`send_message` 也放行**（它只发消息，且被绑定的会话需要它向上汇报）；
+- 任何非 `council_*` 调用都算一次越权尝试，计入回执末尾的 `## 越权拦截`；
+- 两条逃生口：本轮最后一条用户消息里说「你自己做 / 你直接改 / 你亲自动手 / 放行」；
+  或把 `strictDelegate` 设为 `false`。
 
 ### 官方 key 与中转站都能直接用
 
-三个框架的凭据都从插件配置里取（页面 ① 或 profile 的 `cordis.patch.yml`），**填官方 key 就是官方通道，填中转 key 就是中转通道**：
+凭据都在 provider 里（页面成员卡选的 provider，或 `~/.dsh/profiles/web/cordis.patch.yml` 的 `providers` 段）。
+**填官方 key 就是官方通道，填中转 key 就是中转通道**：
 
-| 成员 | 填什么 | 官方 | 中转站 |
-|---|---|---|---|
-| `claude` | `claudeBase` + `claudeKey` | 地址 `https://api.anthropic.com`，模型如 `claude-sonnet-4-5` | 地址如 `https://your-relay` |
-| `image` | `codexBase` + `imageKey` | 地址 `https://api.openai.com`，模型 `gpt-image-1` | 地址如 `https://your-relay`，模型按中转提供的写 |
-| `codex` | `codexBase` + `codexToken`（或 codex 成员的 `~/.codex` 配置） | 地址 `https://api.openai.com`，`codexWireApi` 默认 `responses` | 地址如 `https://your-relay` |
+| 成员 kind | 走什么 | env |
+|---|---|---|
+| `claude` | Claude Code CLI | `ANTHROPIC_BASE_URL`（**不能带 `/v1`**） + `ANTHROPIC_API_KEY` |
+| `codex` | Codex CLI | `CODEX_HOME`（插件自己生成的独立目录，**不改你的 `~/.codex`**） |
+| `gemini` | Gemini CLI | `GEMINI_API_KEY` + `GOOGLE_GEMINI_BASE_URL` + `GEMINI_CLI_TRUST_WORKSPACE` |
+| `deepseek` | DSH 内建 agent | 不需要 CLI env |
+| `image` | OpenAI 兼容 `/v1/images/generations` | 走 provider 的 baseURL/key |
 
 实现细节（排障时有用）：
 
 - base 会被**归一成根地址**（自动去掉尾部 `/` 与 `/v1`），各调用点再拼 `/v1/models`、`/v1/images/generations`、`/v1/usage`；
-- `claude` 通过 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 传给 CLI，所以官方与中转走的是同一条路；
-- `codex` 会用它自己生成的 `~/.dsh/storages/council-codex/config.toml`（内含 `model_providers.council` 与 bearer token），**不改你 `~/.codex` 里的配置**；没配 base/key 时才回退到你自己的 `~/.codex`。
+- `codex` 用它自己生成的 `~/.dsh/storages/council-codex/config.toml`，不动你的 `~/.codex`；
+- 没配 provider 时才回退到 `claudeBase` / `imageKey` / `codexToken` 这些旧字段。
 
 ### 用官方 key 需要代理时
 
-只填官方 key、base 留空会自动走官方端点（`api.openai.com` / `api.anthropic.com`）。如果本机直连官方不通，在 ① 卡片最右的输入框填本机代理地址（Clash 混合端口）：
+在「小组」页的 API 卡片填本机代理（Clash 混合端口）：
 
 ```
 http://127.0.0.1:7897
 ```
 
-- 只影响**插件自己发起的请求**（模型列表、出图、用量）以及 claude / codex CLI 子进程的环境变量；
-- **代理没起来时会自动回退直连**并打日志，不会把整个插件拖死；
-- 用中转站时不需要填（填了会多一跳）。
+- 只影响**插件自己发起的请求**与 CLI 子进程的环境变量；
+- **代理没起来时自动回退直连**并打日志；
+- 用中转站时不需要填。
 
-### 升级到新版本
+### 升级
 
-`dsh plugin add` **不会覆盖已安装的同名依赖**，换 tarball / 目录升级时要先移除：
+`dsh plugin add` 不会覆盖已安装的同名依赖，换版本要先移除：
 
 ```bash
 dsh plugin --profile web remove @zelystaric/dsh-council
-dsh plugin --profile web add -w file:/path/to/zelystaric-dsh-council-0.2.4.tgz
-systemctl --user restart dsh-web        # 或重启你起的 dsh web
+dsh plugin --profile web add -w file:/path/to/dsh-council
+systemctl --user restart dsh-web
 ```
-
-从 npm 安装时同理：`remove` 之后 `add @zelystaric/dsh-council@<version>`。
 
 ## 成员框架
 
@@ -124,89 +127,36 @@ systemctl --user restart dsh-web        # 或重启你起的 dsh web
 | `codex` | Codex CLI（`codex exec`） | GPT 系，原生 app-server，工具链最全 |
 | `claude` | Claude Code CLI | Anthropic 系，长上下文，能读图 |
 | `deepseek` | DSH 内建 agent（subagent seam） | 用完即弃 + 摘要回灌；可复用同一条子会话 |
-| `image` | 图像接口（OpenAI 兼容 `/v1/images/generations`） | 出图、序列帧 |
+| `gemini` | Gemini CLI | Google 系 |
+| `image` | 图像接口（OpenAI 兼容 `/v1/images/generations`） | 出图 |
 
-### deepseek 成员的 API 提供方
+### 审核位（指挥/审校）的「只读」是怎么做到的
 
-`deepseek` 成员**默认使用 `deepseek-official`**（官方主对话 API），无需额外配置。
+四条腿各用各的机制，`noTools` 在它们上面语义不同：
 
-**可选配置**：如果本地 profile 支持 `relay-deepseek`（中转或自建），可通过以下方式覆盖：
+| kind | 只读实现 | 保留了什么 |
+|---|---|---|
+| `claude` | `--disallowedTools Bash Edit Write WebFetch WebSearch Task NotebookEdit` | ✅ 保留 `Read`/`Grep`/`Glob` |
+| `codex` | `--sandbox read-only` | ✅ 全盘只读 |
+| `gemini` | `--approval-mode plan` | ✅ plan 模式只读 |
+| `deepseek` | preset `council-readonly`（`read: true`，无 bash） | ✅ 能读文件，写不了 |
 
-1. **全局配置**：在 profile 的 `cordis.patch.yml` 中设置 `config.deepseekProvider`：
-   ```yaml
-   - insert:
-       - id: council
-         name: '@zelystaric/dsh-council'
-         config:
-           deepseekProvider: 第三方中转    # 全局改用 relay-deepseek
-   ```
-
-2. **单个成员配置**：在「小组」页或 profile 中为特定成员设置 `member.provider`：
-   ```yaml
-   members:
-     - id: coder
-       kind: deepseek
-       provider: 第三方中转              # 仅此成员用 relay-deepseek
-       model: deepseek-chat
-   ```
-
-成员级 `provider` 优先于全局 `deepseekProvider`。不配置时自动使用 `deepseek-official`。
+> 「可动手」时全部放开。
 
 ## 岗位（角色）
 
-内置 8 个：指挥 / 代码 / 全栈 / 审校 / 画师 / 配乐 / 3D建模 / 动画。**都只是预设**——岗位名、提示词、成员、模型、风格都可以自己改。指挥负责拆解与终审，审校负责初审，其余按任务分派。
+内置 8 个：指挥 / 代码 / 全栈 / 审校 / 画师 / 配乐 / 3D建模 / 动画。**都只是预设**——名字、提示词、成员、模型、风格都能改。
 
 ## 外部依赖（可选，按岗位）
 
-- `codex`、`claude` 两个 CLI（对应成员才需要）
+- `codex`、`claude`、`gemini` 三个 CLI（对应成员才需要）
 - 配乐：`fluidsynth` + GM SoundFont + `ffmpeg` + `python3-midiutil`/`mido`
 - 3D：`blender`（无头）、`openscad`、`python3 -m pip install trimesh pygltflib`
 - 动画：`ffmpeg`、Pillow
 
-
-## 自定义外观（头像、名字、气泡）
-
-**头像**：默认是内置的三张 SVG 占位图。想换成自己的角色，只要把 **192×192 的 PNG** 放进
-
-```
-~/.dsh/storages/council-images/
-├── avatar-codex-small.png      # codex / GPT 成员
-├── avatar-claude-small.png     # claude 成员
-└── avatar-deepseek-small.png   # deepseek 成员
-```
-
-画师（`image`）默认复用 `avatar-codex-small.png`。文件不存在时**自动回退**到内置 SVG，
-所以想换哪个换哪个、删掉也安全。文件名不对或不想要这套命名，改 `client.js` 里的 `AVATAR_FILE` 映射即可：
-
-```js
-const AVATAR_FILE = {
-  codex: 'avatar-codex-small.png',
-  claude: 'avatar-claude-small.png',
-  deepseek: 'avatar-deepseek-small.png',
-  image: 'avatar-codex-small.png',
-}
-// 也可以指向任意经 /council/api/image/ 提供的文件名
-```
-
-注意：头像是**按框架**取的，不是按成员——同一个框架的所有成员共用一张图
-（比如 claude 既当指挥又当审校，仍是同一张）。想让不同成员不同图，需要在 `Avatar` 组件里
-改成按 `member.id` 映射（当前不做，避免状态里存图片路径）。
-没配的框架继续用内置 SVG 占位。
-
-**名字与气泡**：成员名、岗位名、岗位提示词、组级统一风格都在「小组」页和「名册」浮层里改，
-不涉及代码。气泡里的框架标签（`claude · 模型名`）跟随成员选择的框架与模型自动变化。
-
-**按钮文案 / 页面标题**：`locale/{zh,en}.json` 的 `meta.title`、`meta.description` 改了就生效（刷新页面）。
-
 ### 外部 CLI 的路径
 
-`codex` 与 `claude` 默认从 `PATH` 找；找不到时会直接报
-
-```
-未找到 codex CLI（codex）。安装 Codex，或用环境变量 COUNCIL_CODEX_BIN 指定绝对路径。
-```
-
-也可以显式指定：
+默认从 `PATH` 找；找不到会直接报错。也可以显式指定：
 
 ```bash
 export COUNCIL_CODEX_BIN=/usr/local/bin/codex
@@ -215,6 +165,26 @@ export COUNCIL_CLAUDE_BIN=/path/to/claude
 
 `claude` 若装了 `dsh-subagent-claude-code` bundle，会自动用 bundle 自带的二进制。
 
+## 自定义外观（头像、名字、气泡）
+
+**头像**：默认是内置 SVG 占位图。换成自己的角色，把 **192×192 的 PNG** 放进：
+
+```
+~/.dsh/storages/council-images/
+├── avatar-codex-small.png      # codex / GPT 成员
+├── avatar-claude-small.png     # claude 成员
+└── avatar-deepseek-small.png   # deepseek 成员
+```
+
+画师（`image`）默认复用 `avatar-codex-small.png`。文件不存在时**自动回退**到内置 SVG。
+
+注意：头像**按框架**取，不是按成员——同框架所有成员共用一张图。
+
+**名字与气泡**：成员名、岗位名、岗位提示词、组级统一风格都在「小组」页和「名册」浮层里改。
+气泡里的框架标签（`claude · 模型名`）跟随成员的框架与模型自动变化。
+
+**按钮文案 / 页面标题**：`locale/{zh,en}.json` 的 `meta.title`、`meta.description`。
+
 ## 兼容性
 
 - 仅测试于 `dsh` **0.2.1-rc.2**（用到 subagent seam、`uiConversation` 等内部 API）；
@@ -222,11 +192,14 @@ export COUNCIL_CLAUDE_BIN=/path/to/claude
 
 ## 二次开发
 
-- Host 半 `index.js`：`createHandler()` 暴露全部 HTTP 路由；`runKind()` 是所有框架的分发点，加新框架只需加一个分支；
-- Client 半 `client.js`：`CouncilChatView`（群聊页）/`CouncilView`（编排页）/`RosterPanel`（名册浮层）/`CouncilProgress`（进度条）；
-- 状态文件：`~/.dsh/storages/council.json`（职位/成员/组/用量/摘要）；出图落在 `~/.dsh/storages/council-images/`；
-- 修改 Host 后需 `systemctl --user restart dsh-web`；只改 Client 刷新页面即可。
+- **Host 半** `index.js`：`createHandler()` 暴露全部 HTTP 路由；`runKind()` 是所有框架的分发点，加新框架只需加一个分支；
+- **Client 半** `client.js`：`CouncilChatView`（团队页）/ `CouncilView`（编排页）/ `RosterPanel`（名册浮层）/ `ModeToggle`（模式胶囊）；
+- **状态文件**：`~/.dsh/storages/council.json`（职位/成员/组/用量/摘要）；团队消息落 `~/.dsh/storages/council-team/`；出图落 `~/.dsh/storages/council-images/`；
+- 改 Host 后需 `systemctl --user restart dsh-web`；只改 Client 刷新页面即可。
+
+> ⚠️ **DSH 的 React 是桩实现**：`useState` 不触发重渲染、`ref` 不一定绑上、`onScroll` 不转发、
+> `<select defaultValue>` 不生效……改 UI 前先看 [`AGENTS.md`](./AGENTS.md) 里那张坑表。
 
 ## 许可
 
-MIT。头像为内置占位图；如需自定义，替换 `client.js` 里的 `AVATAR_FILE` 映射即可。
+MIT。
