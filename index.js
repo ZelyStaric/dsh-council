@@ -6665,12 +6665,13 @@ function rosterText(group) {
  * @returns {{ shortCircuited: boolean }} shortCircuited=true 表示初审已打回，没跑指挥终审。
  */
 async function runReviewChain(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage) {
-  // ── 1) 成员自审（兜底）────────────────────────────────────────────
-  // 只要本组**开了审核**（初审或终审任一），就总是跑一次：审校成员缺席时它是唯一的结论来源，
-  // 砍掉它会让「配了审核但没人审」的组从 rejected 退化成 none（原有语义靠它兜底）。
-  // 两个审核都关的组不跑（否则凭空多一次审核）。
-  // group.selfReview === true 只是让它额外在进度条上显式报一次。
-  const selfReviewEnabled = requirePrelim || requireCommander
+  // ── 1) 成员自审（可选）────────────────────────────────────────────
+  // 2026-11-17 修：**这个开关以前是假的**。原实现只看 requirePrelim/requireCommander，
+  // 于是用户在小组页关掉「成员自审」后，自审照样跑（只是进度条不再显示「自审中」），
+  // 表现为「我明明关了它还在自审」。
+  // 现在 group.selfReview === false 就真的不跑；undefined（未设）保持旧行为（跑），
+  // 避免存量小组突然少一道审核。
+  const selfReviewEnabled = (requirePrelim || requireCommander) && group.selfReview !== false
   if (selfReviewEnabled) {
     if (onStage) onStage('自审（成员自查产出与要求）')
     try {

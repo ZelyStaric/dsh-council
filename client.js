@@ -671,10 +671,17 @@ window.__ModuleLoader__.load({
           // 2026-11-16 用户要求：审核链的两级开关放在这里（串行链：自审 → 初审 → 指挥终审）
           row('成员自审',
             '成员交付前先自查一遍产出与要求是否一致（可选，多花一次调用）',
-            check(group && group.selfReview === true, (v) => saveGroupFlag({ selfReview: v }))),
+            // 2026-11-17：默认值要与后端一致。后端判定是 `selfReview !== false`（未设=跑），
+            // 这里原来用 `=== true`（未设=不勾）→ 界面显示没开、实际却在自审。
+            check(Boolean(group) && group.selfReview !== false, (v) => saveGroupFlag({ selfReview: v }))),
           row('初审',
             '先用便宜模型快筛：偏差太大直接打回重做，不再浪费指挥审核',
             check(!(group && group.requirePrelim === false), (v) => saveGroupFlag({ requirePrelim: v }))),
+          // 2026-11-17 补：指挥终审原来**没有 UI 开关**（注释说「验收策略里有」是错的，
+          // 实际哪里都没有），后端却一直 `requireCommander ?? true` → 永远开启、关不掉。
+          row('指挥终审',
+            '由指挥对成员产出做最终验收（关掉则只看初审结论）',
+            check(!(group && group.requireCommander === false), (v) => saveGroupFlag({ requireCommander: v }))),
           row('大脑权限',
             mode === 'open'
               ? '开放：大脑可以自己动手（跑命令 / 改文件）'
