@@ -3704,7 +3704,10 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   const commanderOpts = {
     convId: commander.convId,
     __preset: commanderPreset,
-    __noTools: true,
+    // 2026-11-17 修：原来是**写死的 true**，于是用户把大脑权限切成「可动手」也没用——
+    // 指挥的工具面永远被锁成「只能派活」，它自己还会如实汇报「我的工具被锁了」。
+    // 现在跟随 brainPermissions：open = 放开工具面，closed = 只派活。
+    __noTools: !brainOpen,
     __residentKind: 'work',
     mcpServers: brainOpen ? undefined : [],
   }
