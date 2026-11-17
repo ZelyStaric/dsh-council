@@ -4878,14 +4878,9 @@ export function createHandler(ctx, config = {}) {
                 if (start >= 0 && end >= start && start < total) {
                   res.writeHead(206, {
                     'content-type': type,
-                    'content-length': String(end - start + 1),
                     'content-range': 'bytes ' + start + '-' + end + '/' + total,
                     'accept-ranges': 'bytes',
                     'cache-control': 'private, max-age=60',
-                    // 2026-11-17 修 BUG-1：DSH 的 webserver 外面套了 gzip 中间件，
-                    // 它会把响应再压一遍 → 与手动设的 content-length 冲突 → 连接被中断（HTTP 000）。
-                    // 这里显式声明不压缩，交给下面的 stream.pipe 原样输出。
-                    'content-encoding': 'identity',
                   })
                   // 2026-11-17 修 BUG-1：pipe 在 DSH 的 handler 里不工作（连接直接断）。
                   // 改成一次性读进内存再 end —— 媒体文件有上限保护，几 MB 可接受。
@@ -4896,13 +4891,12 @@ export function createHandler(ctx, config = {}) {
                 }
               }
             }
+            // 2026-11-17 真正的原因：**手动写 content-length 会让 DSH 的响应处理断连**。
+            // 对比 send() 的实现（只 writeHead + end，不设长度）——它工作正常。
             res.writeHead(200, {
               'content-type': type,
-              'content-length': String(total),
               'accept-ranges': 'bytes',
               'cache-control': 'private, max-age=60',
-              // 同上：禁用外层 gzip，否则 content-length 与实际字节数不符 → 连接中断
-              'content-encoding': 'identity',
             })
             // 图片/音频直接流；其它（glb/zip）当附件下载
             const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
