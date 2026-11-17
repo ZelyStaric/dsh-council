@@ -563,11 +563,18 @@ window.__ModuleLoader__.load({
             mutate('/members', { id: member.id, provider: value, kind: kind, model: next })
           },
         }, [
-          h('option', { key: '__none__', value: '' }, '（未选择提供商）'),
-          h('option', { key: '__image__', value: '__image__' }, 'image（出图）'),
-        ].concat((providers || []).map((p) => h('option', { key: p.id, value: p.id }, p.name || p.id))))
-        const roleOptions = [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
-          roles.map((r) => h('option', { key: r.id, value: r.id }, r.name)))
+          // 2026-11-17：用**原生 `selected` 属性**标记当前项，而不是靠 select 的 defaultValue。
+          // DSH 的 React 是桩实现，defaultValue 实测不生效（select 永远显示第一个 option），
+          // 于是明明存了 relay-claude，界面却显示「（未选择提供商）」。
+          h('option', { key: '__none__', value: '', selected: !providerValue }, '（未选择提供商）'),
+          h('option', { key: '__image__', value: '__image__', selected: providerValue === '__image__' }, 'image（出图）'),
+        ].concat((providers || []).map((p) => h('option', {
+          key: p.id,
+          value: p.id,
+          selected: p.id === providerValue,
+        }, p.name || p.id))))
+        const roleOptions = [h('option', { key: 'none', value: '', selected: !member.roleId }, '未分配职位')].concat(
+          roles.map((r) => h('option', { key: r.id, value: r.id, selected: r.id === member.roleId }, r.name)))
         const roleSelect = h('select', {
           style: Object.assign({}, styles.input, { width: 170 }), defaultValue: member.roleId || '',
           onChange: (event) => mutate('/members/role', { id: member.id, roleId: event.target.value || null }),
@@ -796,8 +803,8 @@ window.__ModuleLoader__.load({
             h('select', {
               style: Object.assign({}, styles.input, { width: 200 }), defaultValue: group.reviewerId || '',
               onChange: (event) => mutate('/groups', { id: group.id, reviewerId: event.target.value || undefined }),
-            }, [h('option', { key: 'auto', value: '' }, '自动（第一个 claude）')].concat(
-              members.filter((m) => m.kind === 'claude').map((m) => h('option', { key: m.id, value: m.id }, m.name)))))),
+            }, [h('option', { key: 'auto', value: '', selected: !group.reviewerId }, '自动（第一个 claude）')].concat(
+              members.filter((m) => m.kind === 'claude').map((m) => h('option', { key: m.id, value: m.id, selected: m.id === group.reviewerId }, m.name)))))),
         h('div', { style: Object.assign({}, styles.card) },
           h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '模型与密钥'),
           h('div', { style: styles.muted },
@@ -952,16 +959,16 @@ window.__ModuleLoader__.load({
                 const next = member.model && kinds.indexOf(member.model) >= 0 ? member.model : (kinds[0] || '')
                 act('/members', { id: member.id, kind: kind, model: next })
               },
-            }, ['codex', 'claude', 'deepseek', 'image'].map((k) => h('option', { key: k, value: k }, k))),
+            }, ['codex', 'claude', 'deepseek', 'image'].map((k) => h('option', { key: k, value: k, selected: k === member.kind }, k))),
             h('select', {
               style: Object.assign({}, styles.input, { width: 190 }), defaultValue: member.model || '',
               onChange: (e) => act('/members', { id: member.id, model: e.target.value }),
-            }, options.map((id) => h('option', { key: id, value: id }, id))),
+            }, options.map((id) => h('option', { key: id, value: id, selected: id === member.model }, id))),
             h('select', {
               style: Object.assign({}, styles.input, { width: 130 }), defaultValue: member.roleId || '',
               onChange: (e) => act('/members/role', { id: member.id, roleId: e.target.value || null }),
-            }, [h('option', { key: 'none', value: '' }, '未分配职位')].concat(
-              roles.map((r) => h('option', { key: r.id, value: r.id }, r.name)))),
+            }, [h('option', { key: 'none', value: '', selected: !member.roleId }, '未分配职位')].concat(
+              roles.map((r) => h('option', { key: r.id, value: r.id, selected: r.id === member.roleId }, r.name)))),
             h(Button, { onClick: () => act('/members/delete', { id: member.id }) }, '删')),
           null)
       })
