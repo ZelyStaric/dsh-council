@@ -1743,9 +1743,15 @@ window.__ModuleLoader__.load({
       h('span', { style: { flex: 1 } }))
     }
 
-    /** 本地绝对路径 → 插件文件端点 URL（只读、限制在 HOME 下）。 */
+    /** 本地绝对路径 → 插件文件端点 URL（只读、限制在 HOME /tmp 下）。 */
     function fileUrl(abs) {
-      return '/council/api/file?path=' + encodeURIComponent(String(abs || ''))
+      const s = String(abs || '')
+      // 2026-11-17 修：回执里的链接有两种形态——
+      //   · 本地绝对路径 /home/nanami/.dsh/storages/council-images/x.png → 需要包成 /file?path=
+      //   · 已经是插件 URL /council/api/image/x.png → **原样返回**
+      // 之前无条件包一层，导致所有 /council/api/image/*.png 被当成磁盘路径 → 403。
+      if (s.startsWith('/council/api/') || /^https?:\/\//i.test(s)) return s
+      return '/council/api/file?path=' + encodeURIComponent(s)
     }
 
     /** 这个路径是什么媒体类型（用于决定 <img> / <audio> / 链接）。 */
