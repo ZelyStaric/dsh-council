@@ -1928,6 +1928,8 @@ window.__ModuleLoader__.load({
       const esRef = useRef(null)
       // 进行中的执行步骤（DSH 风格）：{callId: {members: {id: {name, stage, silentMs, stageAgeMs}}}}
       const [progress, setProgress] = useState(null)
+      // 后台派活的 job 状态（2026-11-17）：[{runId, status, startedAt, finishedAt, error}]
+      const [bgJobs, setBgJobs] = useState([])
       // 长回执的展开状态（key → true 表示已展开）
       const [expandedSet, setExpandedSet] = useState({})
       // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
@@ -1998,7 +2000,12 @@ window.__ModuleLoader__.load({
         // 进行中的「步骤」：/progress 里有每个成员的 stage / 静默时长（DSH 风格的执行步骤）
         const refreshProgress = () => {
           call('/progress?sessionId=' + encodeURIComponent(sessionId))
-            .then((d) => { if (alive) setProgress((d && d.progress) || null) })
+            .then((d) => {
+              if (!alive) return
+              setProgress((d && d.progress) || null)
+              // 后台 job 的真实状态（2026-11-17）：等待期卡片据此说真话，不再瞎猜
+              setBgJobs((d && d.jobs) || [])
+            })
             .catch(() => { /* 没有进行中的任务就忽略 */ })
         }
         refreshProgress()
@@ -2139,6 +2146,18 @@ window.__ModuleLoader__.load({
       // 之前只有文案会变（2 分钟后改成「没有响应」），但「进行中」卡片本身一直挂在那儿转圈——
       // 实测遇到：turn 被重启打断，最后一条是用户消息、running=false，于是这个卡片永远在转。
       // 现在超过 3 分钟就不再当"在等"，直接收掉卡片（用户自己决定要不要重发）。
+      // 2026-11-17：等待期**说真话**。
+      // 之前只要「最后一条是 user + running=false」就画「指挥正在拆解」——
+      // 但实测常见的真相是：后台 job 已经跑完（8s），主会话正在消化回执。
+      // 现在优先看 bgJobs：
+      //   · 有 running 的 job → 「后台任务 job_xxx 运行中」
+      //   · 只有 done 的 job、主会话还没回复 → 「后台任务已完成，等待指挥汇总」
+      //   · 完全没有 job → 才是真的在拆解（或刚发出）
+      const liveJobs = (bgJobs || []).filter((j) => j && j.status === 'running')
+      const doneJobs = (bgJobs || []).filter((j) => j && j.status === 'done')
+      const waitPhase = liveJobs.length ? 'job-running'
+        : (doneJobs.length && !running && !streamText) ? 'job-done'
+          : 'unknown'
       const waitingForCommander = Boolean(
         lastMsgForWait && lastMsgForWait.role === 'user' && !running && !streamText
           && waitMs > 3000 && waitMs < 180000,
@@ -2423,7 +2442,20 @@ window.__ModuleLoader__.load({
               : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                 h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
                 h('span', { style: { fontWeight: 600, minWidth: 48 } }, '指挥'),
-                h('span', { style: { opacity: 0.8 } }, waitStalled ? '没有响应（可能被打断了）' : '正在拆解任务、挑选成员…'),
+                h('span', { style: { opacity: 0.8 } }, (() => {
+                  // 2026-11-17：按**真实 job 状态**说，不再一律「正在拆解」
+                  if (waitPhase === 'job-running') {
+                    const j = liveJobs[0]
+                    return '后台任务 ' + String(j.runId || '') + ' 运行中…'
+                  }
+                  if (waitPhase === 'job-done') {
+                    const j = doneJobs[doneJobs.length - 1]
+                    const cost = j.finishedAt && j.startedAt ? Math.round((j.finishedAt - j.startedAt) / 1000) : null
+                    return '后台任务已完成' + (cost === null ? '' : '（' + cost + 's）') + '，等待指挥汇总…'
+                  }
+                  if (waitStalled) return '没有响应（可能被打断了）'
+                  return '正在拆解任务、挑选成员…'
+                })()),
                 h('span', { style: { opacity: 0.55, fontSize: 11 } }, fmtSec(Date.now() - (Number(lastMsg && lastMsg.at) || Date.now()))))])] : []))
         : h('div', { style: { padding: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
           // 单人模式（或还没绑定小组）时给明确入口。

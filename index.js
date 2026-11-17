@@ -4759,7 +4759,22 @@ export function createHandler(ctx, config = {}) {
               })
             }
             // residentChildren：当前被插件有意保留（未 dispose）的子代理数，只读观测值。
-            return send(res, 200, { progress: out, residentChildren: residentChildren.size, runningMembers: runningMembers.size })
+            // 2026-11-17：顺带带上本会话的**后台 job** 状态。
+            // 起因：「进行中」卡片原来在 /progress 空了之后靠前端猜「正在拆解」，
+            // 而实际是后台 job 已跑完、主会话正在消化回执 —— 猜出来的状态是假的。
+            // 带上真实 job 状态后，等待期可以显示「后台任务已完成，等待指挥汇总」。
+            const jobList = [...backgroundJobs.values()]
+              .filter((job) => {
+                if (!normalizedFilter) return true
+                const js = job.sessionId ? (job.sessionId.startsWith('session-') ? job.sessionId : 'session-' + job.sessionId) : null
+                return js === normalizedFilter
+              })
+              .map((job) => ({
+                runId: job.runId, status: job.status,
+                startedAt: job.startedAt, finishedAt: job.finishedAt || null,
+                error: job.error || null,
+              }))
+            return send(res, 200, { progress: out, jobs: jobList, residentChildren: residentChildren.size, runningMembers: runningMembers.size })
           }
           if (req.method === 'GET' && route === '/jobs') {
             const jobs = [...backgroundJobs.values()].map((job) => ({
