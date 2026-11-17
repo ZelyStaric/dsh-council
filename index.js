@@ -776,6 +776,12 @@ function delegateReceiptText(value) {
     ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
       + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
     : ''
+  // 审核模式标注（2026-11-17 用户要求）：回执里明确写出当前是严格审核还是以指挥为准，
+  // 否则用户看到「指挥说通过却判失败」会以为出了 bug。
+  // 用户明确要求：只写「严格审核」这个字样，不要展开解释。
+  const reviewModeLine = input.reviewMode
+    ? '\n\n## 审核模式\n' + String(input.reviewMode)
+    : ''
   // 补员 / 回收 / 子会话 / 越权拦截 / 越权审计 / 子进程回收（与原 render 一致）
   const staffing = (input.staffingCreated || []).length
     ? '\n\n## 补员\n' + input.staffingCreated.map((line) => '- ' + line).join('\n')
@@ -802,7 +808,7 @@ function delegateReceiptText(value) {
   const planLine = input.plan && input.plan.confirmation ? '**指挥确认**：' + String(input.plan.confirmation) : ''
   if (input.error && !(input.members || []).length) return plannerSection(input)
   const planner = plannerSection(input)
-  return head + (planner ? planner + '\n\n' : '') + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + swept
+  return head + (planner ? planner + '\n\n' : '') + (planLine ? planLine + '\n\n' : '') + (body || '（本轮没有成员产出）') + staffing + pruned + prunedSessions + blocked + acceptanceSection + reviewModeLine + selfRanSection + swept
 }
 
 /** 取出当前会话最近一个后台任务。 */
@@ -6908,6 +6914,10 @@ function makeDelegateTool(ctx, config, group) {
             ? '\n\n## 验收（本次调用）\n结论：' + acceptanceStatus + ' —— ' + acceptanceNote
               + '\n这不是交付物：不得描述为已完成；必须继续派返工，或如实告知用户失败原因。'
             : ''
+          // 审核模式标注（与 delegateReceiptText 里同一逻辑，两处出口都要有）
+          const reviewModeLine = value && value.reviewMode
+            ? String.fromCharCode(10,10) + '## 审核模式' + String.fromCharCode(10) + String(value.reviewMode)
+            : ''
           // ⛔ 必须是最开头的第一行（模型先看到它，不容易把失败当成果接着往下跑）
           if (value && value.background) {
             return [{ type: 'text', text: '已在后台派活（' + value.runId + '）：成员在后台跑，你随时可以继续说话；完成后用 council_collect 收结果。' }]
@@ -6917,7 +6927,7 @@ function makeDelegateTool(ctx, config, group) {
             return [{ type: 'text', text: plannerSection(value) }]
           }
           const planner = plannerSection(value)
-          return [{ type: 'text', text: head + (planner ? planner + '\n\n' : '') + (planFailed ? planFailed + '\n\n' : '') + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + selfRanSection + sweptSection }]
+          return [{ type: 'text', text: head + (planner ? planner + '\n\n' : '') + (planFailed ? planFailed + '\n\n' : '') + (planLine ? planLine + '\n\n' + body : body) + staffing + pruned + prunedSessions + blocked + acceptanceSection + reviewModeLine + selfRanSection + sweptSection }]
         },
       },
       execute: async function delegateImpl(args, exec) {
@@ -7270,6 +7280,8 @@ function makeDelegateTool(ctx, config, group) {
         const acceptanceSummary = summarizeAcceptance(response.members)
         response.acceptanceStatus = acceptanceSummary.acceptanceStatus
         response.acceptanceNote = acceptanceSummary.acceptanceNote
+        // 审核模式（严格审核 / 以指挥为准）
+        response.reviewMode = (state.config && state.config.authoritativeReviewer) === 'commander' ? '以指挥为准' : '严格审核'
         // 环境类不通过：明确告诉用户「不是成员的锅，所以没返工」
         if (response.members && response.members.length && response.members[0].review && response.members[0].review.commander && response.members[0].review.commander.owner === 'other') {
           response.acceptanceNote = (response.acceptanceNote || '') + '（问题不在成员，已跳过返工）'
