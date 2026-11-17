@@ -3869,7 +3869,9 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
     : ''
   const standardBlock = group.standard ? '\n\n[验收标准]\n' + group.standard : ''
   const prompt = memberPrompt(member, task) + standardBlock + (brief ? '\n\n[背景]\n' + brief : '') + memoryBlock + WORK_STYLE
-  if (onStage) onStage('执行中（' + member.kind + '）')
+  // 2026-11-17：不再把 kind 塞进 stage 文案 —— 前端会单独显示**模型名**
+  // （用户要看到指挥到底选了哪个模型，而不是「deepseek」这种框架名）。
+  if (onStage) onStage('执行中')
   // 任何 stdout / 子代理消息变化都刷新进度条的 lastActivity（前端据此显示「静默 Ns」）。
   // 走 createProgressBeat：≥1s 节流（stdout 每几十毫秒一块，不能每块都写进度表）。
   const onActivity = callId ? createProgressBeat(callId, member.id) : undefined
@@ -7349,9 +7351,9 @@ function makeDelegateTool(ctx, config, group) {
           const brief = briefParts.join('\n')
           // 进度条要显示「这个成员正在做什么」：压成一行、截 60 字，随进度条目下发
           const shortTask = String(item.task || '').replace(/\s+/g, ' ').trim().slice(0, 60)
-          progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '排队中', task: shortTask })
+          progressSet(callId, member.id, { name: member.name, kind: member.kind, model: member.model, stage: '排队中', task: shortTask })
           if (callCancelled(callId)) {
-            progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '已停止', task: shortTask })
+            progressSet(callId, member.id, { name: member.name, kind: member.kind, model: member.model, stage: '已停止', task: shortTask })
             return { name: member.name, kind: member.kind, ok: false, text: '', error: '已被用户停止', accepted: false, acceptance: 'cancelled' }
           }
           // 放弃等待兜底：取消后 2 秒内强制结束，避免永久挂起
@@ -7375,9 +7377,9 @@ function makeDelegateTool(ctx, config, group) {
             ? Object.assign({}, member, { mcpServers: item.mcp.filter(Boolean).map(String) })
             : member
           const memberPromise = callMember(ctx, effectiveMember, String(item.task || ''), config, live, item.style, memberParent, brief,
-            (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: stage, task: shortTask }),
+            (stage) => progressSet(callId, member.id, { name: member.name, kind: member.kind, model: member.model, stage: stage, task: shortTask }),
             (work) => {
-              progressSet(callId, member.id, { name: member.name, kind: member.kind, stage: '审校中' })
+              progressSet(callId, member.id, { name: member.name, kind: member.kind, model: member.model, stage: '审校中' })
               const body = work.ok
                 ? (work.text || '')
                 : ((SILENT_KILL_REASONS.has(work.reason) ? '静默超时终止：' : '失败：') + (work.error || ''))

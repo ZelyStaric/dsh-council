@@ -2179,6 +2179,8 @@ window.__ModuleLoader__.load({
               callId,
               memberId: id,
               finished: Boolean(m.finishedAt),
+              // 成员实际用的模型名（用户要看到指挥选了哪个模型，而不是「deepseek」这种框架名）
+              model: m.model ? String(m.model) : '',
               // 2026-11-17：成员「最近一行输出」。服务端 /progress 一直有 tailText，
               // 但这个 row 没接出来 → 「进行中」卡片只显示阶段名，看不到成员在干什么。
               // （之前我把它加进了 CouncilCardInner 那个**工具卡片**，压根不是这个卡片。）
@@ -2492,7 +2494,9 @@ window.__ModuleLoader__.load({
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                   h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
                   h('span', { style: { fontWeight: 600, minWidth: 48 } }, st.name),
-                  h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, st.stage),
+                  h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                    st.stage + (st.model ? '·' + st.model : '')),
+
                   h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs)),
                   // 只停这个成员
                   st.finished
