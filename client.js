@@ -2263,12 +2263,15 @@ window.__ModuleLoader__.load({
         const isUser = m.role === 'user'
         const isMember = m.role === 'member'
         const kind = isMember ? (m.kind || 'deepseek') : brainKind
-        const who = isUser ? '你' : (isMember ? (m.name || '成员') : '指挥')
+        // 2026-11-18 修：role=assistant 的是**主对话**（DSH 主会话），不是指挥。
+        // 原来一律标成「指挥」，导致主会话说「已原样转告指挥」这种话时，
+        // 界面上看着像指挥在自言自语（用户截图：为什么主对话在冒充指挥）。
+        const who = isUser ? '你' : (isMember ? (m.name || '成员') : '主对话')
         // 派单那一行：直派 / 指挥拆解 用不同标签（2026-11-16 用户要求区分）
         const planTag = m.plan ? (m.direct ? '直派' : '指挥拆解') : null
         const sub = isMember
           ? [m.name || '成员', m.kind, m.model].filter(Boolean).join(' · ')
-          : (isUser ? '你' : (planTag ? planTag + ' · ' + (m.name || '指挥') : '指挥 · ' + (model || (team && team.model) || '')))
+          : (isUser ? '你' : (planTag ? planTag + ' · ' + (m.name || '主对话') : '主对话'))
         const verdictLine = isMember && (m.reviewOk !== null || m.commanderOk !== null)
           ? [
             m.reviewOk === true ? '审校：通过' : m.reviewOk === false ? '审校：不通过' : null,
