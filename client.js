@@ -1906,8 +1906,6 @@ window.__ModuleLoader__.load({
       // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
       // 2026-11-16 实测：状态改了但按钮不出现）。直接拿 DOM 引用改 display。
       const jumpBtnRef = useRef(null)
-      // 「折叠本轮」按钮（同上：走原生 DOM，不用 state）
-      const collapseBtnRef = useRef(null)
       // 首次进入团队 tab 是否已经滚到底
       const didInitScrollRef = useRef(false)
       // 切到团队 tab 时组件不会重新挂载，effect 的依赖也不会变 —— 用轮询探测
@@ -2367,21 +2365,29 @@ window.__ModuleLoader__.load({
                   : '点右上角胶囊切到「小组」即可开始。')))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
       // 「折叠本轮」（2026-11-17 用户要求）：一轮消息太长时，折叠键在轮次顶部、滚不上去。
-      // 这里给一个常驻按钮，直接折叠**最后一个 `<details>`**（也就是最新那一轮）。
-      // 再点一次展开。纯 DOM 操作，不依赖 React state。
+      // 这里给一个常驻按钮，折叠**最新一轮**（最后一个 <details>）。
+      //
+      // ⚠️ 两个坑都踩过：
+      //  ① 不能用 ref 拿按钮节点（DSH 的 ref 不一定绑得上）→ 用 data-* 定位；
+      //  ② 直接赋 `details.open` 可能被 React 的受控属性覆盖 → **模拟点 summary**，
+      //     这等于用户自己点了折叠键，一定生效。
       h('div', {
         key: 'collapse-latest',
-        ref: (node) => { collapseBtnRef.current = node },
+        'data-council-collapse': '1',
         title: '折叠 / 展开最新一轮',
         onClick: () => {
-          const node = scrollerRef.current
-          if (!node) return
-          const list = node.querySelectorAll('details')
-          if (!list.length) return
-          const last = list[list.length - 1]
-          last.open = !last.open
-          const btn = collapseBtnRef.current
-          if (btn) btn.textContent = last.open ? '⊟ 折叠本轮' : '⊞ 展开本轮'
+          try {
+            const scroller = document.querySelector('[data-council-scroller]')
+            if (!scroller) return
+            const list = scroller.querySelectorAll('details')
+            if (!list.length) return
+            const last = list[list.length - 1]
+            const summary = last.querySelector('summary')
+            if (summary) summary.click()          // ← 模拟用户点折叠键
+            else last.open = !last.open           // 兜底
+            const btn = document.querySelector('[data-council-collapse]')
+            if (btn) btn.textContent = last.open ? '⊟ 折叠本轮' : '⊞ 展开本轮'
+          } catch { /* ignore */ }
         },
         style: {
           position: 'absolute', right: 18, bottom: 104, zIndex: 5,
