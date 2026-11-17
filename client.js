@@ -2389,7 +2389,11 @@ window.__ModuleLoader__.load({
             h('div', { style: Object.assign({}, styles.bubble, { flex: 1, minWidth: 0, opacity: 0.92 }) },
               h('div', { style: styles.who }, '指挥 · 生成中'),
               h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, streamText)))]
-            : ((activeSteps.length || waitingForCommander) ? [h('div', {
+            // 2026-11-17：条件必须带上 running。
+            // running 改成读真实进度表后，常见状态是「running=true 但 activeSteps 还空」
+            // （/progress 里只有 __stage__ 占位，被过滤掉了）——
+            // 只判前两者会导致卡片不显示、界面上只剩一个孤零零的停止按钮。
+            : ((activeSteps.length || waitingForCommander || running) ? [h('div', {
               key: 'steps',
               style: Object.assign({}, styles.card, { marginTop: 10, padding: '8px 10px', maxWidth: '92%' }),
             },
