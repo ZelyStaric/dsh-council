@@ -63,7 +63,7 @@ process.env.DSH_HOME = HOME // must be set before the module reads it
 
 const source = await readFile(path.join(ROOT, 'index.js'), 'utf8')
 const exposed = `${source}
-export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, modelGuideText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runMemberAction, teamSessions, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, TEAM_BRAIN_DISALLOWED, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
+export { state, ensureStaffing, pruneEphemeralMembers, resolveMember, rosterText, catalogText, mandateText, staffTarget, roleKind, STAFF_MODELS, STAFF_KINDS, losslessToolResult, toolResult, syncArchivedGroups, groupForSession, archiveGroupForSession, pruneSessionDirs, pruneChildSessionDirs, pruneChildDirsByParent, deleteChildSessionDir, childSessionStats, scanSessionDirRows, resetChildDirCache, scanZstdFrames, parentIdOf, PRUNE_CHILDREN_ROUTE, CHILD_DIR_KEEP_MINUTES, progressMap, progressInit, progressSet, progressStage, progressTouch, createProgressBeat, PROGRESS_ACTIVITY_THROTTLE_MS, healProgress, PROGRESS_STALE_MS, PROGRESS_STALE_KEEP_MS, activeCalls, selfReview, prelimReview, commanderReview, planWithCommander, runDeepseekViaSeam, runDeepseek, runDeepseekWithContinuation, delegateReceiptText, runGemini, cleanGeminiOutput, modelGuideText, residentChildren, trackResidentChild, untrackResidentChild, sweepResidentChildren, RESIDENT_REVIEW_TTL_MS, RESIDENT_WORK_TTL_MS, memberTimeoutMs, memberTimeoutMinutes, memberIdleMinutes, memberIdleMs, memberMaxMinutes, memberMaxMinutesMs, imageTimeoutSeconds, createIdleWatchdog, watchdogErrorText, readProcCpuMs, run, REVIEW_TEXT_HARD_CAP, MEMBER_CONTINUE_LIMIT, DEFAULT_MEMBER_TIMEOUT_MINUTES, DEFAULT_MEMBER_IDLE_MINUTES, DEFAULT_MEMBER_MAX_MINUTES, selfWorkAudit, selfWorkPermits, resetSelfWorkAudit, WRITE_TOOLS, SELF_WORK_DENY_REASON, makeSelfWorkGuard, strictDelegateEnabled, scopedCommand, scopeUnitExists, looksLikeGreeting, GREETING_PATTERNS, REVIEW_UNPARSED_REASON, REVIEW_JSON_NOTE, runReviewTurn, runClaude, reviewImage, modelCatalog, refreshCatalog, fetchCatalog, migrateImageModels, pickImageModels, IMAGE_MODEL_FALLBACK, OLD_IMAGE_MODELS, deepseekMemberProvider, deepseekMemberModel, migrateDeepseekMembers, DEEPSEEK_MEMBER_PROVIDER, DEEPSEEK_MEMBER_MODEL, DEEPSEEK_LEGACY_MODELS, DEEPSEEK_OFFICIAL_PROVIDER, bindAgent, summarizeAcceptance, ACCEPTANCE_BLOCKED, failOnRejectedAcceptance, providerEndpoint, listProviders, notifyParentJobDone, backgroundJobs, reuseChildrenFor, appendToRunningMember, __setRunningMembers, findRunningMember, tellRunningMember, runningMembers, runningMemberKey, resolveBrain, runMemberAction, teamSessions, teamSessionState, teamPushMessage, teamModelDefault, councilMcpConfig, teamToolRegistry, DEFAULT_TEAM_MODEL, TEAM_MESSAGE_LIMIT, steerTargets, steerRunningMember, registerSteerTarget, persistTeamMessage }
 export function __setState(next) { state = next }
 export function __setCatalog(value) { catalog = value ? { at: Date.now(), value } : null }
 export function __setRunKind(fn) { runKindOverride = fn }
@@ -4705,15 +4705,12 @@ try {
   })
 
 
-  await check('DEFAULT_TEAM_MODEL / TEAM_MESSAGE_LIMIT / TEAM_BRAIN_DISALLOWED 常量', () => {
+  // 2026-11-17：TEAM_BRAIN_DISALLOWED 已删（定义后从未使用）。
+  // 白名单改造后，父会话只能调 council_*，不再需要黑名单常量。
+  await check('DEFAULT_TEAM_MODEL / TEAM_MESSAGE_LIMIT 常量', () => {
     assert.equal(mod.DEFAULT_TEAM_MODEL, 'claude-fable-5-2')
     assert.equal(mod.TEAM_MESSAGE_LIMIT, 200)
-    assert.ok(Array.isArray(mod.TEAM_BRAIN_DISALLOWED))
-    for (const name of ['Bash', 'Edit', 'Write', 'Read']) {
-      assert.ok(mod.TEAM_BRAIN_DISALLOWED.includes(name), `应禁 ${name}`)
-    }
-    assert.ok(!mod.TEAM_BRAIN_DISALLOWED.includes('mcp__council__council_delegate'), '只禁文件/shell 类，不禁 council 编排工具')
-    return `默认 ${mod.DEFAULT_TEAM_MODEL} · 上限 ${mod.TEAM_MESSAGE_LIMIT} 条 · 禁 ${mod.TEAM_BRAIN_DISALLOWED.length} 个工具`
+    return `默认 ${mod.DEFAULT_TEAM_MODEL} · 上限 ${mod.TEAM_MESSAGE_LIMIT} 条`
   })
 
   await check('councilMcpConfig：只挂 council 一个 stdio 服务器，指向 council-mcp.mjs', () => {
@@ -4759,11 +4756,11 @@ try {
   })
 
 
-  await check('POST /team/takeover：预留接口返回 501 并说明尚未实现', async () => {
+  // 2026-11-17：/team/takeover 已删（501 预留、前端从不调用）。断言它确实不在了。
+  await check('POST /team/takeover：路由已移除', async () => {
     const res = await post('/team/takeover', { sessionId: 'session-team-empty' })
-    assert.equal(res.status, 501)
-    assert.match((await res.json()).error, /接管主对话尚未实现/)
-    return '501 · 接管主对话尚未实现（预留接口）'
+    assert.notEqual(res.status, 501, '不应再有 501 预留路由')
+    return 'HTTP ' + res.status + '（路由不存在）'
   })
 
   await check('POST /internal/tool：未知工具 404 / 转发 council_status 返回成员表', async () => {

@@ -105,7 +105,6 @@ const MEMBER_KILL_GRACE_MS = 3_000
 /** 出图（HTTP，无流式输出）默认请求超时：240 秒实测够用。 */
 const DEFAULT_IMAGE_TIMEOUT_SECONDS = 240
 /** 验收未通过时是否硬失败（抛错阻止结果被当成交付物）：默认 true。 */
-const DEFAULT_FAIL_ON_REJECTED_ACCEPTANCE = true
 
 /**
  * deepseek 成员被 max-tokens / max-turns 截断时，最多续跑几次（同一个子会话里接着跑）。
@@ -2037,7 +2036,6 @@ const DEEPSEEK_MEMBER_PROVIDER = 'deepseek-official'
 const DEEPSEEK_OFFICIAL_PROVIDER = 'deepseek-official'
 const DEEPSEEK_MEMBER_MODEL = 'deepseek-flash'
 const DEEPSEEK_LEGACY_MODELS = new Set(['deepseek-flash', 'deepseek-v4-pro'])
-let deepseekProviderWarnedFor = ''
 
 /** 验收未通过时是否”硬失败”（工具抛错）：默认 true，避免把未通过的结果当成交付物。 */
 function failOnRejectedAcceptance(config) {
@@ -4238,7 +4236,6 @@ function councilMcpConfig(sessionId) {
 }
 
 /** 团队模式禁止大脑用的工具（它只准编排，不准自己动手）。 */
-const TEAM_BRAIN_DISALLOWED = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'WebFetch', 'WebSearch']
 
 /**
  * 工具表：把 bindAgent 里 register 的那些 name→execute 摘出来，供 /internal/tool 按名字转发。
@@ -5130,10 +5127,6 @@ export function createHandler(ctx, config = {}) {
             await save()
             return send(res, 200, { ok: true, sessionId, model, brainKind: brain.kind })
           }
-          if (req.method === 'POST' && route === '/team/takeover') {
-            // 预留：把团队会话接管成主对话（客户端半还没做）
-            return send(res, 501, { error: '接管主对话尚未实现（预留接口）' })
-          }
           if (req.method === 'POST' && route === '/internal/tool') {
             // 只给本机的 council-mcp.mjs 用：按名字转发到既有 council_* 工具。
             //
@@ -5429,7 +5422,6 @@ function plannerSection(value) {
  * 方案 B：只读工具分组 —— 放行但计数。父会话自己 grep/读代码/看图判读，
  * 用户同样看不到，所以和 bash 一样进回执审计（只审计、不拦截）。
  */
-const READ_TOOLS = new Set(['grep', 'glob', 'read', 'read_file'])
 
 /**
  * 按组累加的越权审计：{ blocked, tools: { [name]: count }, bash, readImage, read, lastAt }。
@@ -5790,11 +5782,6 @@ const IMAGE_LEGACY_PREFIX = 'gpt-image-2.5-'
 /** 启动迁移要换掉的历史值（gpt-image-2 也归到 flare）。 */
 const OLD_IMAGE_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2'])
 /** 同一代内的展示顺序：flare 在前、sunburst 次之，其余按字典序。 */
-const IMAGE_VARIANT_ORDER = ['flare', 'sunburst']
-function imageVariantRank(id) {
-  const index = IMAGE_VARIANT_ORDER.indexOf(String(id).slice(IMAGE_NEW_PREFIX.length))
-  return index === -1 ? IMAGE_VARIANT_ORDER.length : index
-}
 /**
  * 保留中转返回的全部 gpt-image-* 模型，按中转返回顺序原样输出（只去重）。
  * 不做筛选、不排序、不优先某个版本——让用户自己选。
