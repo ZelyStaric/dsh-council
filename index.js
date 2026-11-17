@@ -4052,7 +4052,6 @@ function resolveBrain(model) {
 /** 团队会话状态（进程内，最近 TEAM_MESSAGE_LIMIT 条，重启即失效——大脑侧不依赖历史）。 */
 const teamSessions = new Map()
 /** 正在跑的团队 turn：runId → { sessionId, unit, listeners:Set, stopped } */
-const teamRuns = new Map()
 
 /** 某个会话的团队消息文件路径（一个会话一个 json）。 */
 function teamStateFile(sessionId) {
@@ -4984,20 +4983,6 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'POST' && route === '/providers/refresh') {
             return send(res, 200, await listProviders(ctx, config, { refresh: true }))
           }
-          // ── 团队模式（Team Mode）────────────────────────────────────────────
-          // 大脑只发文本、只调 council_* 工具；这条路把 turn 跑起来并转成 SSE 推给页面。
-          if (req.method === 'POST' && route === '/team/stop') {
-            const body = await readBody(req)
-            const runId = String(body.runId || '')
-            const slot = teamRuns.get(runId)
-            if (!slot) return send(res, 404, { error: 'runId 不存在或已结束：' + runId })
-            slot.stopped = true
-            try { slot.controller.abort() } catch { /* ignore */ }
-            slot.emit('error', { error: '已由用户停止' })
-            slot.listeners.clear()
-            teamRuns.delete(runId)
-            return send(res, 200, { ok: true, runId })
-          }
           if (req.method === 'GET' && route === '/team/state') {
             const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
             if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
@@ -5010,9 +4995,7 @@ export function createHandler(ctx, config = {}) {
             const group = groupForSession(state, sessionId)
             const model = (entry && entry.model) || (group && group.brainModel) || teamModelDefault()
             const brain = resolveBrain(model)
-            // 2026-11-17 修：原来这里读 teamRuns（只在已删除的 /team/send 里写入）→ **running 永远 false**，
-            // 前端据此判断「是不是在跑」全都会错（停止按钮不显示、等待卡片判断失真）。
-            // 现在看真实进度表：本会话还有没有未收尾的条目。
+            // 本会话还有没有未收尾的进度条目（running 的唯一来源）。
             const norm = (v) => String(v || '').replace(/^session-/, '')
             const runningNow = [...progressMap.values()].filter((e) => e && !e.finishedAt && norm(e.sessionId) === norm(sessionId))
             const running = runningNow.length > 0
@@ -5021,8 +5004,7 @@ export function createHandler(ctx, config = {}) {
               model,
               brainKind: brain.kind,
               running,
-              // runIds 原本来自 teamRuns（已删）；这里保留空数组维持接口形状，
-              // 前端要判「在不在跑」请用 running / /progress。
+              // 保留空数组维持接口形状；判「在不在跑」请用 running / /progress。
               runIds: [],
               // 会话日志写入成功过 → true；否则只是插件内存态（重启即失效）
               persisted: Boolean(entry && entry.persisted),
