@@ -4960,20 +4960,32 @@ export function createHandler(ctx, config = {}) {
             const outPath = path.join(IMAGE_DIR, outName)
             if (!existsSync(outPath)) {
               await mkdir(IMAGE_DIR, { recursive: true }).catch(() => {})
-              await new Promise((resolve) => {
+              // 2026-11-17：按顺序试几个时间点，**跳过几乎纯色的帧**。
+              // 起因：宣传片片头 3 秒就是白底一条线，抽第 1 秒当封面看着还是「空的」，
+              // 用户会以为视频没内容。这里抽 1s/8s/20s/40s，取第一个「有信息量」的。
+              const tryStamps = [1, 8, 20, 40]
+              const grabAt = (sec) => new Promise((resolve) => {
                 let child
                 try {
                   child = spawn('ffmpeg', [
-                    '-v', 'error', '-ss', '1', '-i', target,
+                    '-v', 'error', '-ss', String(sec), '-i', target,
                     '-frames:v', '1', '-vf', 'scale=960:-2',
                     '-y', outPath,
                   ], { stdio: 'ignore' })
-                } catch { resolve(); return }
-                child.on('error', () => resolve())
-                child.on('close', () => resolve())
-                // 兜底：8 秒还没抽完就别等了
-                setTimeout(resolve, 8000)
+                } catch { resolve(false); return }
+                child.on('error', () => resolve(false))
+                child.on('close', () => resolve(true))
+                setTimeout(() => resolve(false), 6000)
               })
+              for (const sec of tryStamps) {
+                const okGrab = await grabAt(sec)
+                if (!okGrab) continue
+                try {
+                  // PNG 小于 6KB 基本就是纯色底（实测白底一条线约 3KB）→ 换下一个时间点
+                  const size = statSync(outPath).size
+                  if (size > 6000) break
+                } catch { break }
+              }
             }
             try {
               const bytes = await readFile(outPath)
