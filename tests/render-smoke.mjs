@@ -96,7 +96,7 @@ const SEEDS = {
 
 let failed = 0
 for (const [name, state] of FIXTURES) {
-  for (const id of ['council', 'council-card', 'council-mode', 'council-progress', 'council-chat', 'council-tail']) {
+  for (const id of ['council', 'council-card', 'council-mode', 'council-chat', 'council-tail']) {
     const result = renderOne(id, state)
     if (result.error) {
       failed++
@@ -132,90 +132,13 @@ for (const [name, state] of FIXTURES) {
 // 刚开工 → 「准备中…」；无成员且超过 5 分钟 → 追加「（长任务，成员仅在结束时回报）」。
 // 四种情况都必须有「停止」按钮（点了要能发 /runs/cancel）。
 const NOW = Date.now()
-const PROGRESS_CASES = [
-  ['stage', { startedAt: NOW - 200_000, members: { __stage__: { name: '指挥', stage: '拆解中', at: NOW - 195_000 } } }, ['指挥 · 拆解中'], ['准备中…', '长任务']],
-  ['waiting-90s', { startedAt: NOW - 200_000, members: {} }, ['等待成员…（200s）'], ['准备中…', '长任务']],
-  ['fresh', { startedAt: NOW - 5_000, members: {} }, ['准备中…'], ['等待成员…', '长任务']],
-  ['long-task-400s', { startedAt: NOW - 400_000, members: {} }, ['等待成员…（400s）', '（长任务，成员仅在结束时回报）'], ['准备中…']],
-  // 看门狗：静默 > 3 分钟要在成员条目上显示「静默 Ns」（silentMs 由服务端 /progress 计算）
-  ['silent-4min', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 240_000, silentMs: 240_000 } } }, ['代码 · 执行中', '静默 240s'], ['准备中…']],
-  ['active-fresh', { startedAt: NOW - 600_000, members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 5_000, silentMs: 5_000 } } }, ['代码 · 执行中'], ['静默 ']],
-  // Bug 1 回归：已收尾（finishedAt）的成员不再显示静默，也不再显示一直涨的秒数
-  ['finished', { startedAt: NOW - 9_000_000, members: { m1: { name: '材质', kind: 'claude', stage: '完成', at: NOW - 6_400_000, lastActivity: NOW - 6_400_000, finishedAt: NOW - 6_300_000, silentMs: 6_400_000 } } }, ['材质 · 完成'], ['静默', '· 6400s']],
-]
-for (const [label, entry, need, forbid] of PROGRESS_CASES) {
-  try {
-    // entries 是数组：单条场景包一层；多行并行场景下面单独测
-    const result = renderOne('council-progress', payload.state, [Array.isArray(entry) ? entry : [entry], NOW, false, false])
-    if (result.error) throw result.error
-    const text = result.text
-    const missing = need.filter((m) => !text.includes(m))
-    if (missing.length) throw new Error('缺 ' + missing.join(' / ') + '（实际：' + text + '）')
-    const bad = forbid.filter((m) => text.includes(m))
-    if (bad.length) throw new Error('不该出现 ' + bad.join(' / ') + '（实际：' + text + '）')
-    console.log('ok   progress/' + label + ': ' + text)
-  } catch (error) {
-    failed++
-    console.log('FAIL progress/' + label + ': ' + (error && error.message))
-  }
-}
+// 2026-11-17：底部状态栏 council-progress 已被移除（与「进行中」卡片重复），
+// 对应的 PROGRESS_CASES 一组断言随之删除。
 
-// Bug 5 回归：并行的多次 delegate 必须**全部**显示（老代码只渲染 list[最后一条]，
-// 实测 3 条只看到 1 条）。这里用两条进行中条目（不同 callId、同 sessionId）验证：
-// ① 两行「小组」；② 成员芯片带任务摘要（「正在做什么」）；③ 每行都有「停止」。
-try {
-  const entryA = {
-    callId: 'call-a', sessionId: 'session-test-bound', startedAt: NOW - 30_000,
-    members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 26_000, task: '重构进度条渲染，支持并行多条条目' } },
-  }
-  const entryB = {
-    callId: 'call-b', sessionId: 'session-test-bound', startedAt: NOW - 12_000,
-    members: { m2: { name: '画师', kind: 'image', stage: '出图中', at: NOW - 9_000, task: '给新角色画一张立绘' } },
-  }
-  const result = renderOne('council-progress', payload.state, [[entryA, entryB], NOW, false, false])
-  if (result.error) throw result.error
-  const text = result.text
-  const rows = (text.match(/小组/g) || []).length
-  if (rows !== 2) throw new Error('应当 2 行「小组」，实际 ' + rows + ' 行（' + text + '）')
-  const need = ['代码 · 执行中', '画师 · 出图中', '重构进度条渲染，支持并行多条条目', '给新角色画一张立绘']
-  const missing = need.filter((m) => !text.includes(m))
-  if (missing.length) throw new Error('缺 ' + missing.join(' / ') + '（实际：' + text + '）')
-  // 摘要超过 24 字要截断加 …（服务端 60 字、前端只显示前 24 字）
-  const longTask = '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十'
-  const truncated = renderOne('council-progress', payload.state, [[
-    { callId: 'call-c', startedAt: NOW - 3_000, members: { m3: { name: '3D建模', stage: '建模中', task: longTask } } },
-  ], NOW, false, false])
-  if (truncated.error) throw truncated.error
-  if (!truncated.text.includes(longTask.slice(0, 24) + '…')) throw new Error('长任务摘要应截到 24 字 + …（实际：' + truncated.text + '）')
-  if (truncated.text.includes(longTask.slice(0, 25))) throw new Error('长任务摘要超过 24 字未截断（实际：' + truncated.text + '）')
-  console.log('ok   progress/parallel-two-entries: 2 行 · 任务摘要可见 · 停止按钮在 · ' + text)
-} catch (error) {
-  failed++
-  console.log('FAIL progress/parallel-two-entries: ' + (error && error.message))
-}
 
-// 2026-11-17：用户要求把「停止单个成员 / 停止本轮」两个按钮从底部状态栏
-// 移进「进行中」卡片（CouncilCardInner）。所以这里改为反向断言：
-// 底部状态栏**不应该**再出现「停止」按钮，但仍要能正常渲染两行进度。
-try {
-  const entry = { callId: 'call-stop', sessionId: 'session-test-bound', startedAt: NOW - 5_000,
-    members: { m1: { name: '代码', kind: 'deepseek', stage: '执行中', at: NOW - 4_000, task: '点一下停止' } } }
-  const rendered = renderOne('council-progress', payload.state, [[entry, { callId: 'call-stop2', sessionId: 'session-test-bound', startedAt: NOW - 3_000, members: {} }], NOW, false, false])
-  if (rendered.error) throw rendered.error
-  // 按**节点**判断（文本里的「停止」可能只是任务描述，不是按钮）
-  const findStopBtn = (node) => {
-    if (!node || typeof node !== 'object') return null
-    if (Array.isArray(node)) { for (const c of node) { const h = findStopBtn(c); if (h) return h } return null }
-    if (node.props && typeof node.props.onClick === 'function' && Array.isArray(node.children) && node.children[0] === '停止') return node
-    for (const c of (node.children || [])) { const h = findStopBtn(c); if (h) return h }
-    return null
-  }
-  if (findStopBtn(rendered.node)) throw new Error('底部状态栏仍有「停止」按钮节点（应已移进进行中卡片）')
-  console.log('ok   progress/stop-moved: 底部状态栏已无「停止」按钮节点（移入进行中卡片）')
-} catch (error) {
-  failed++
-  console.log('FAIL progress/stop-moved: ' + (error && error.message))
-}
+// 2026-11-17：底部状态栏已整块移除（用户要求，与「进行中」卡片重复）。
+// 并行进度/停止按钮相关的两组断言随之删除；终止能力现在只存在于「进行中」卡片。
+
 
 // Bug 4 回归：客户端双保险过滤 - 不同 sessionId 的 entry 不渲染
 // 模拟客户端过滤逻辑（useEffect 中的过滤）

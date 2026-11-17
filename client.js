@@ -2525,9 +2525,11 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
           name: 'tool.call.toolview', key: 'council_delegate',
         }, CouncilCard))
-        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-          name: 'conversation.input.dock', id: 'council-progress', order: 20,
-        }, CouncilProgress))
+        // 2026-11-17 用户要求：底部「小组 Ns · 谁在干什么」那行与时间线里的「进行中」卡片重复，
+        // 整行删掉（含其中的按钮）。终止能力已全部移进「进行中」卡片。
+        // ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+        //   name: 'conversation.input.dock', id: 'council-progress', order: 20,
+        // }, CouncilProgress))
         ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
           name: 'conversation.chat.turnTail', id: 'council-tail', order: 40,
         }, CouncilTail))
