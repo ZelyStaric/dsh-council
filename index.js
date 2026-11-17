@@ -5061,14 +5061,31 @@ export function createHandler(ctx, config = {}) {
           if (req.method === 'GET' && route === '/team/state') {
             const sessionId = normalizeSessionId(url.searchParams.get('sessionId') || '')
             if (!sessionId) return send(res, 400, { error: 'team/state 需要 sessionId' })
-            // ⚠️ 没有绑定小组的会话直接 400：这个端点会合并主会话时间线（要**解压会话日志**），
-            // 单人会话被轮询会每秒解压一次 7MB 日志，把对话内容挤到后面（2026-11-16 实测 1s 延迟）。
-            if (!groupForSession(state, sessionId)) return send(res, 400, { error: '会话没有绑定小组' })
+            // 没有绑定小组的会话：返回**空态 200**，而不是 400。
+            //
+            // 原来 400 会导致「刚发完消息、组还没建好」的那几秒里前端请求失败，
+            // 表现为团队 tab 一片空白，切到别处再切回来才显示（用户实测反馈）。
+            // 返回空态既不会解压会话日志（下面那段重活直接跳过），前端也能正常轮询到组建好为止。
+            if (!groupForSession(state, sessionId)) {
+              return send(res, 200, {
+                sessionId, model: '', brainKind: '', running: false, runIds: [],
+                persisted: false, messages: [], unbound: true,
+              })
+            }
             // 不能直接 teamSessions.get：那样会绕过「首次创建时从磁盘恢复」的逻辑（重启后消息就没了）
             const entry = teamSessionState(sessionId)
             // 大脑模型优先级：内存态 → 组级（持久化）→ 全局默认
             const group = groupForSession(state, sessionId)
-            const model = (entry && entry.model) || (group && group.brainModel) || teamModelDefault()
+            // 2026-11-17 修：这里原来读 `entry.model` / `group.brainModel` —— 都是「团队大脑」
+            // 时代的字段（那个功能已删，brainModel 基本没人写）。结果前端气泡标签显示的
+            // 是 teamModelDefault()（比如 claude-fable-5-2），**和指挥成员实际用的模型完全不符**
+            // （用户截图：小组页写 deepseek-v4.1-flash，团队页标签写 claude-fable-5-2）。
+            // 现在改成读指挥成员的真实配置，读不到才回落到旧逻辑。
+            const cmdMember = group ? memberWithRole(group, '指挥') : undefined
+            const model = (cmdMember && cmdMember.model)
+              || (group && group.brainModel)
+              || (entry && entry.model)
+              || teamModelDefault()
             const brain = resolveBrain(model)
             // 本会话还有没有未收尾的进度条目（running 的唯一来源）。
             const norm = (v) => String(v || '').replace(/^session-/, '')
@@ -5077,7 +5094,8 @@ export function createHandler(ctx, config = {}) {
             return send(res, 200, {
               sessionId,
               model,
-              brainKind: brain.kind,
+              // brainKind 同理：优先按**指挥成员**的 kind 报告，没有再回落到旧推断
+              brainKind: (cmdMember && cmdMember.kind) ? cmdMember.kind : brain.kind,
               running,
               // 保留空数组维持接口形状；判「在不在跑」请用 running / /progress。
               runIds: [],
