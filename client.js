@@ -2363,12 +2363,11 @@ window.__ModuleLoader__.load({
       return h('div', {
         style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: 12, gap: 8, overflow: 'hidden' },
       },
-      /* 工具栏 */
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: '0 0 auto' } },
-        // 2026-11-17 用户要求：删掉「团队 / N 条消息 / 指挥模型在小组页改」这两行，
-        // 只保留运行时的「停止」按钮（没有就在右侧留白）
-        h('span', { style: { flex: 1 } }),
-        running ? h(Button, { onClick: stop }, '停止') : null),
+      // 工具栏已整体移除（2026-11-17）：
+      //  · 「团队 / N 条消息 / 指挥模型在小组页改」早就删了；
+      //  · 这里的「停止」与「进行中」卡片里的那个**重复**（用户截图指出两个停止按钮）；
+      //  · 空 div 也没有存在意义。
+      // 终止入口现在只有一处：进行中卡片的「停止」+ 每个成员行的「✕」。
       /* 时间线 */
       h('div', {
         ref: (node) => { scrollerRef.current = node },
