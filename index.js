@@ -2908,6 +2908,9 @@ function apiSettings(config) {
     imageKey: own.imageKey || config.imageApiKey || '',
     codexToken: own.codexToken || '',
     codexBase: rootUrl(own.codexBase || config.codexBaseUrl || '') || defaultBase('openai', own.codexToken),
+    // 2026-11-17 补：gemini 的两个字段原来根本不存在（envForLegacy 引用了就会拿到 undefined）
+    geminiKey: own.geminiKey || config.geminiApiKey || '',
+    geminiBase: rootUrl(own.geminiBase || config.geminiBaseUrl || ''),
   }
 }
 
@@ -3063,12 +3066,29 @@ async function envFor(kindOrMember, config) {
 }
 
 async function envForLegacy(kind, config) {
+  // 2026-11-17：**四条腿都要覆盖**。原实现只有 claude 分支，其余一律掉进 codex 的
+  // CODEX_HOME —— gemini 成员拿不到 GEMINI_API_KEY、deepseek 更是完全不该有 CLI env。
+  // 平时 providerByKind 都配着，走不到这里；但一旦某个 provider 缺失，
+  // 就会把错的 env 塞给 CLI（表现为「模型不存在 / 未登录」这类误导性错误）。
   if (kind === 'claude') {
     const settings = apiSettings(config)
     return Object.assign({
       ANTHROPIC_BASE_URL: rootUrl(settings.claudeBase) || undefined,
       ANTHROPIC_API_KEY: settings.claudeKey || undefined,
     }, proxyEnv(config))
+  }
+  if (kind === 'gemini') {
+    const settings = apiSettings(config)
+    return Object.assign({
+      GEMINI_API_KEY: settings.geminiKey || undefined,
+      GOOGLE_GEMINI_BASE_URL: rootUrl(settings.geminiBase) || undefined,
+      GEMINI_CLI_TRUST_WORKSPACE: 'true',
+    }, proxyEnv(config))
+  }
+  if (kind === 'deepseek') {
+    // deepseek 跑在 DSH 自己的子会话里，不经过任何 CLI → 不需要 env。
+    // 绝不能返回 CODEX_HOME（那是给 codex CLI 用的）。
+    return Object.assign({}, proxyEnv(config))
   }
   const home = await ensureCodexHome(config)
   return Object.assign({}, home ? { CODEX_HOME: home } : {}, proxyEnv(config))
@@ -3550,9 +3570,12 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   //  · council-readonly 给 read/readImage、不给 write/edit、不给 bash；
   //  · 可动手时退回 standard（全能力）。
   // **只影响指挥**：普通 deepseek 成员仍走 standard（member.__preset 默认 undefined）。
+  // __preset 只对 **deepseek 腿**有意义（它跑在 DSH 自己的子会话里）。
+  // claude/codex/gemini 是外部 CLI，不读 DSH preset —— 给它们传 'minimal' 是噪音，
+  // 它们的只读由 noTools（--disallowedTools / --sandbox / --approval-mode）保证。
   const commanderPreset = commander.kind === 'deepseek'
     ? (brainOpen ? 'standard' : 'council-readonly')
-    : 'minimal'
+    : undefined
   const commanderOpts = {
     convId: commander.convId,
     __preset: commanderPreset,
@@ -8135,8 +8158,15 @@ async function ensureWorkspace(ctx, group) {
  *   · deepseek → DSH 子会话继承主会话 profile，做不到，直接返回空
  */
 function mcpArgsForMember(member) {
-  const want = Array.isArray(member && member.mcpServers) ? member.mcpServers.filter(Boolean) : []
-  if (!want.length) return { args: [] }
+  // 2026-11-17 修：区分「未设置」与「显式空数组」。
+  //   mcpServers: undefined → 不限制（跟随框架全局配置）  ← 普通成员
+  //   mcpServers: []        → **零 MCP**（全部禁用）        ← 只派活的指挥
+  //   mcpServers: ['x']     → 只挂 x
+  // 原来的 `if (!want.length) return` 把后两种混为一谈，
+  // 于是「指挥只派活 → 零 MCP」这条一直没生效，指挥照样加载了全套 MCP。
+  const hasExplicit = member && Array.isArray(member.mcpServers)
+  const want = hasExplicit ? member.mcpServers.filter(Boolean) : []
+  if (!hasExplicit) return { args: [] }
   const kind = member && member.kind
   let available = { codex: [], gemini: [], claude: [] }
   try { available = listMcpServers() } catch { /* 拿不到清单就退化成不限制 */ return { args: [] } }
