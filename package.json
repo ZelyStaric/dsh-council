@@ -1,6 +1,6 @@
 {
   "name": "@zelystaric/dsh-council",
-  "version": "0.13.39",
+  "version": "0.13.40",
   "type": "module",
   "exports": {
     ".": "./index.js",
