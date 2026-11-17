@@ -2396,8 +2396,11 @@ window.__ModuleLoader__.load({
               key: 'steps',
               style: Object.assign({}, styles.card, { marginTop: 10, padding: '8px 10px', maxWidth: '92%' }),
             },
-            h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 6, letterSpacing: 0.3, display: 'flex', alignItems: 'center', gap: 8 } },
-              h('span', null, (running ? '● ' : '') + '进行中'),
+            // 2026-11-17：`opacity: 0.7` 原来挂在**整行**上，红色「停止」按钮是它的子元素，
+            // 于是按钮也被压到 70% 透明——看起来像"不可按"（用户截图指出）。
+            // CSS 的 opacity 会继承且子元素无法恢复，所以只让文字淡，容器别淡。
+            h('div', { style: { fontSize: 11, marginBottom: 6, letterSpacing: 0.3, display: 'flex', alignItems: 'center', gap: 8 } },
+              h('span', { style: { opacity: 0.7 } }, (running ? '● ' : '') + '进行中'),
               h('span', { style: { flex: 1 } }),
               // 终止整轮（2026-11-17 用户要求：放进「进行中」卡片）
               // ⚠️ 条件不能用 `running`：它读的是 team.running（/team/state），
@@ -2419,7 +2422,7 @@ window.__ModuleLoader__.load({
                   style: {
                     cursor: 'pointer', padding: '1px 9px', borderRadius: 999,
                     fontSize: 11, fontWeight: 600, color: '#fff',
-                    background: '#e5484d', border: '1px solid #c93a3f', opacity: 0.95,
+                    background: '#e5484d', border: '1px solid #c93a3f', opacity: 1,
                     userSelect: 'none',
                   },
                 }, '停止')
