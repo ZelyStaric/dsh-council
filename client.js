@@ -2362,7 +2362,10 @@ window.__ModuleLoader__.load({
               h('span', null, (running ? '● ' : '') + '进行中'),
               h('span', { style: { flex: 1 } }),
               // 终止整轮（2026-11-17 用户要求：放进「进行中」卡片）
-              running
+              // ⚠️ 条件不能用 `running`：它读的是 team.running（/team/state），
+              // 而进度条读的是 /progress——两者不同步时（实测常见）按钮就不显示。
+              // 只要**这个卡片出现了**（有 activeSteps 或在等指挥），就说明有活在跑。
+              (activeSteps.length || waitingForCommander || running)
                 ? h('span', {
                   title: '停止本轮所有成员',
                   onClick: async () => {
