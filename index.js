@@ -4848,7 +4848,8 @@ export function createHandler(ctx, config = {}) {
               .filter(Boolean)
             const inAllowed = allowedRoots.some((root) => abs === root || abs.startsWith(root + path.sep))
             if (!inAllowed) {
-              return send(res, 403, { error: '只允许读取 HOME / /tmp 下的文件（当前：' + abs + '）' })
+              // BUG-3 修：不把完整绝对路径回给客户端（信息泄漏，虽然低危）
+              return send(res, 403, { error: '只允许读取 HOME 或 /tmp 下的文件' })
             }
             if (!existsSync(abs)) return send(res, 404, { error: '文件不存在' })
             let stat = null
@@ -5212,6 +5213,9 @@ function mandateText(group) {
     '· **不要用 assignments** —— 拆解是「指挥」成员的职责，不是你的。',
     '  即使任务看起来很简单、只涉及一个成员，也必须走 request：不然会出现「这次没经过指挥」，用户看不到拆解过程。',
     '  唯一例外是用户明确说了「直接让 X 做 / 不用审」（那种情况带 direct:true 直派）。',
+    '· **已经用 request 派过的任务，不要在收到回执后再用 assignments 直派一次** ——',
+    '  那会在团队时间线里出现「图都出来了才说派给谁」的错位（2026-11-17 用户实测）。',
+    '  只有用户**新**说「直接让某人做」时才用直派。',
     '你的工具面**只有 council_***（其余工具已被硬性禁用，调用会被拒绝并计入越权记录）。',
     '**直派**：用户说「直接让某成员做 X」「不用审」「跳过审核/指挥」时，用 council_delegate 并带 direct:true ——',
     '  这会跳过指挥拆解与全部审核，只要那个成员的产出。用户没这么说时，一律走正常流程（request 交给指挥）。',

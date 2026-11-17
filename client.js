@@ -1462,8 +1462,15 @@ window.__ModuleLoader__.load({
             onClick: busy || !bound ? undefined : switchToSolo,
           }, '单人'),
           h('span', {
-            style: segStyle(bound || pendingGroup),
-            title: bound ? '当前已在小组模式' : '切到小组模式：消息交给指挥拆解派活',
+            // BUG-2 修（2026-11-17）：pendingGroup 只是「hero 里预选过」，此时还没有组、
+            // tab 也不会显示。把它画成「已选中」会让用户以为在小组模式却找不到小组页。
+            // 所以选中态一律以 bound 为准；pendingGroup 用虚线边框表示「预选」。
+            style: Object.assign(segStyle(bound), pendingGroup && !bound ? {
+              border: '1px dashed var(--dsw-alias-border-l1)',
+            } : {}),
+            title: bound
+              ? '当前已在小组模式'
+              : (pendingGroup ? '已预选小组模式：发送第一条消息后自动建组' : '切到小组模式：消息交给指挥拆解派活'),
             onClick: busy || bound ? undefined : switchToGroup,
           }, '小组'),
         ),
