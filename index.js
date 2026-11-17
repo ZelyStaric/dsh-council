@@ -4391,7 +4391,8 @@ export function createHandler(ctx, config = {}) {
                   const kindChanged = body.kind !== undefined && body.kind !== member.kind
                   // 改了模型就按模型重新推框架（模型名无效 → 400，不静默改）
                   if (typeof body.model === 'string' && body.model.trim()) {
-                    const inferred = inferKindFromModel(body.model)
+                    // provider 可能是本次一起改的，也可能是已存的 → 合并后传入
+                    const inferred = inferKindFromModel(body.model, body.provider !== undefined ? body.provider : member.provider)
                     if (!inferred) return send(res, 400, { error: unknownModelError(body.model, modelCatalogIds()) })
                     body.kind = inferred
                   }
@@ -4425,7 +4426,7 @@ export function createHandler(ctx, config = {}) {
               // 绝不静默兜底成某个框架（那会跑到错误的腿上，比报错更难查）。
               const wantModel = String(body.model || '').trim()
               if (wantModel) {
-                const inferred = inferKindFromModel(wantModel)
+                const inferred = inferKindFromModel(wantModel, String(body.provider || '').trim() || undefined)
                 if (!inferred) return send(res, 400, { error: unknownModelError(wantModel, modelCatalogIds()) })
                 body.kind = inferred
               }
@@ -5561,7 +5562,7 @@ const STAFF_KINDS = Object.keys(STAFF_MODELS)
  *
  * 返回 null 时**必须报错**，不要静默兜底成 claude —— 那会跑到错误的腿上，比直接报错更难查。
  */
-function inferKindFromModel(model) {
+function inferKindFromModel(model, providerId) {
   const name = String(model || '').trim().toLowerCase()
   if (!name) return null
   if (name.startsWith('gpt-image') || name.startsWith('nano-banana') || name.startsWith('nano_banana')) return 'image'
@@ -5569,6 +5570,21 @@ function inferKindFromModel(model) {
   if (name.startsWith('gpt') || /^o\d/.test(name)) return 'codex'
   if (name.startsWith('deepseek')) return 'deepseek'
   if (name.startsWith('gemini')) return 'gemini'
+  // 模型名没有前缀约定（如 astra）→ **按 provider 推断 CLI**（2026-11-17 用户要求）
+  const byProvider = inferKindFromProvider(providerId)
+  if (byProvider) return byProvider
+  return null
+}
+
+/** 按 provider id 推断该走哪条 CLI 腿（模型名认不出时的兜底）。 */
+function inferKindFromProvider(providerId) {
+  const id = String(providerId || '').trim().toLowerCase()
+  if (!id) return null
+  if (/claude|anthropic/.test(id)) return 'claude'
+  if (/deepseek/.test(id)) return 'deepseek'
+  if (/gemini|google/.test(id)) return 'gemini'
+  if (/image/.test(id)) return 'image'
+  if (/gpt|openai|codex/.test(id)) return 'codex'
   return null
 }
 

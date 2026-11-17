@@ -506,6 +506,17 @@ window.__ModuleLoader__.load({
         const role = roles.find((r) => r.id === member.roleId)
         // 提供商下拉：来自 DSH 设置里的 provider（截图那种列表）+ 「出图（image）」
         const inferKind = (providerId) => {
+          // 2026-11-17：**先按 provider id 判**，再看它下面的模型列表。
+          // 起因：像 astra 这种模型名没有前缀约定，光看模型列表会落到兜底 codex，
+          // 于是「挂在 relay-claude 下却跑 Codex CLI」——腿跑错了还不报错。
+          // 语义应该是「模型跟着厂商走 CLI」：provider 是 Anthropic 协议 → claude，等等。
+          const id = String(providerId || '').toLowerCase()
+          if (/claude|anthropic/.test(id)) return 'claude'
+          if (/deepseek/.test(id)) return 'deepseek'
+          if (/gemini|google/.test(id)) return 'gemini'
+          if (/image/.test(id)) return 'image'
+          if (/gpt|openai|codex/.test(id)) return 'codex'
+          // provider 名字也认不出 → 退回看它的模型列表
           const p = (providers || []).find((x) => x.id === providerId)
           const models = (p && p.models) || []
           if (models.some((m) => /^claude/i.test(m))) return 'claude'
