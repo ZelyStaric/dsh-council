@@ -1105,6 +1105,11 @@ function configView(config, source) {
     imageTimeoutSeconds: imageTimeoutSeconds(config),
     // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
     authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
+    // 2026-11-18：可用模型白名单（按 provider 分组勾选的结果）。
+    // ⚠️ 必须在这里返回 —— configView 是**白名单视图**，不在这里列出的字段
+    // 前端永远读不到（表现为「勾选框点了闪一下又弹回去」：
+    // POST 其实成功了，但 GET/回包里的 config 没有这个字段，重渲染时又被重置）。
+    enabledModels: Array.isArray(own.enabledModels) ? own.enabledModels.slice() : [],
     // 用户维护的模型定位表（空 = 用内置默认）
     modelGuide: String(own.modelGuide || ''),
     modelGuideDefault: MODEL_GUIDE.map(([id, desc]) => '- ' + id + '：' + desc).join('\n'),
