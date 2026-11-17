@@ -2135,6 +2135,10 @@ window.__ModuleLoader__.load({
               callId,
               memberId: id,
               finished: Boolean(m.finishedAt),
+              // 2026-11-17：成员「最近一行输出」。服务端 /progress 一直有 tailText，
+              // 但这个 row 没接出来 → 「进行中」卡片只显示阶段名，看不到成员在干什么。
+              // （之前我把它加进了 CouncilCardInner 那个**工具卡片**，压根不是这个卡片。）
+              tailText: m.tailText ? String(m.tailText) : '',
             })
           }
         }
@@ -2429,27 +2433,36 @@ window.__ModuleLoader__.load({
                 : null),
             // 有成员阶段 → 逐条列出（DSH 风格的执行步骤）
             activeSteps.length
-              ? activeSteps.map((st, i) => h('div', {
-                key: 'st' + i,
-                style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '2px 0' },
-              },
-              h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
-              h('span', { style: { fontWeight: 600, minWidth: 48 } }, st.name),
-              h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, st.stage),
-              h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs)),
-              // 只停这个成员
-              st.finished
-                ? null
-                : h('span', {
-                  title: '只停这个成员',
-                  onClick: async () => {
-                    try {
-                      await call('/runs/cancel', { member: st.memberId, callId: st.callId })
-                      notifyCouncilChange()
-                    } catch { /* ignore */ }
-                  },
-                  style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 4px', flexShrink: 0 },
-                }, '✕')))
+              ? activeSteps.map((st, i) => h('div', { key: 'st' + i, style: { padding: '2px 0' } },
+                // 第一行：成员 / 阶段 / 静默时长 / ✕
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
+                  h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),
+                  h('span', { style: { fontWeight: 600, minWidth: 48 } }, st.name),
+                  h('span', { style: { opacity: 0.8, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, st.stage),
+                  h('span', { style: { opacity: 0.55, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fmtSec(st.silentMs)),
+                  // 只停这个成员
+                  st.finished
+                    ? null
+                    : h('span', {
+                      title: '只停这个成员',
+                      onClick: async () => {
+                        try {
+                          await call('/runs/cancel', { member: st.memberId, callId: st.callId })
+                          notifyCouncilChange()
+                        } catch { /* ignore */ }
+                      },
+                      style: { cursor: 'pointer', color: '#e5484d', fontWeight: 700, padding: '0 4px', flexShrink: 0 },
+                    }, '✕')),
+                // 第二行：最近一行输出（2026-11-17）——能看出它在跑什么、卡没卡
+                st.tailText
+                  ? h('div', {
+                    style: {
+                      fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 1, marginLeft: 18,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    },
+                    title: st.tailText,
+                  }, '› ' + st.tailText)
+                  : null))
               // 还没进入成员阶段 → 说明指挥在校解，给一句更具体的话
               : [h('div', { key: 'decompose', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
                 h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: 10 } }, '●'),

@@ -844,6 +844,21 @@ function sessionIdOf(exec) {
  */
 const memberTails = new Map()
 
+/**
+ * 给某个成员写一行「最近输出」（前端「进行中」卡片的滚动行）。
+ *
+ * CLI 腿（claude/codex/gemini）由 run() 的 stdout 回调自动写，
+ * 但 image / deepseek 不走子进程，没有 stdout —— 需要它们自己调这个。
+ */
+function setMemberTail(memberName, text) {
+  try {
+    const name = String(memberName || '').trim()
+    const line = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!name || !line) return
+    memberTails.set(name, { at: Date.now(), text: line.slice(0, 120) })
+  } catch { /* ignore */ }
+}
+
 /** 从任意 JSON 结构里递归挖出第一段文本（claude/codex 的 stream-json 结构各不相同）。 */
 function deepTextOf(node, depth = 0) {
   if (depth > 5 || node === null || node === undefined) return ''
@@ -1652,6 +1667,8 @@ async function runImage(member, prompt, config, options = {}) {
   }
   if (!token) return { ok: false, text: '', error: 'no image api key configured', usage: null }
   const model = member.model || 'gpt-image-2.6-flare'
+  const tailName = member.name || '画师'
+  setMemberTail(tailName, '准备出图请求（' + model + '）…')
   // 出图是普通 HTTP 请求、没有流式输出，没法用「静默看门狗」；
   // 保留一个宽松的请求超时（默认 240s，config.imageTimeoutSeconds 可改）。
   const imageTimeoutMs = imageTimeoutSeconds(config) * 1000
@@ -1667,6 +1684,7 @@ async function runImage(member, prompt, config, options = {}) {
       form.append('n', '1')
       form.append('size', '1024x1024')
       form.append('image', new Blob([bytes], { type: 'image/png' }), 'reference.png')
+      setMemberTail(tailName, '已提交参考图重绘请求，等待出图…')
       const response = await fetch(base + '/v1/images/edits', {
         method: 'POST',
         headers: { authorization: 'Bearer ' + token },
@@ -1688,7 +1706,8 @@ async function runImage(member, prompt, config, options = {}) {
     }
   }
   try {
-    const response = await fetch(base + '/v1/images/generations', {
+    setMemberTail(tailName, '已提交出图请求，等待出图…')
+      const response = await fetch(base + '/v1/images/generations', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
       body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' }),
@@ -1697,12 +1716,14 @@ async function runImage(member, prompt, config, options = {}) {
     const data = await response.json()
     const b64 = data?.data?.[0]?.b64_json
     if (!response.ok || !b64) {
+      setMemberTail(tailName, '出图失败：' + String(JSON.stringify(data)).slice(0, 80))
       return { ok: false, text: '', error: JSON.stringify(data).slice(0, 400), usage: null }
     }
     const name = randomUUID() + '.png'
     await mkdir(IMAGE_DIR, { recursive: true })
     const file = path.join(IMAGE_DIR, name)
     await writeFile(file, Buffer.from(b64, 'base64'))
+    setMemberTail(tailName, '图片已生成（' + model + '）')
     return { ok: true, text: '已生成图片（' + model + '）', image: '/council/api/image/' + name, file, usage: { input: 0, output: 0, costUsd: 0 } }
   } catch (error) {
     return { ok: false, text: '', error: String(error?.message ?? error), usage: null }
@@ -1869,6 +1890,29 @@ async function namedComposition(ctx, presetId) {
  * 只有真正收到 assistant 消息/输出才算活动，纯 status 变化不刷新心跳。
  * 这样可以防止请求挂死时仍因 status 变化而刷新 lastActivity，导致看门狗永远不触发。
  */
+/**
+ * 从 deepseek 子会话的事件流里取**最近一次工具调用**的名字。
+ *
+ * 用途：deepseek 腿（审校/代码等）跑在 DSH 自己的子会话里，没有 stdout，
+ * 所以「进行中」卡片看不到它在干什么。这里把工具名当「最近一行输出」写进去，
+ * 前端就能显示「正在调用 bash」「正在读取 xxx」。
+ *
+ * 成本：sessionEvents 读的是内存快照（snapshotEvents），不是日志文件。
+ */
+function lastToolOf(agent) {
+  if (!agent || !agent.session) return ''
+  try {
+    const events = sessionEvents(agent.session)
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i]
+      if (!e || e.type !== 'tool/call') continue
+      const name = String((e.data && (e.data.name || e.data.tool || e.data.toolName)) || '')
+      if (name) return name
+    }
+  } catch { /* ignore */ }
+  return ''
+}
+
 function agentActivityStamp(agent) {
   if (!agent) return ''
   let count = 0
@@ -2407,6 +2451,7 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
   let cancelled = false
   let maxDurationFired = false
   let lastSeamStamp = ''
+  let lastSeamTool = ''
   const controller = new AbortController()
   const cancelSignal = signalFor(callId)
   const activationSignal = cancelSignal ? AbortSignal.any([controller.signal, cancelSignal]) : controller.signal
@@ -2444,6 +2489,13 @@ async function runDeepseekViaSeam(ctx, member, prompt, config, parent, timeoutMs
       lastSeamStamp = stamp
       watchdog.touch(now)
       if (onActivity) { try { onActivity() } catch { /* ignore */ } }
+    }
+    // 2026-11-17：把「最近一次工具调用」写进成员 tail，前端「进行中」卡片就能看到
+    // 这个 deepseek 成员在干什么（它没有 stdout，否则永远只有阶段名）。
+    const tool = lastToolOf(agent)
+    if (tool && tool !== lastSeamTool) {
+      lastSeamTool = tool
+      setMemberTail(member.name, '正在调用 ' + tool)
     }
     if (watchdog.tick(now) === 'idle-timeout') {
       idleFired = true
