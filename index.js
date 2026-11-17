@@ -903,17 +903,24 @@ function lastLineOf(chunk) {
       .replace(/\r/g, '\n')
     const lines = clean.split('\n').map((x) => x.trim()).filter(Boolean)
     if (!lines.length) return ''
-    const last = lines[lines.length - 1]
-    if (last.startsWith('{')) {
-      try {
-        const obj = JSON.parse(last)
-        const t = deepTextOf(obj)
-        // JSON 里挖不出人话（心跳/元数据）→ 当没动静，别把整个 JSON 糊到界面上
-        if (!t || !t.trim()) return ''
-        return t.replace(/\s+/g, ' ').trim().slice(0, 120)
-      } catch { /* 不完整 JSON（跨 chunk），按普通文本处理 */ }
+    // 2026-11-17 修：**倒序扫描所有行，取第一个能提取出文本的**。
+    // 原来只看最后一行 —— 而 claude/codex 的 stdout 是「每行一个 JSON 事件」，
+    // 一个 chunk 里常有十几行，最后一行往往是 system/心跳（没有文本），
+    // 于是前面那些真正带内容的 assistant 事件全被丢掉，
+    // 结果 tail 长期为空 → 界面上永远看不到「指挥在干什么」。
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i]
+      if (line.startsWith('{')) {
+        try {
+          const obj = JSON.parse(line)
+          const t = deepTextOf(obj)
+          if (t && t.trim()) return t.replace(/\s+/g, ' ').trim().slice(0, 120)
+        } catch { /* 半个 JSON（跨 chunk），跳过这一行 */ }
+        continue
+      }
+      return line.replace(/\s+/g, ' ').slice(0, 120)
     }
-    return last.replace(/\s+/g, ' ').slice(0, 120)
+    return ''
   } catch { return '' }
 }
 
@@ -5069,7 +5076,8 @@ export function createHandler(ctx, config = {}) {
                   for (const tv of memberTails.values()) {
                     if (tv && Number(tv.at) > bestAt) { bestAt = Number(tv.at); tail = String(tv.text || '') }
                   }
-                  if (tail && Date.now() - bestAt > 120000) tail = ''
+                  // 10 分钟前的输出才丢弃（后台任务可能长时间没新行，2 分钟太激进）
+                  if (tail && Date.now() - bestAt > 600000) tail = ''
                 } catch { /* ignore */ }
                 return {
                   runId: job.runId, status: job.status,
