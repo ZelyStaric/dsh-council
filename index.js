@@ -3734,6 +3734,12 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
   await modelCatalog(ctx, config).catch(() => {})
   const prompt = [
     '你是这个小组的指挥。把用户的要求拆成给成员的自包含任务。',
+    // 2026-11-17：明确告知依赖机制。起因：审校/动画这类「验收/汇总」的活在并行执行下
+    // 会和产出类成员同时开跑，东西还没做出来它就先判失败（用户实测：审校 0 秒报
+    // 「指定目录不存在，尚不具备独立验收条件」）。
+    '每条任务可以带 after 字段，列出它**必须等哪些成员先完成**（填成员名数组）。',
+    '有前后依赖的任务务必写 after，否则会并行跑、结果不可用。典型：验收/审校/合成/汇总类任务要等产出类完成。',
+    '彼此无依赖的任务不要写 after，让它们并行跑更快。',
     rosterText(group),
     catalogText(),
     `补员/换模型时按「模型定位速查」选；一个任务只用一个主力模型；${MODEL_GUIDE_TIEBREAK}。`,
@@ -3744,7 +3750,8 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     '也不要因为职位描述里提到某个工具就只准用那个工具（如果任务更适合别的方案，就让成员用它）。',
     '',
     '只输出一个 JSON 对象，不要其它文字：',
-    '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务：背景 + 目标 + **具体实现方式/工具** + 产出格式 + 验收标准"}]}',
+    '{"staffing":[{"role":"职位名","kind":"codex|claude|deepseek|image","model":"模型id"}],"assignments":[{"member":"成员id、名字或职位名","task":"自包含任务：背景 + 目标 + **具体实现方式/工具** + 产出格式 + 验收标准","after":["必须先完成的成员名"]}]}',
+    '（after 可省略 = 第一批就开始跑。有依赖时**一定要写**。）',
     '',
     '[用户要求]',
     request,
@@ -4121,7 +4128,15 @@ function parsePlan(text) {
       staffing: Array.isArray(value.staffing) ? value.staffing : [],
       assignments: value.assignments
         .filter((a) => a && typeof a.member === 'string' && typeof a.task === 'string')
-        .map((a) => ({ member: a.member, task: a.task })),
+        .map((a) => {
+          const after = Array.isArray(a.after)
+            ? a.after.map((x) => String(x || '').trim()).filter(Boolean)
+            : []
+          // 2026-11-17：支持任务依赖。不写 after = 第一批（全并行，向后兼容）。
+          return after.length
+            ? { member: a.member, task: a.task, after }
+            : { member: a.member, task: a.task }
+        }),
     }
   } catch { return null }
 }
@@ -7505,7 +7520,18 @@ function makeDelegateTool(ctx, config, group) {
         try {
           if (liveTeamSid && groupForSession(state, liveTeamSid)) liveTeamEntry = teamSessionState(liveTeamSid)
         } catch { liveTeamEntry = null }
-        const results = await Promise.all(assignments.map(async (item) => {
+        /**
+         * 2026-11-17：**成员可以有前置依赖**（assignments[].after = ['全栈','画师']）。
+         *
+         * 起因（用户实测）：指挥拆了 5 个任务——全栈/画师/配乐/动画/审校。
+         * 审校的活是"验收交付物"，可它跟其它成员**同时**开跑，那时目录还没建出来，
+         * 于是它 0 秒就判「指定目录不存在，尚不具备独立验收条件」——
+         * 东西还没做，审校先失败了。动画同理（被前置交付阻塞）。
+         *
+         * 现在按批次跑：每批只放「所有 after 都已成功完成」的成员，同批内仍然并行。
+         * 没写 after 的成员全部落在第一批 → **行为和以前完全一致**（向后兼容）。
+         */
+        const runOneAssignment = async (item) => {
           const member = resolveMember(live, item.member)
           if (!member) return { name: String(item.member), kind: 'unknown', ok: false, error: 'member not found' }
           const briefParts = []
@@ -7613,7 +7639,57 @@ function makeDelegateTool(ctx, config, group) {
             ...result.reason === undefined ? {} : { reason: result.reason },
             ...SILENT_KILL_REASONS.has(result.reason) ? { idleTimeout: true } : {},
           }
-        }))
+        }
+
+        // 2026-11-17 兜底：**验收/汇总类角色**如果指挥没写 after，自动让它们等所有产出类成员。
+        // 只靠提示词不够可靠（指挥经常忘记），这一层保证「东西还没做就判失败」不再发生。
+        // 判定按职位名关键词，命中才处理；产出类成员不需要任何改动。
+        try {
+          const reviewerWords = ['审校', '审核', '验收', '终审', '汇总', '检查', '质检']
+          const isReviewer = (a) => {
+            const m = resolveMember(live, a && a.member)
+            const role = m ? roleOf(m) : null
+            const hay = [String((a && a.member) || ''), String(role && role.name || ''), String(m && m.name || '')].join(' ')
+            return reviewerWords.some((w) => hay.includes(w))
+          }
+          const producers = assignments.filter((a) => !isReviewer(a))
+          if (producers.length && producers.length < assignments.length) {
+            for (const a of assignments) {
+              if (!isReviewer(a)) continue
+              if (Array.isArray(a.after) && a.after.length) continue
+              a.after = producers.map((p) => {
+                const m = resolveMember(live, p.member)
+                return m ? m.name : String(p.member)
+              })
+            }
+          }
+        } catch { /* 兜底失败不影响主流程 */ }
+        // 分批执行：每批只放「after 全部已完成」的成员，批内并行
+        const results = []
+        const finishedNames = new Set()
+        let pending = assignments.slice()
+        let guardRounds = 0
+        while (pending.length && guardRounds < assignments.length + 2) {
+          guardRounds += 1
+          const batch = pending.filter((a) => {
+            const deps = Array.isArray(a && a.after) ? a.after.map(String) : []
+            return deps.every((d) => finishedNames.has(d))
+          })
+          if (!batch.length) {
+            // 依赖成环 / 依赖了不存在的成员 → 剩下的全放一批跑，绝不卡死
+            batch.push(...pending)
+          }
+          const batchSet = new Set(batch)
+          pending = pending.filter((a) => !batchSet.has(a))
+          const settled = await Promise.all(batch.map(runOneAssignment))
+          results.push(...settled)
+          for (const item of batch) {
+            const m = resolveMember(live, item.member)
+            finishedNames.add(String(item.member))
+            if (m) finishedNames.add(String(m.name))
+          }
+        }
+
         // 终态（含失败原因）已由 callMember 写；这里只给「没走到 callMember」的条目兜底补
         // finishedAt，绝不覆盖已有终态（旧实现无条件写「完成」，会把「终审（指挥）」洗成假完成）。
         for (const item of assignments) {
