@@ -3800,7 +3800,7 @@ async function callMemberImpl(ctx, member, task, config, group, styleOverride, p
   let reworkFailed = false
 
   if (result.ok) {
-    // v0.4 P3：审校与指挥**并行**（Wall clock = max 而不是 sum）
+    // 审核链是**串行**的：自审 → 初审 → 指挥终审（2026-11-17 用户口径：审核之间不存在并行关系）
     await runReviewChain(ctx, group, member, task, result, config, styleOverride, parent, brief, callId, review, requirePrelim, requireCommander, onStage)
     acceptance = acceptanceOf()
 
@@ -5010,13 +5010,20 @@ export function createHandler(ctx, config = {}) {
             const group = groupForSession(state, sessionId)
             const model = (entry && entry.model) || (group && group.brainModel) || teamModelDefault()
             const brain = resolveBrain(model)
-            const running = [...teamRuns.values()].filter((slot) => slot.sessionId === sessionId)
+            // 2026-11-17 修：原来这里读 teamRuns（只在已删除的 /team/send 里写入）→ **running 永远 false**，
+            // 前端据此判断「是不是在跑」全都会错（停止按钮不显示、等待卡片判断失真）。
+            // 现在看真实进度表：本会话还有没有未收尾的条目。
+            const norm = (v) => String(v || '').replace(/^session-/, '')
+            const runningNow = [...progressMap.values()].filter((e) => e && !e.finishedAt && norm(e.sessionId) === norm(sessionId))
+            const running = runningNow.length > 0
             return send(res, 200, {
               sessionId,
               model,
               brainKind: brain.kind,
-              running: running.length > 0,
-              runIds: running.map((slot) => slot.runId),
+              running,
+              // runIds 原本来自 teamRuns（已删）；这里保留空数组维持接口形状，
+              // 前端要判「在不在跑」请用 running / /progress。
+              runIds: [],
               // 会话日志写入成功过 → true；否则只是插件内存态（重启即失效）
               persisted: Boolean(entry && entry.persisted),
               // 时间线 = 主会话的「你 / 助手」消息 + 本组记录的「成员回执」（2026-11-16 合并）

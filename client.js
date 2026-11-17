@@ -664,7 +664,6 @@ window.__ModuleLoader__.load({
         }, text)
         return h('div', { style: Object.assign({}, styles.card, { marginBottom: 12 }) },
           h('strong', null, '团队选项'),
-          // 「需要指挥审核」在下方「验收策略」里已有同名开关，这里不再重复（2026-11-16 用户指出重复）
           row('严格审核',
             '任一审核方不通过即强制不通过；关掉则冲突时以指挥为准',
             check(cur.strictReview !== false, (v) => saveTeam({ strictReview: v }))),
