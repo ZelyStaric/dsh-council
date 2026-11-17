@@ -4891,13 +4891,10 @@ export function createHandler(ctx, config = {}) {
                 }
               }
             }
-            // 2026-11-17 真正的原因：**手动写 content-length 会让 DSH 的响应处理断连**。
-            // 对比 send() 的实现（只 writeHead + end，不设长度）——它工作正常。
-            res.writeHead(200, {
-              'content-type': type,
-              'accept-ranges': 'bytes',
-              'cache-control': 'private, max-age=60',
-            })
+            // 2026-11-17 第 N 次尝试：**完全模仿 send()**（它一直工作正常）。
+            // 之前加了 content-length / accept-ranges / cache-control 都导致 Empty reply，
+            // 说明多设的响应头会跟 DSH 的响应处理打架。这里只带 content-type。
+            res.writeHead(200, { 'content-type': type })
             // 图片/音频直接流；其它（glb/zip）当附件下载
             const inline = /^(image|audio|video)\//.test(type) || type === 'application/pdf' || type.startsWith('text/')
             if (!inline) res.setHeader('content-disposition', 'attachment; filename="' + path.basename(abs).replace(/"/g, '') + '"')
