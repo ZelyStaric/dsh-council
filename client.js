@@ -1906,6 +1906,8 @@ window.__ModuleLoader__.load({
       // 「跳到最新」按钮：**不走 React state**（DSH 的 setState 不触发重渲染，
       // 2026-11-16 实测：状态改了但按钮不出现）。直接拿 DOM 引用改 display。
       const jumpBtnRef = useRef(null)
+      // 「折叠本轮」按钮（同上：走原生 DOM，不用 state）
+      const collapseBtnRef = useRef(null)
       // 首次进入团队 tab 是否已经滚到底
       const didInitScrollRef = useRef(false)
       // 切到团队 tab 时组件不会重新挂载，effect 的依赖也不会变 —— 用轮询探测
@@ -2364,6 +2366,33 @@ window.__ModuleLoader__.load({
                   ? '用底部对话框说话，指挥会拆解后派给成员。'
                   : '点右上角胶囊切到「小组」即可开始。')))),
       note ? h('div', { style: Object.assign({}, styles.muted, { color: 'var(--dsw-alias-state-error-primary)', flex: '0 0 auto' }) }, note) : null,
+      // 「折叠本轮」（2026-11-17 用户要求）：一轮消息太长时，折叠键在轮次顶部、滚不上去。
+      // 这里给一个常驻按钮，直接折叠**最后一个 `<details>`**（也就是最新那一轮）。
+      // 再点一次展开。纯 DOM 操作，不依赖 React state。
+      h('div', {
+        key: 'collapse-latest',
+        ref: (node) => { collapseBtnRef.current = node },
+        title: '折叠 / 展开最新一轮',
+        onClick: () => {
+          const node = scrollerRef.current
+          if (!node) return
+          const list = node.querySelectorAll('details')
+          if (!list.length) return
+          const last = list[list.length - 1]
+          last.open = !last.open
+          const btn = collapseBtnRef.current
+          if (btn) btn.textContent = last.open ? '⊟ 折叠本轮' : '⊞ 展开本轮'
+        },
+        style: {
+          position: 'absolute', right: 18, bottom: 104, zIndex: 5,
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 12px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
+          background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)',
+          border: '1px solid var(--dsw-alias-border-l1)',
+          boxShadow: '0 2px 10px rgba(0,0,0,.2)',
+          opacity: 0.94,
+        },
+      }, '⊟ 折叠本轮'),
       // 「跳到最新」：常驻 DOM，靠上面的原生滚动监听切 display；点击**平滑滚动**（不是瞬移）
       h('div', {
         key: 'jump-latest',
