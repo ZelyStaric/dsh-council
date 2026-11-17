@@ -43,6 +43,23 @@ DSH Web 插件「小组」的实现目录（bundle `@zelystaric/dsh-council`）�
    细节见 [`~/docs/dsh-council.md`](/home/nanami/docs/dsh-council.md) 的「council.json 的数据安全」。
 
 
+## ⚠️ DSH 的 React 是桩实现（这些坑都会让你的 UI "看起来改了但没生效"）
+
+| 你以为可用的 | 实际 | 正确做法 |
+|---|---|---|
+| `useState` 改状态触发重渲染 | ❌ | 直接操作 DOM（`style.display` / `textContent` / `classList`） |
+| `ref` 拿节点 | ❌ 不一定绑上 | `querySelector('[data-xxx]')` |
+| `onScroll` | ❌ 不转发 | 原生 `addEventListener('scroll', …)` |
+| **`<select defaultValue={x}>`** | ❌ **永远显示第一个 option** | **`<option selected={id === x}>`**（HTML 原生，不经 React diff） |
+| 折叠用 `useState` 控制 | ❌ | 原生 `<details>/<summary>` |
+| 组件不重挂载时的 `useEffect` | ❌ 不触发 | 轮询探测（如 tab 可见性） |
+
+**注意区分**：`<input defaultValue>` / `<textarea defaultValue>` **是好的**（原生行为）——
+只有 `<select>` 的选中态被 React 接管了，必须用 `selected` 属性。
+
+2026-11-17 实测：`member.provider = 'relay-claude'` 存得好好的，界面上却显示「（未选择提供商）」——
+原因就是 `<select defaultValue>` 在这个环境里压根不生效。同批修了 5 个下拉。
+
 ## 包名变更 checklist（改一次踩过两次坑，必须四处同步）
 
 包名出现在 **4 个地方**，漏一处就会出现「插件消失 / 按钮不见 / bundle 被跳过」：
