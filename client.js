@@ -2019,8 +2019,16 @@ window.__ModuleLoader__.load({
       // 单人会话（明确知道没绑小组）→ **不渲染团队内容**。
       // 只藏 tab 不够：DSH 会先画内容，用户能看到 1 秒的「折叠列表」再消失。
       const hasGroup = sessionHasGroup(sessionId)
-      // 明确没有小组 → 完全不渲染（连提示都不要，这是单人会话，切过来不该看到小组界面）
-      if (hasGroup === false) return null
+      // 2026-11-18 修：**只有"确认没组"且"确实没有团队数据"时才返回 null**。
+      // 原来看 hasGroup === false 就直接 return null —— 而 groupSessionSet 是异步刷新的，
+      // 「新建会话 → 切小组（自动建组）→ 立刻发消息」这个时序里集合还没更新，
+      // hasGroup 仍是 false，于是整块渲染成 null → **一直白屏**，
+      // 切一下 tab 触发重新拉 /state 才恢复（用户实测）。
+      // 判断依据改成「之前见过这个会话有组」，不再只信那个可能过期的集合。
+      // ⚠️ 这里**不能引用 team**：它的 useState 声明在本行之后（TDZ，AGENTS.md 记过）。
+      // 只用模块级 teamCache 判断「之前见过这个会话有组」。
+      const cacheHit = sessionId ? teamCache[String(sessionId)] : null
+      if (hasGroup === false && !cacheHit) return null
       // 还不知道（刚刷新页面 / 集合未就绪）→ **正常渲染**，别返回空占位：
       // 空占位会让用户看到 1 秒空白再出内容（2026-11-16 实测）。
       // 「单人会话不该看到小组空态卡片」这件事，由下面空态分支自己判断（hasGroupUnknown）。
@@ -2103,7 +2111,14 @@ window.__ModuleLoader__.load({
           .then((d) => {
             setTeam(d)
             // 写缓存：切回这个会话时立刻有内容
-            if (sessionId) teamCache[String(sessionId)] = d
+            // 2026-11-18：**不缓存空态**。否则「刚建组还没消息」那一刻的空快照会被记住，
+            // 之后切回这个会话仍然显示空（真正的内容要等下一次轮询才来）。
+            // 只缓存有内容的快照，宁可多拉一次也别缓存错状态。
+            if (sessionId && d && !d.unbound && Array.isArray(d.messages) && d.messages.length) {
+              teamCache[String(sessionId)] = d
+            } else if (sessionId && d && !d.unbound && groupSessionSet && groupSessionSet.has(String(sessionId))) {
+              teamCache[String(sessionId)] = d
+            }
             if (d && d.model) setModel(d.model)
             // 能拉到 → 这个会话确实有小组，补进集合
             if (groupSessionSet && !groupSessionSet.has(String(sessionId))) {
