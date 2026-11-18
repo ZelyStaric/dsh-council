@@ -907,7 +907,7 @@ window.__ModuleLoader__.load({
             onBlur: (event) => { if (event.target.value !== (group.style || '')) mutate('/groups', { id: group.id, style: event.target.value }) },
           }),
           h('div', { style: { marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' } },
-            h('span', { style: styles.muted }, '风格审校（claude 成员，会读图）'),
+            h('span', { style: styles.muted }, '风格审校'),
             h('select', {
               style: Object.assign({}, styles.input, { width: 200 }), defaultValue: group.reviewerId || '',
               onChange: (event) => mutate('/groups', { id: group.id, reviewerId: event.target.value || undefined }),
