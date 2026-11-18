@@ -1136,6 +1136,7 @@ function configView(config, source) {
     // 前端永远读不到（表现为「勾选框点了闪一下又弹回去」：
     // POST 其实成功了，但 GET/回包里的 config 没有这个字段，重渲染时又被重置）。
     enabledModels: Array.isArray(own.enabledModels) ? own.enabledModels.slice() : [],
+    defaultMemberModel: String(own.defaultMemberModel || ''),
     // 用户维护的模型定位表（空 = 用内置默认）
     modelGuide: String(own.modelGuide || ''),
     modelGuideDefault: MODEL_GUIDE.map(([id, desc]) => '- ' + id + '：' + desc).join('\n'),
@@ -3813,6 +3814,16 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     // 2026-11-18：补员**必须显式写 model**，且只能从「可用模型」里挑。
     // 代码不再替你兜底选型（以前兜底会套出 claude-sonnet-5 这种被禁用的型号）。
     '**补员时 staffing[].model 是必填**，且必须来自上面「可用模型」清单；写错会被整批拒绝重来。',
+    // 2026-11-18：明确「默认模型优先」。否则指挥看到表里某项写着"代码顶尖"就一律挑最贵的，
+    // 用户实测：自动补员全是 claude-opus-5-5，成本远高于预期。
+    ...(() => {
+      const def = String((state.config && state.config.defaultMemberModel) || '').trim()
+      if (!def) return []
+      return [
+        '**默认成员模型：' + def + '**',
+        '补员时**默认就用它**；只有任务明确需要更强能力（或该模型不适合这个框架）时才换更贵的，并在 task 里说明为什么值得多花钱。',
+      ]
+    })(),
     '',
     '',
     '**给成员的任务必须写清"具体怎么做"**：用什么工具/库/命令、产出什么文件或格式、怎么算完成。',
@@ -5224,6 +5235,16 @@ export function createHandler(ctx, config = {}) {
               if (typeof body.modelGuide === 'string') {
                 if (body.modelGuide.trim()) next.modelGuide = body.modelGuide
                 else delete next.modelGuide
+              }
+              // 2026-11-18 新增：**默认成员模型**（全局）。
+              // 起因：指挥给「代码/全栈」自动创建成员时，看到模型定位表里
+              // 「claude-opus-5-5：代码顶尖」就一律选它 —— 而用户明确写着
+              // 「gpt-6.1-sol 是多数编码/执行任务的默认选择」。结果每次自动补员都用最贵的。
+              // 这里给一个显式默认值，提示词会告诉指挥：**没有明确理由就用它**。
+              if (typeof body.defaultMemberModel === 'string') {
+                const picked = body.defaultMemberModel.trim()
+                if (picked) next.defaultMemberModel = picked
+                else delete next.defaultMemberModel
               }
               // 2026-11-18 新增：**可用模型白名单**（全局）。
               // 数据源来自 DSH 设置里各 provider 的模型目录，用户在小组页打勾。

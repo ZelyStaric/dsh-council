@@ -761,10 +761,12 @@ window.__ModuleLoader__.load({
                 saveTeam({ enabledModels: Array.from(nextSet) })
               }
               const bulk = (on) => saveTeam({ enabledModels: on ? allIds.slice() : [] })
+              const defaultId = String(cur.defaultMemberModel || '')
+              const setDefaultModel = (id) => saveTeam({ defaultMemberModel: id })
               const groups = (providers || []).map((p) => ({
                 id: p.id,
                 title: (p.name || p.id) + '（' + p.id + '）',
-                rows: (p.models || []).map((id) => ({ id, on: chosenSet.has(id) })),
+                rows: (p.models || []).map((id) => ({ id, on: chosenSet.has(id), isDefault: id === defaultId })),
               }))
               return h('div', {
                 style: {
@@ -787,7 +789,15 @@ window.__ModuleLoader__.load({
                       style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, cursor: 'pointer' },
                     },
                     check(r.on, (v) => toggle(r.id, v)),
-                    h('span', { style: { fontFamily: 'ui-monospace, monospace' } }, r.id))))))))
+                    h('span', { style: { fontFamily: 'ui-monospace, monospace' } }, r.id),
+                    // 2026-11-18：标一个「默认」——指挥补员没特别理由就用它（省钱）
+                    r.isDefault
+                      ? h('span', { style: { fontSize: 10, padding: '0 5px', borderRadius: 999, background: 'var(--dsw-alias-brand-primary)', color: '#fff' } }, '默认')
+                      : h('span', {
+                        title: '设为默认（指挥补员时优先用）',
+                        onClick: (e) => { try { e.preventDefault() } catch {} ; setDefaultModel(r.id) },
+                        style: { fontSize: 10, opacity: 0.5, cursor: 'pointer', padding: '0 5px', borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1)' },
+                      }, '设为默认'))))))))
             })()
             : null,
           row('模型定位表',
