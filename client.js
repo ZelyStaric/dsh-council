@@ -2308,8 +2308,14 @@ window.__ModuleLoader__.load({
       //   · 有 running 的 job → 「后台任务 job_xxx 运行中」
       //   · 只有 done 的 job、主会话还没回复 → 「后台任务已完成，等待指挥汇总」
       //   · 完全没有 job → 才是真的在拆解（或刚发出）
-      const liveJobs = (bgJobs || []).filter((j) => j && j.status === 'running')
-      const doneJobs = (bgJobs || []).filter((j) => j && j.status === 'done')
+      // 2026-11-18 修：**只认本轮产生的 job**。
+      // 原来取所有 done job 的最后一条，于是「上一轮那个 944s 的 job」会在新一轮刚发出时
+      // 又被显示成「后台任务已完成（944s），等待指挥汇总」—— 看起来像计时没清零（用户实测）。
+      // 本轮起点 = 最后一条用户消息的时间；比它早的 job 一律不算。
+      const roundStartAt = Number(lastMsg && lastMsg.at) || 0
+      const sameRound = (j) => !roundStartAt || Number(j.startedAt || 0) >= roundStartAt - 2000
+      const liveJobs = (bgJobs || []).filter((j) => j && j.status === 'running' && sameRound(j))
+      const doneJobs = (bgJobs || []).filter((j) => j && j.status === 'done' && sameRound(j))
       const waitPhase = liveJobs.length ? 'job-running'
         : (doneJobs.length && !running && !streamText) ? 'job-done'
           : 'unknown'
