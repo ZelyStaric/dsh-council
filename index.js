@@ -7128,6 +7128,22 @@ async function runMemberAction(group, args, ctx, config) {
       if (args.action === 'create') {
         const defaultModels = { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5', deepseek: DEEPSEEK_MEMBER_MODEL, image: 'gpt-image-2.6-flare' }
         const kind = args.kind && defaultModels[args.kind] ? args.kind : 'codex'
+        // 2026-11-18：**指挥建成员也必须走白名单**。
+        // 这条路径（council_member create）和 staffing 是两条独立入口，
+        // 之前只校验了 staffing，指挥改走这条就能绕过白名单建出 sonnet-5。
+        // 口径与 staffing 一致：必须显式指定 model，且必须在可用模型里。
+        try {
+          const allowed = allowedModelIds()
+          if (allowed.length) {
+            const want = String(args.model || '').trim()
+            if (!want) {
+              return { ok: false, error: '创建成员必须显式指定 model（不能交给默认值）。可用模型：' + allowed.join('、') }
+            }
+            if (!allowed.includes(want)) {
+              return { ok: false, error: '模型 ' + want + ' 不在可用模型里。可选：' + allowed.join('、') }
+            }
+          }
+        } catch { /* 校验失败不阻塞 */ }
         // 默认建持久成员（现有行为）；显式 persistent:false 才建临时成员，与 staffing 的 persistent 语义一致
         const persistent = args.persistent !== false
         const member = {
@@ -7573,11 +7589,31 @@ function makeDelegateTool(ctx, config, group) {
         // 直派模式：回执明确标出来（前端与用户都能看出「这次没走指挥/审核」）
         if (directMode) response.direct = true
         // assignments 里直接写职位名、但本组还没人持有该职位 → 按职位默认自动补员
+        // 2026-11-18：自动补缺员时**也要给 model**。
+        // 这条路径由代码推导（不是指挥写的 staffing），原来不带 model → staffTarget 套
+        // STAFF_MODELS[kind]（claude 是 claude-sonnet-5）→ 可能正是用户禁用的型号。
+        // 这里按白名单给该职位挑一个，绝不落到禁用模型上。
+        const allowedForFill = allowedModelIds()
+        const pickFillModel = (roleName) => {
+          if (!allowedForFill.length) return undefined
+          const role = (state.roles || []).find((r) => r.name === roleName)
+          const defaultKind = role ? roleKind(role) : 'claude'
+          const matchers = {
+            claude: /^claude/i, codex: /^gpt-|^o\\d/i, deepseek: /deepseek/i,
+            gemini: /gemini/i, image: /image|banana/i,
+          }
+          const re = matchers[defaultKind]
+          const hit = re ? allowedForFill.find((id) => re.test(id)) : undefined
+          return hit
+        }
         const missingRoles = assignments
           .filter((a) => typeof a.member === 'string'
             && (state.roles || []).some((r) => r.name === a.member)
             && !resolveMember(live, a.member))
-          .map((a) => ({ role: a.member }))
+          .map((a) => {
+            const picked = pickFillModel(a.member)
+            return picked ? { role: a.member, model: picked } : { role: a.member }
+          })
         staffing.push(...await ensureStaffing(live, missingRoles, ephemeral, config))
         // 成员已经定下来了，占位阶段从「拆解中」推进到「派活中」
         progressStage(callId, '派活中')
