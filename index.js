@@ -3356,7 +3356,13 @@ function verdictOf(text) {
   if (v) {
     const ok = v[1].toUpperCase() === 'PASS'
     const before = stripped.slice(0, v.index).trim()
-    const reason = before.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)
+    // 2026-11-18 修：**不要把验收意见截到 300 字**。
+    // 这个 reason 有两个用途：① 回执显示（可以短）② **返工指令**（必须完整）。
+    // 原来统一截 300，导致指挥写了很具体的修正要求（「35.5 秒第 3 条回执时序不对…」）
+    // 到成员/审校手里只剩前半句 —— 审校实测回复「你的验收意见在…处截断，
+    // 现有信息不足以判断哪些问题应撤销或如何修正」，整条返工链路直接断掉。
+    // 现在保留 8000 字（远超正常验收意见），显示层自己再决定折多少。
+    const reason = before.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000)
     const verdictOut = { ok, reason, format: 'verdict' }
     if (v[2]) verdictOut.severity = v[2].toLowerCase()
     // 指挥终审还会跟一行 OWNER: MEMBER|OTHER

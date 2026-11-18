@@ -2327,9 +2327,12 @@ window.__ModuleLoader__.load({
             m.commanderOk === true ? '指挥审核：通过' : m.commanderOk === false ? '指挥审核：不通过' : null,
           ].filter(Boolean).join(' · ')
           : ''
-        const reasons = isMember
+        // 2026-11-18：后端把验收意见存成完整文本（返工指令要用完整版），
+        // 卡片里只显示摘要，完整内容放到 title 里 hover 可见。
+        const reasonFull = isMember
           ? [m.reviewReason, m.commanderReason].filter(Boolean).join(' / ')
           : ''
+        const reasons = reasonFull.length > 240 ? reasonFull.slice(0, 240) + '…' : reasonFull
         return h('div', {
           key,
           style: {
@@ -2406,7 +2409,7 @@ window.__ModuleLoader__.load({
             style: { display: 'block', maxWidth: 360, marginTop: 6, borderRadius: 8 },
           }) : null,
           verdictLine ? h('div', { style: { marginTop: 6, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } }, verdictLine) : null,
-          reasons ? h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85 } }, reasons) : null))
+          reasons ? h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85 }, title: reasonFull || undefined }, reasons) : null))
       }
 
       /**
