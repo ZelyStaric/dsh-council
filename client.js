@@ -2129,10 +2129,13 @@ window.__ModuleLoader__.load({
         let alive = true
         // 1 秒轮询：用户发完消息要立刻在团队页看到（2026-11-16 用户反馈 3 秒太慢）。
         // 服务端读日志有 mtime+size 缓存，文件没变时不会重复解压，1 秒一轮开销可接受。
-        // 单人会话（已知没绑组）不必轮询：/team/state 只会一直 400，白占连接。
-        const timer = sessionHasGroup(sessionId) === false
-          ? null
-          : setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
+        //
+        // 2026-11-18 修：**总是轮询**，不再用 sessionHasGroup 决定。
+        // 那个前端集合是 /state 异步刷新的，「新建会话 → 建组 → 渲染」之间必有竞态：
+        // 它返回 false 时轮询压根没启动，team 永远是初始值 ——
+        // 表现为「发完消息团队页还是空的，切一下 tab 才出来」（用户实测两次）。
+        // 而且原来那个理由已经过时：/team/state 未绑组现在返回**空态 200**，不再是 400。
+        const timer = setInterval(() => { if (alive && !document.hidden) refreshTeam() }, 1000)
         // 进行中的「步骤」：/progress 里有每个成员的 stage / 静默时长（DSH 风格的执行步骤）
         const refreshProgress = () => {
           call('/progress?sessionId=' + encodeURIComponent(sessionId))
