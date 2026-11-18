@@ -2019,22 +2019,14 @@ window.__ModuleLoader__.load({
       // 单人会话（明确知道没绑小组）→ **不渲染团队内容**。
       // 只藏 tab 不够：DSH 会先画内容，用户能看到 1 秒的「折叠列表」再消失。
       const hasGroup = sessionHasGroup(sessionId)
-      // 2026-11-18 修：**只有"确认没组"且"确实没有团队数据"时才返回 null**。
-      // 原来看 hasGroup === false 就直接 return null —— 而 groupSessionSet 是异步刷新的，
-      // 「新建会话 → 切小组（自动建组）→ 立刻发消息」这个时序里集合还没更新，
-      // hasGroup 仍是 false，于是整块渲染成 null → **一直白屏**，
-      // 切一下 tab 触发重新拉 /state 才恢复（用户实测）。
-      // 判断依据改成「之前见过这个会话有组」，不再只信那个可能过期的集合。
-      // ⚠️ 这里**不能引用 team**：它的 useState 声明在本行之后（TDZ，AGENTS.md 记过）。
-      // 只用模块级 teamCache 判断「之前见过这个会话有组」。
-      const cacheHit = sessionId ? teamCache[String(sessionId)] : null
-      if (hasGroup === false && !cacheHit) return null
-      // 还不知道（刚刷新页面 / 集合未就绪）→ **正常渲染**，别返回空占位：
-      // 空占位会让用户看到 1 秒空白再出内容（2026-11-16 实测）。
-      // 「单人会话不该看到小组空态卡片」这件事，由下面空态分支自己判断（hasGroupUnknown）。
-      const hasGroupUnknown = hasGroup === null
-      // 2026-11-17：缓存优先——切回见过的会话立刻有内容，不再空白一秒
+      // 2026-11-18：**判断有没有组，以后端 /team/state 为准**（见下面 team 声明后的早退）。
+      // hasGroup 这个前端集合由 /state 异步刷新，和「建组 → 渲染」之间有竞态，
+      // 曾经导致新建会话切小组后一直白屏（切 tab 才恢复）。现在它只用于下面
+      // hasGroupUnknown（决定空态文案），不再拿来 return null。
+      // 2026-11-18：缓存优先——切回见过的会话立刻有内容
       const [team, setTeam] = useState(() => (sessionId && teamCache[String(sessionId)]) || null)
+      // ⚠️ 「unbound 就 return null」的判断**必须放在所有 hooks 之后**（见渲染前），
+      // 否则会违反 Hooks 顺序：某些渲染会跳过后面那些 useState → 组件直接崩（白屏且切 tab 也不恢复）。
       const [providers, setProviders] = useState(null)
       const [model, setModel] = useState('')
       const [draft, setDraft] = useState('')
@@ -2317,6 +2309,12 @@ window.__ModuleLoader__.load({
       // 2026-11-17 修：/team/state 现在返回**指挥成员真实的 kind**（claude/codex/deepseek/gemini/image），
       // 而这里原来只认「团队大脑」时代的枚举（dsh-seam / gemini-cli），
       // 于是 deepseek 指挥落到默认 `claude` —— 头像显示成橘发大小姐（用户截图指出）。
+      // ── 所有 hooks 已执行完，这里才可以做早退判断 ─────────────────────
+      // 2026-11-18：**team 明确 unbound（后端说这个会话没组）才不渲染**。
+      // team 还是 null（还没拉到）时继续渲染，显示「正在加载群聊…」，绝不再白屏。
+      // ⚠️ 必须放在 hooks 之后：放在 useState 之间会破坏 Hooks 顺序，组件直接崩。
+      if (team && team.unbound === true) return null
+      const hasGroupUnknown = hasGroup === null
       const rawBrainKind = String((team && team.brainKind) || '').toLowerCase()
       const brainKind = ['claude', 'codex', 'deepseek', 'image'].includes(rawBrainKind)
         ? rawBrainKind
