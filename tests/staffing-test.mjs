@@ -340,15 +340,18 @@ await check('ensureStaffing：组内已有该职位 → 不改人、不产出变
   return '复用、零变更'
 })
 
-await check('ensureStaffing：显式 kind/model 不同 → 更新该成员并丢 convId', async () => {
+// 2026-11-18 语义变更：**已存在的成员，指挥不能改它的 kind/model**。
+// 用户实测：手动把「模拟」设成 opencode 的 deepseek，指挥在 staffing 里写 gpt-6.2-astra
+// 就把配置覆盖了。现在只认「新建成员」时的 staffing.kind/model。
+await check('ensureStaffing：已存在成员 → 忽略 staffing 的 kind/model（不覆盖用户配置）', async () => {
   setState(structuredClone(fixture))
+  const before = { kind: findMember('m_code').kind, model: findMember('m_code').model }
   const changes = await mod.ensureStaffing(mod.state.groups[0], [{ role: '代码', kind: 'codex', model: 'gpt-6.1-sol' }])
   const member = findMember('m_code')
   assert.equal(mod.state.members.length, fixture.members.length) // 不新建
-  assert.equal(member.kind, 'codex')
-  assert.equal(member.model, 'gpt-6.1-sol')
-  assert.equal(member.convId, undefined)
-  assert.ok(changes.some((line) => line.includes('调整 代码')))
+  assert.equal(member.kind, before.kind, 'kind 不该被改')
+  assert.equal(member.model, before.model, 'model 不该被改')
+  assert.ok(changes.some((line) => line.includes('忽略')), '应记一条「忽略」')
   return changes.join(' / ')
 })
 
@@ -361,13 +364,12 @@ await check('ensureStaffing：只给 kind 且与现状相同 → 不动模型', 
   return '无变更'
 })
 
-await check('ensureStaffing：换 kind 未给 model → 用新框架默认，而不是旧模型', async () => {
+await check('ensureStaffing：已存在成员换 kind 也会被忽略（同上语义）', async () => {
   setState(structuredClone(fixture))
+  const before = findMember('m_code').kind
   await mod.ensureStaffing(mod.state.groups[0], [{ role: '代码', kind: 'claude' }])
-  const member = findMember('m_code')
-  assert.equal(member.kind, 'claude')
-  assert.equal(member.model, 'claude-sonnet-5') // 职位默认属于 deepseek，不沿用
-  return 'kind=claude / model=claude-sonnet-5'
+  assert.equal(findMember('m_code').kind, before, 'kind 不该被改')
+  return '已存在成员保持 ' + before
 })
 
 await check('ensureStaffing：同名成员在别的组 → 拉进本组，不新建', async () => {

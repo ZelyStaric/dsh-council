@@ -6382,25 +6382,18 @@ async function ensureStaffing(group, staffing, createdIds, config) {
         changes.push(`- 指派 ${member.name} → 职位 ${role.name}`)
         dirty = true
       }
+      // 2026-11-18：**已存在的成员，指挥不能改它的模型/框架**。
+      //
+      // 用户实测：把「模拟」成员设成 opencode 的 deepseek，结果指挥在 staffing 里写了
+      // gpt-6.2-astra，这里直接把成员配置覆盖掉了 —— 用户手动设的东西被悄悄改掉。
+      //
+      // 现在语义明确：
+      //   · **新建**成员 → 用 staffing 指定的 kind/model（白名单已校验）
+      //   · **已存在**成员 → 完全尊重现有配置，staffing 里的 kind/model 一律忽略
+      //     （想改请在成员卡上改，或删了重建）
       if (wantKind !== undefined || wantModel !== undefined) {
-        // 只改 kind 且与现状相同 → 不动模型（保留成员自己选的模型）；
-        // 换 kind 才回落到职位默认/框架默认，除非显式给了新模型。
-        const nextKind = wantKind || member.kind
-        const target = nextKind === member.kind && !wantModel
-          ? { kind: nextKind, model: member.model }
-          : staffTarget(role, nextKind, wantModel)
-        if (!target) {
-          changes.push('- 跳过调整 ' + role.name + '：' + unknownModelError(wantModel, modelCatalogIds()))
-          dirty = true
-          break
-        }
-        if (member.kind !== target.kind || member.model !== target.model) {
-          delete member.convId
-          member.kind = target.kind
-          member.model = target.model
-          member.provider = target.kind === 'deepseek' ? deepseekMemberProvider(config) : undefined
-          changes.push(`- 调整 ${role.name}（${member.name}）→ ${target.kind} / ${target.model}`)
-          dirty = true
+        if (member.kind !== (wantKind || member.kind) || (wantModel && wantModel !== member.model)) {
+          changes.push(`- 忽略 ${role.name} 的换模型要求：${member.name} 已存在，保持 ${member.kind} / ${member.model}（需要改请在成员卡上改）`)
         }
       }
       if (reused) {
