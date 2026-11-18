@@ -3813,7 +3813,12 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     `补员/换模型时按「模型定位速查」选；一个任务只用一个主力模型；${MODEL_GUIDE_TIEBREAK}。`,
     // 2026-11-18：补员**必须显式写 model**，且只能从「可用模型」里挑。
     // 代码不再替你兜底选型（以前兜底会套出 claude-sonnet-5 这种被禁用的型号）。
-    '**补员时 staffing[].model 是必填**，且必须来自上面「可用模型」清单；写错会被整批拒绝重来。',
+    '**补员规则（务必照做）**：',
+    '· **只补真正缺的职位**：名册里已有该职位的成员，就不要再写进 staffing —— 直接把它放进 assignments 即可。',
+    '· **staffing[].model 必须是「可用模型」清单里的完整 id**（例如 claude-fable-5-2、gpt-6.1-sol），',
+    '  **不能写框架名**（claude / codex / deepseek 这些是框架，不是模型），也不能写中文名。',
+    '· staffing[].kind 也必须是 claude / codex / deepseek / gemini / image 之一（小写）。',
+    '· 写错会被**整批拒绝**，你得重来一次，浪费时间和 token。',
     // 2026-11-18：明确「默认模型优先」。否则指挥看到表里某项写着"代码顶尖"就一律挑最贵的，
     // 用户实测：自动补员全是 claude-opus-5-5，成本远高于预期。
     ...(() => {
@@ -7579,6 +7584,24 @@ function makeDelegateTool(ctx, config, group) {
                 const roleName = String(item.role || item.member || '')
                 if (!want) {
                   bad.push(roleName + '：缺少 model（补员必须显式指定，不能交给默认值）')
+                  continue
+                }
+                // 2026-11-18：**单独识别「把框架名当模型名」**。
+                // 实测指挥写 {"kind":"Claude","model":"Claude"} —— model 里装的是框架名。
+                // 笼统报「不在可用模型里」它看不懂，会反复重试同样的错。
+                const lowerWant = want.toLowerCase()
+                if (['claude', 'codex', 'deepseek', 'gemini', 'image', 'gpt', 'openai'].includes(lowerWant)) {
+                  const kindHint = lowerWant === 'gpt' || lowerWant === 'openai' ? 'codex' : lowerWant
+                  const sameKind = allowed.filter((id) => {
+                    if (kindHint === 'claude') return /^claude/i.test(id)
+                    if (kindHint === 'codex') return /^gpt-|^o\d/i.test(id)
+                    if (kindHint === 'deepseek') return /deepseek/i.test(id)
+                    if (kindHint === 'gemini') return /gemini/i.test(id)
+                    if (kindHint === 'image') return /image|banana/i.test(id)
+                    return false
+                  })
+                  bad.push(roleName + '：model 写成了框架名「' + want + '」，要写具体模型 id；'
+                    + (sameKind.length ? 'claude 类可选：' + sameKind.join('、') : '该框架没有可用模型'))
                   continue
                 }
                 if (!allowed.includes(want)) {
