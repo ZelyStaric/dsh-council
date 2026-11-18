@@ -6094,6 +6094,22 @@ function staffTarget(role, kind, model) {
     return { kind: inferred, model: explicitModel }
   }
   const nextKind = STAFF_KINDS.includes(kind) ? kind : 'claude'
+  // 2026-11-18：**没有显式指定模型时，优先用白名单里该框架的第一个**。
+  // 原来直接返回 STAFF_MODELS[nextKind]（claude 是 claude-sonnet-5），
+  // 那个值可能正是用户禁用掉的模型 —— 于是「禁用 sonnet5」形同虚设，
+  // 自动补员仍会建出 sonnet5 成员（用户实测）。
+  const allowed = allowedModelIds()
+  if (allowed.length) {
+    const picked = allowed.filter((id) => {
+      if (nextKind === 'claude') return /^claude/i.test(id)
+      if (nextKind === 'codex') return /^gpt-|^o\\d/i.test(id)
+      if (nextKind === 'deepseek') return /deepseek/i.test(id)
+      if (nextKind === 'gemini') return /gemini/i.test(id)
+      if (nextKind === 'image') return /image|banana/i.test(id)
+      return false
+    })
+    if (picked.length) return { kind: nextKind, model: picked[0] }
+  }
   return { kind: nextKind, model: STAFF_MODELS[nextKind] }
 }
 
@@ -7446,10 +7462,24 @@ function makeDelegateTool(ctx, config, group) {
                 const want = String(item.model || '').trim()
                 if (!want || allowed.includes(want)) continue
                 const kind = String(item.kind || '').trim()
-                const fallback = STAFF_MODELS[kind] || ''
-                if (fallback) {
-                  console.error('[council] model not in guide, fallback: ' + want + ' -> ' + fallback)
+                // fallback **必须从 allowed 里挑**：STAFF_MODELS[kind] 是代码里的写死默认值
+                // （claude 是 claude-sonnet-5），它自己也可能不在白名单里 ——
+                // 那样会把「违规模型」换成「另一个违规模型」（实测就是这个 bug）。
+                const picked = allowed.filter((id) => {
+                  if (kind === 'claude') return /^claude/i.test(id)
+                  if (kind === 'codex') return /^gpt-|^o\d/i.test(id)
+                  if (kind === 'deepseek') return /deepseek/i.test(id)
+                  if (kind === 'gemini') return /gemini/i.test(id)
+                  if (kind === 'image') return /image|banana/i.test(id)
+                  return false
+                })
+                const fallback = picked[0] || STAFF_MODELS[kind] || ''
+                if (fallback && allowed.includes(fallback)) {
+                  console.error('[council] model not in whitelist, fallback: ' + want + ' -> ' + fallback)
                   item.model = fallback
+                } else {
+                  // 白名单里没有该框架可用的模型 → 不动它，只记一笔（总比静默换成违规模型好）
+                  console.error('[council] model not in whitelist and no same-kind fallback: ' + want)
                 }
               }
             }
