@@ -3754,6 +3754,9 @@ async function planWithCommander(ctx, group, request, config, parent, callId) {
     rosterText(group),
     catalogText(),
     `补员/换模型时按「模型定位速查」选；一个任务只用一个主力模型；${MODEL_GUIDE_TIEBREAK}。`,
+    // 2026-11-18：补员**必须显式写 model**，且只能从「可用模型」里挑。
+    // 代码不再替你兜底选型（以前兜底会套出 claude-sonnet-5 这种被禁用的型号）。
+    '**补员时 staffing[].model 是必填**，且必须来自上面「可用模型」清单；写错会被整批拒绝重来。',
     '',
     '',
     '**给成员的任务必须写清"具体怎么做"**：用什么工具/库/命令、产出什么文件或格式、怎么算完成。',
@@ -6104,18 +6107,11 @@ function staffTarget(role, kind, model) {
   // 原来直接返回 STAFF_MODELS[nextKind]（claude 是 claude-sonnet-5），
   // 那个值可能正是用户禁用掉的模型 —— 于是「禁用 sonnet5」形同虚设，
   // 自动补员仍会建出 sonnet5 成员（用户实测）。
-  const allowed = allowedModelIds()
-  if (allowed.length) {
-    const picked = allowed.filter((id) => {
-      if (nextKind === 'claude') return /^claude/i.test(id)
-      if (nextKind === 'codex') return /^gpt-|^o\\d/i.test(id)
-      if (nextKind === 'deepseek') return /deepseek/i.test(id)
-      if (nextKind === 'gemini') return /gemini/i.test(id)
-      if (nextKind === 'image') return /image|banana/i.test(id)
-      return false
-    })
-    if (picked.length) return { kind: nextKind, model: picked[0] }
-  }
+  // 2026-11-18（用户口径）：**不在这里替指挥挑模型**。
+  // 指挥拆解时会显式写 staffing[].model（按模型定位表选），那条路径不经过这里；
+  // 只有「职位已有成员 / 没写 model」才落到这个默认值。
+  // 如果这个默认值恰好在白名单外，上层校验会**拒绝整批派活**并让指挥重来，
+  // 而不是悄悄用一个用户明令禁用的模型。
   return { kind: nextKind, model: STAFF_MODELS[nextKind] }
 }
 
@@ -6154,10 +6150,20 @@ function mcpCatalogText() {
 
 function catalogText() {
   const value = (catalog && catalog.value) || {}
+  // 2026-11-18：**白名单必须出现在提示词里**。
+  // 之前这里列的是「实时缓存里的全部模型」，指挥压根不知道哪些被用户禁用了，
+  // 于是反复选 claude-sonnet-5 这类被排除的型号（代码层拦了它也不知道为什么）。
+  const allowedIds = allowedModelIds()
+  const allowedSet = new Set(allowedIds)
+  const filtering = allowedSet.size > 0
   return [
-    '当前可用模型清单（按框架分组，来自实时缓存）：',
+    filtering
+      ? '当前**可用**模型清单（已按用户勾选过滤；**只能从这里选**）：'
+      : '当前可用模型清单（按框架分组，来自实时缓存）：',
     ...STAFF_KINDS.map((kind) => {
-      const ids = (value[kind] || []).filter(Boolean)
+      const raw = (value[kind] || []).filter(Boolean)
+      const ids = filtering ? raw.filter((id) => allowedSet.has(id)) : raw
+      if (filtering && !ids.length) return `- ${kind}: （无可用模型，请不要补这个框架的成员）`
       return `- ${kind}: ${(ids.length ? ids : [STAFF_MODELS[kind]]).join('、')}`
     }),
     'assignments[].member 可写职位名；缺人时按职位默认自动补员。需要补员或调整模型时在 staffing 中声明 {role, kind?, model?}。',
@@ -7456,37 +7462,40 @@ function makeDelegateTool(ctx, config, group) {
         const requestText = args && typeof args.request === 'string' ? args.request.trim() : ''
         if ((!assignments.length) && requestText) {
           const planned = await planWithCommander(ctx, live, args.request.trim(), config, exec && exec.agent, callId)
-          // 2026-11-18：**模型白名单硬校验**。用户的「模型定位表」里写着
-          // 「不要使用非本表里面列出来的模型」，但指挥仍会给成员选表外的型号
-          // （实测选了 claude-sonnet-5-5，而表里只有 claude-fable-5-2 / claude-opus-5-5 等）。
-          // 只靠提示词约束不住，这里直接换回该框架的默认模型并记日志。
+          // 2026-11-18：**补员的模型必须由指挥自己选**，代码不替它挑。
+          // 指挥手上有「模型定位表」和「可用模型」清单，它比写死的 STAFF_MODELS 更懂该用哪个。
+          // 所以这里只做两件事：
+          //   ① 补员项没写 model → 直接拒绝（不静默套默认值，否则又会出现 sonnet-5）
+          //   ② 写的 model 不在白名单 → 拒绝，并把「可选清单」回给指挥让它重来
+          // 拒绝时不执行任何成员，避免「悄悄用了个你不让用的模型」。
           try {
             const allowed = allowedModelIds()
             if (allowed.length && Array.isArray(planned.staffing) && planned.staffing.length) {
+              const bad = []
               for (const item of planned.staffing) {
                 if (!item || typeof item !== 'object') continue
                 const want = String(item.model || '').trim()
-                if (!want || allowed.includes(want)) continue
-                const kind = String(item.kind || '').trim()
-                // fallback **必须从 allowed 里挑**：STAFF_MODELS[kind] 是代码里的写死默认值
-                // （claude 是 claude-sonnet-5），它自己也可能不在白名单里 ——
-                // 那样会把「违规模型」换成「另一个违规模型」（实测就是这个 bug）。
-                const picked = allowed.filter((id) => {
-                  if (kind === 'claude') return /^claude/i.test(id)
-                  if (kind === 'codex') return /^gpt-|^o\d/i.test(id)
-                  if (kind === 'deepseek') return /deepseek/i.test(id)
-                  if (kind === 'gemini') return /gemini/i.test(id)
-                  if (kind === 'image') return /image|banana/i.test(id)
-                  return false
-                })
-                const fallback = picked[0] || STAFF_MODELS[kind] || ''
-                if (fallback && allowed.includes(fallback)) {
-                  console.error('[council] model not in whitelist, fallback: ' + want + ' -> ' + fallback)
-                  item.model = fallback
-                } else {
-                  // 白名单里没有该框架可用的模型 → 不动它，只记一笔（总比静默换成违规模型好）
-                  console.error('[council] model not in whitelist and no same-kind fallback: ' + want)
+                const roleName = String(item.role || item.member || '')
+                if (!want) {
+                  bad.push(roleName + '：缺少 model（补员必须显式指定，不能交给默认值）')
+                  continue
                 }
+                if (!allowed.includes(want)) {
+                  bad.push(roleName + '：' + want + ' 不在可用模型里')
+                }
+              }
+              if (bad.length) {
+                assignments = []
+                response.ok = false
+                response.error = '指挥的补员方案不合规，已拒绝执行（没有创建任何成员）：\n'
+                  + bad.map((x) => '- ' + x).join('\n')
+                  + '\n\n可用模型：' + allowed.join('、')
+                  + '\n请按「模型定位表」的能力描述重新选型后重试。'
+                response.staffing = []
+                response.assignments = []
+                response.acceptanceStatus = 'none'
+                response.acceptanceNote = '派活被拒绝：补员模型不合规，没有执行任何成员，不是交付物'
+                break delegate
               }
             }
           } catch { /* 校验失败不影响派活 */ }
