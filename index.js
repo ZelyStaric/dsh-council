@@ -896,6 +896,26 @@ function deepTextOf(node, depth = 0) {
 }
 
 /** 从一块 stdout 里取最后一行有内容的东西（去 ANSI、截断）。 */
+/**
+ * 这段文本像不像 base64 / 二进制块？
+ *
+ * 2026-11-18：成员 tail 里出现过一长串
+ * `G8rSZTJ1kv2R0xH9+WUtYI9hxF9B/0Fh7ZkepJKMlok6lzPmnrapNfP3P205PlR7YLsgwRwbk4...`
+ * —— 那是 deepTextOf() 从 stream-json 的 content 块里挖出来的**图片/附件 base64**，
+ * 不是人能读的「正在干什么」。这类内容必须滤掉，否则卡片那行全是乱码。
+ *
+ * 判据偏保守（宁可漏判也别误杀正常文本）：
+ *   · 长度 ≥ 60
+ *   · 只有 base64 字符集（A-Za-z0-9+/=）
+ *   · 不含空格、中文、常见标点
+ */
+function looksLikeBinaryBlob(text) {
+  const t = String(text || '').trim()
+  if (t.length < 60) return false
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(t)) return false
+  return true
+}
+
 function lastLineOf(chunk) {
   try {
     const clean = String(chunk || '')
@@ -914,10 +934,14 @@ function lastLineOf(chunk) {
         try {
           const obj = JSON.parse(line)
           const t = deepTextOf(obj)
-          if (t && t.trim()) return t.replace(/\s+/g, ' ').trim().slice(0, 120)
+          // 2026-11-18：**过滤 base64 / 二进制块**，继续往前找可读文本。
+          if (t && t.trim() && !looksLikeBinaryBlob(t)) {
+            return t.replace(/\s+/g, ' ').trim().slice(0, 120)
+          }
         } catch { /* 半个 JSON（跨 chunk），跳过这一行 */ }
         continue
       }
+      if (looksLikeBinaryBlob(line)) continue
       return line.replace(/\s+/g, ' ').slice(0, 120)
     }
     return ''
