@@ -1127,6 +1127,8 @@ function configView(config, source) {
     memberIdleMinutes: memberIdleMinutes(config),
     memberMaxMinutes: memberMaxMinutes(config),
     imageTimeoutSeconds: imageTimeoutSeconds(config),
+    // 审核预算（秒），前端可读可改
+    reviewTimeoutSeconds: Math.round(reviewTimeoutMs(config) / 1000),
     // 验收冲突策略：any（默认，任一不通过即不通过）/ commander（以指挥终审为准）
     authoritativeReviewer: own.authoritativeReviewer === 'commander' ? 'commander' : 'any',
     // 2026-11-18：可用模型白名单（按 provider 分组勾选的结果）。
@@ -3497,13 +3499,34 @@ function appendPromptText(prompt, extra) {
   return prompt.concat([{ type: 'text', text: extra }])
 }
 
+/**
+ * 审核调用预算（毫秒）。默认 240 秒。
+ *
+ * 2026-11-18：原来是写死的 120_000，硬上限 +45s 宽限 = 165s。
+ * 用户实测：成员产出是「4 份 JSON + 一个 12273 行的 SVG」，审校真的要逐份读、
+ * 逐条比对，120 秒根本读不完 → 每次都「审核超时（165s，已放弃）」，
+ * 整条验收链路因此永远不通过。
+ *
+ * 审核是只读 + 判读，不像成员那样可能要渲染几十分钟，所以不需要无上限；
+ * 但也不能短到读不完产出。做成可配置（state.config.reviewTimeoutSeconds），
+ * 默认 240 秒，够读几万行文本。
+ */
+function reviewTimeoutMs(config) {
+  const own = (state && state.config) || {}
+  const raw = own.reviewTimeoutSeconds ?? (config && config.reviewTimeoutSeconds)
+  const sec = Number(raw)
+  if (Number.isFinite(sec) && sec > 0) return Math.round(sec * 1000)
+  return 240_000
+}
+
 async function runReviewTurn(ctx, member, prompt, config, group, styleOverride, parent, timeoutMs, callId, label) {
   const clean = () => Object.assign({}, member, { convId: undefined, __noResume: true })
   // ── 硬超时（2026-11-16 修）──
   // 实测审校卡了 346 秒：它 120 秒的预算只是往下传，seam 那条路没有真正设 timer，
   // 于是「子会话已结束但解析失败 → 重试 → 挂住」会无限等。这里在**外层**兜一道，
   // 到点直接当作「未判定」，保证审核链一定往前走。
-  const hardLimit = (Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000) + 45_000
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : reviewTimeoutMs(config)
+  const hardLimit = effectiveTimeout + 45_000
   const withHardLimit = (promise) => {
     let timer = null
     const guard = new Promise((resolve) => {
@@ -3686,7 +3709,7 @@ async function prelimReview(ctx, group, member, task, output, config, styleOverr
   // 审核位一律全新会话（不再复用 state.reviewChildren / __reviewConvId）：见 runReviewTurn。
   const { verdict } = await runReviewTurn(
     ctx, Object.assign({}, reviewer, { __preset: 'minimal', __noTools: true }),
-    prompt, config, group, undefined, parent, 120_000, callId, 'prelimReview',
+    prompt, config, group, undefined, parent, reviewTimeoutMs(config), callId, 'prelimReview',
   )
   verdict.by = reviewer.name
   return verdict
@@ -3714,7 +3737,7 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     ].join('\n')
     // 审核是旁路：不强制保留子会话，也不续接指挥自己的旧会话（见 runReviewTurn）。
     const { verdict } = await runReviewTurn(
-      ctx, commanderMember, imagePrompt, config, group, styleOverride, parent, 120_000, callId, 'commanderReview(image)',
+      ctx, commanderMember, imagePrompt, config, group, styleOverride, parent, reviewTimeoutMs(config), callId, 'commanderReview(image)',
     )
     verdict.by = commanderMember.name
     return verdict
@@ -3753,7 +3776,7 @@ async function commanderReview(ctx, group, member, task, output, config, parent,
     // 审核不强制保留子会话（`__reuse` 会让 keepChild 恒为 true，审核子会话就永久驻留）。
     const { verdict } = await runReviewTurn(
       ctx, Object.assign({}, commanderMember, { __preset: 'minimal', __noTools: true }),
-      prompt, config, group, undefined, parent, 120_000, callId, 'commanderReview',
+      prompt, config, group, undefined, parent, reviewTimeoutMs(config), callId, 'commanderReview',
     )
     verdict.by = commanderMember.name
     return verdict
@@ -5210,6 +5233,10 @@ export function createHandler(ctx, config = {}) {
               }
               if (body.imageTimeoutSeconds !== undefined && Number.isFinite(Number(body.imageTimeoutSeconds)) && Number(body.imageTimeoutSeconds) > 0) {
                 next.imageTimeoutSeconds = Number(body.imageTimeoutSeconds)
+              }
+              // 2026-11-18：审核预算（秒）。默认 240；产出很大时可以调大。
+              if (body.reviewTimeoutSeconds !== undefined && Number.isFinite(Number(body.reviewTimeoutSeconds)) && Number(body.reviewTimeoutSeconds) > 0) {
+                next.reviewTimeoutSeconds = Number(body.reviewTimeoutSeconds)
               }
               // 成员内存上限：> 0 生效；0 = 不限制
               if (body.memberMaxMemoryMb !== undefined && Number.isFinite(Number(body.memberMaxMemoryMb)) && Number(body.memberMaxMemoryMb) >= 0) {
